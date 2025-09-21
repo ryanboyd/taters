@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "taters"
+version = "0.1.0"
+authors = [{ name = "Ryan L. Boyd", email = "ryan@ryanboyd.io" }]
+description = "Analyze, process, and extract from many types of input data. Highly modular/customizable."
+
+# Make sure the filename matches your repo exactly (case-sensitive on Linux)
+readme = { file = "README.MD", content-type = "text/markdown" }
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+dependencies = [
+  # Core, minimal runtime for splitting, per-speaker builds, and embeddings
+  "faster-whisper>=1.1.0",
+  "transformers>=4.38.0",   # for WhisperFeatureExtractor
+  "librosa>=0.10.1",
+  "pydub>=0.25.1",
+  "contentcoder",
+  "archetyper",
+  "nltk",
+  "sentence-transformers",
+  # NOTE TO SELF:
+  # Do NOT list torch/torchaudio here;
+  # users must install the right CUDA wheel themselves
+]
+
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Topic :: Multimedia :: Sound/Audio :: Analysis",
+  "Intended Audience :: Science/Research",
+]
+
+[project.urls]
+Homepage = "https://github.com/ryanboyd/taters"
+Issues   = "https://github.com/ryanboyd/taters/issues"
+
+[project.optional-dependencies]
+# Full diarization pipeline (large downloads)
+diarization = [
+  "nemo-toolkit[asr]>=2.dev",
+]
+# User-space cuDNN libs for CUDA 12 (handy on many systems)
+cuda = [
+  "nvidia-cudnn-cu12",
+]
+
+[tool.setuptools]
+# Map top-level packages to the 'src' directory
+package-dir = {"" = "src"}
+include-package-data = true
+zip-safe = false
+
+
+# find packages
+packages = { find = { where = ["src"], include = ["taters*"] } }
+
+
+[tool.setuptools.package-data]
+# Because I vendored the diarizer repo under taters/audio/diarizer/whisper-diarization/
+"taters.diarizer" = ["whisper-diarization/**"]
+"taters.pipeline.presets" = ["*.yaml"]
+
+[project.scripts]
+# Entry points must target a callable, not __main__
+# Ensure extract_whisper_embeddings.py defines a `main()` (or `cli()`) function.
+taters-embeddings = "taters.extract_whisper_embeddings:main"

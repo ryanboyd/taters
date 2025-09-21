@@ -179,3 +179,15 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+
+# Other build tools, etc.
+*.bat
+install-instructions.txt
+
+
+# custom test script
+runme.py
+
+# other stuff to omit
+chopshop-big.png
