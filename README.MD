@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://github.com/ryanboyd/taters/blob/master/img/taters-small.png?raw=true" alt="Taters!"/>
+  <img src="https://github.com/ryanboyd/taters/blob/main/img/taters-small.png?raw=true" alt="Taters!"/>
 </p>
 
 
