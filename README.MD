@@ -3,7 +3,7 @@
 </p>
 
 
-# TATERS — Takes All Things, Extracts Relevant Stuff
+# TATERS: Takes All Things, Extracts Relevant Stuff
 
 Taters is a broad-scope toolkit for researchers that can be used to extract features from multiple types of data (video, audio, text) into clean, analysis-ready artifacts and features. Think of it as a small, dependable kitchen crew for your data: you bring potatoes (files), it handles the peeling, chopping, and plating.
 
