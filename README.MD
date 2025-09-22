@@ -17,7 +17,7 @@ Taters is **a library and a CLI** for end-to-end A/V + text processing with pred
 
 ---
 
-## What you can do with it (high level)
+### What you can do with it (high level)
 
 With Taters, the goal is to have relatively standard (and standardized) processing pipelines for different types of data commonly used (or increasingly used) in the computational social sciences. If you want to extract language features from text data, you can do that. If you want to take audio features, have them machine-transcribed, and *then* extract language features, you can do that too. If you have video files where you want to extract the audio, then transcribe it, and *then* extract time-stamped language features (e.g., sentence embeddings, dictionary-based coding, etc.)... you can do that too. In essence, the goal of taters is to take a lot of the tedious tasks that are common for getting from raw data to analysis-ready data and stitch them together to save everyone a huge amount of time, energy, and spare us all the learning curve that goes along with that — all while keeping the advanced/super-user abilities of these methods available to even the most hardcore nerds.
 
