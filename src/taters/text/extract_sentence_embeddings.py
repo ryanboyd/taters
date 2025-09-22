@@ -183,6 +183,7 @@ def analyze_with_sentence_embeddings(
         raise ImportError(
             "sentence-transformers is required. Install with `pip install sentence-transformers`."
         )
+    print(f"Loading sentence-transformer model: {model_name}")
     model = SentenceTransformer(model_name)
     dim = int(getattr(model, "get_sentence_embedding_dimension", lambda: 768)())
 
@@ -196,6 +197,7 @@ def analyze_with_sentence_embeddings(
         n = float(np.linalg.norm(v))
         return v if n < 1e-12 else (v / n)
 
+    print("Extracting embeddings...")
     with out_features_csv.open("w", newline="", encoding=encoding) as f:
         writer = csv.writer(f)
         writer.writerow(header)
