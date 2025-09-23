@@ -3,6 +3,7 @@ from typing import Optional, Literal, Union, Sequence, Iterable, Tuple
 import csv
 
 from .dictionary_analyzers import multi_archetype_analyzer as maa
+from ..helpers.find_files import find_files
 from ..helpers.text_gather import (
     csv_to_analysis_ready_csv,
     txt_folder_to_analysis_ready_csv,
@@ -102,13 +103,39 @@ def analyze_with_archetypes(
         return out_features_csv
 
 
-    # 2) Validate archetype CSVs
-    archetype_csvs = [Path(p) for p in archetype_csvs]
+    # 2) Resolve/validate archetype CSVs
+    # Allow passing either:
+    #   • one or more CSV files, or
+    #   • one or more directories containing CSVs (recursively).
+    #
+    # We lean on the shared find_files helper to avoid redundancy.
+    raw_sources = [Path(p) for p in archetype_csvs]
+    resolved: list[Path] = []
+
+    for src in raw_sources:
+        if src.is_dir():
+            # Use the helper to find all *.csv (recursive by default)
+            found = find_files(
+                root_dir=src,
+                kind="custom",
+                extensions=[".csv"],
+                recursive=True,
+            )
+            resolved.extend(Path(p) for p in found)
+        else:
+            resolved.append(src)
+
+    # De-dup and normalize
+    archetype_csvs = sorted({p.resolve() for p in resolved})
+
     if not archetype_csvs:
-        raise ValueError("archetype_csvs must contain at least one CSV file.")
+        raise ValueError(
+            "No archetype CSVs found. Pass one or more CSV files, or a directory containing CSV files with your archetypes."
+        )
     for p in archetype_csvs:
         if not p.exists():
             raise FileNotFoundError(f"Archetype CSV not found: {p}")
+
 
     # 3) Stream (text_id, text) → middle layer → features CSV
     def _iter_items_from_csv(path: Path, *, id_col: str = "text_id", text_col: str = "text") -> Iterable[Tuple[str, str]]:

@@ -3,6 +3,7 @@ from typing import Optional, Literal, Union, Sequence, Iterable, Tuple
 import csv
 
 from .dictionary_analyzers import multi_dict_analyzer as mda
+from ..helpers.find_files import find_files
 from ..helpers.text_gather import (
     csv_to_analysis_ready_csv,
     txt_folder_to_analysis_ready_csv,
@@ -20,7 +21,7 @@ def analyze_with_dictionaries(
     overwrite_existing: bool = False,  # if the file already exists, let's not overwrite by default
 
     # ----- Dictionaries -----
-    dict_paths: Sequence[Union[str, Path]],
+    dict_paths: Sequence[Union[str, Path]], # LIWC2007 (.dic) or LIWC-22 format (.dicx, .csv)
 
     # ====== SHARED I/O OPTIONS ======
     encoding: str = "utf-8-sig",
@@ -106,12 +107,39 @@ def analyze_with_dictionaries(
 
 
     # 2) Validate dictionaries
-    dict_paths = [Path(p) for p in dict_paths]
-    if not dict_paths:
-        raise ValueError("dict_paths must contain at least one dictionary file.")
-    for p in dict_paths:
-        if not p.exists():
-            raise FileNotFoundError(f"Dictionary not found: {p}")
+    def _expand_dict_inputs(paths):
+        out = []
+        seen = set()
+        for p in map(Path, paths):
+            if p.is_dir():
+                # Find .dic/.dicx/.csv under this folder (recursive), stable order
+                found = find_files(
+                    root_dir=p,
+                    extensions=[".dic", ".dicx", ".csv"],
+                    recursive=True,
+                    absolute=True,
+                    sort=True,
+                )
+                for f in found:
+                    fp = Path(f).resolve()
+                    if fp.suffix.lower().lstrip(".") in {"dic", "dicx", "csv"}:
+                        if fp not in seen:
+                            out.append(fp)
+                            seen.add(fp)
+            else:
+                if not p.exists():
+                    raise FileNotFoundError(f"Dictionary path not found: {p}")
+                fp = p.resolve()
+                if fp.suffix.lower().lstrip(".") not in {"dic", "dicx", "csv"}:
+                    raise ValueError(f"Unsupported dictionary extension: {fp.name}")
+                if fp not in seen:
+                    out.append(fp)
+                    seen.add(fp)
+        if not out:
+            raise ValueError("No dictionary files found. Supply .dic/.dicx/.csv files or folders containing them.")
+        return out
+
+    dict_paths = _expand_dict_inputs(dict_paths)
 
     # 3) Stream the analysis-ready CSV into the analyzer → features CSV
     def _iter_items_from_csv(

@@ -29,13 +29,10 @@ vars:
 
   # Dictionaries & Archetypes to run
   dict_paths:
-    - dictionaries/liwc/agitationdejection-dictionary.dicx
-    - dictionaries/liwc/empath-default-dictionary.dicx
-    - dictionaries/liwc/LIWC-22 Dictionary (2022-01-27).dicx
+    - dictionaries/liwc/
 
   archetype_csvs:
-    - dictionaries/archetypes/Suicidality.csv
-    - dictionaries/archetypes/Resilience.csv
+    - dictionaries/archetypes/
 
   # Sentence-Transformers model used for archetypes & sentence embeddings
   nlp_model: sentence-transformers/all-roberta-large-v1
