@@ -32,10 +32,6 @@ from typing import Any, Dict, List, Tuple
 
 import yaml
 
-# Taters entrypoint
-from taters.Taters import Taters
-
-
 # ============== JSON-safe casting ==============
 
 def _json_safe(obj: Any) -> Any:
@@ -276,82 +272,112 @@ def run_global_step(
 # ============== Main ==============
 
 def main():
+    # ---------------------------
+    # CLI
+    # ---------------------------
     ap = argparse.ArgumentParser(description="Taters Pipeline Runner (robust templating + flexible calls)")
-    ap.add_argument("--root_dir", required=True, help="Folder to scan for inputs")
-    ap.add_argument("--file_type", default="any", choices=["audio", "video", "any"], help="Input type filter")
+    ap.add_argument("--root_dir", default=None, help="Folder to scan for inputs (required only if preset has ITEM steps)")
+    ap.add_argument("--file_type", default="any", choices=["audio", "video", "any"], help="Input type filter for discovery")
     group = ap.add_mutually_exclusive_group(required=True)
     group.add_argument("--preset", help="Preset name (taters/pipelines/presets/<name>.yaml)")
-    group.add_argument("--preset-file", help="Path to preset YAML")
-    ap.add_argument("--vars-file", help="YAML overrides for 'vars'")
+    group.add_argument("--preset-file", dest="preset_file", help="Path to preset YAML")
+    ap.add_argument("--vars-file", dest="vars_file", help="YAML file with 'vars' overrides")
     ap.add_argument("--var", action="append", default=[], help="Single override key=value (repeatable)")
     ap.add_argument("--workers", type=int, default=4, help="Concurrency for ITEM steps")
-    ap.add_argument("--out-manifest", default=None, help="Output run manifest (JSON). Default: ./run_manifest.json")
+    ap.add_argument("--out-manifest", dest="out_manifest", default=None,
+                    help="Run manifest (JSON). Default: ./run_manifest.json")
     args = ap.parse_args()
 
-    root_dir = Path(args.root_dir)
-    inputs = discover_inputs(root_dir, args.file_type)
-    print(f"[pipeline] Found {len(inputs)} '{args.file_type}' input(s) under {root_dir}")
-    if not inputs:
-        return
-
+    # ---------------------------
+    # Load preset and vars first
+    # ---------------------------
     preset = load_preset_by_name(args.preset) if args.preset else load_yaml_file(Path(args.preset_file))
-    steps: List[dict] = preset.get("steps", [])
+    steps: List[dict] = preset.get("steps", []) or []
     if not steps:
         raise ValueError("Preset has no steps")
 
-    vars_ctx = dict(preset.get("vars", {}))
+    vars_ctx: Dict[str, Any] = dict(preset.get("vars", {}) or {})
     if args.vars_file:
         vars_ctx = merge_vars(vars_ctx, load_yaml_file(Path(args.vars_file)))
     vars_ctx = merge_vars(vars_ctx, parse_var_overrides(args.var))
 
-    manifest: dict = {
+    # ---------------------------
+    # Decide if discovery is needed
+    # ---------------------------
+    has_item_steps = any((step.get("scope", "item") == "item") for step in steps)
+
+    inputs: List[Path] = []
+    root_dir: Path | None = None
+    if has_item_steps:
+        if not args.root_dir:
+            raise ValueError("--root_dir is required because this preset contains ITEM-scoped steps.")
+        root_dir = Path(args.root_dir).resolve()
+        inputs = discover_inputs(root_dir, args.file_type)
+        print(f"[pipeline] Found {len(inputs)} '{args.file_type}' input(s) under {root_dir}")
+        if not inputs:
+            print("[pipeline] No inputs found; ITEM steps will be skipped.")
+    else:
+        print("[pipeline] Preset has only GLOBAL steps; skipping input discovery.")
+
+    # ---------------------------
+    # Build manifest skeleton
+    # ---------------------------
+    manifest: Dict[str, Any] = {
         "preset": args.preset or str(args.preset_file),
-        "root_dir": str(root_dir),
-        "file_type": args.file_type,
+        "root_dir": str(root_dir) if root_dir else None,
+        "file_type": args.file_type if has_item_steps else None,
         "vars": _json_safe(vars_ctx),
         "items": [{"input": str(p), "artifacts": {}, "status": "pending", "errors": []} for p in inputs],
-        "globals": {}
+        "globals": {},
+        "errors": [],
     }
     out_manifest_path = Path(args.out_manifest or (Path.cwd() / "run_manifest.json"))
 
+    # Create a single Taters instance for the whole run (correct class import)
+    from taters.Taters import Taters  # ← IMPORTANT: import the class, not the module
     potato = Taters()
     globals_ctx: Dict[str, Any] = {}
 
+    # ---------------------------
+    # Execute steps
+    # ---------------------------
     for idx, step in enumerate(steps, 1):
         scope = step.get("scope", "item")
-        print(f"[pipeline] Step {idx}/{len(steps)}: {step.get('call')}  (scope={scope})")
+        call_name = step.get("call")
+        print(f"[pipeline] Step {idx}/{len(steps)}: {call_name}  (scope={scope})")
 
         if scope == "item":
-            # Per-step overrides
-            step_engine = step.get("engine", "thread")     # "thread" (default) or "process"
-            step_workers = int(step.get("workers", args.workers))
-            step_workers = max(1, step_workers)
+            if not inputs:
+                print(f"[pipeline] No inputs; skipping ITEM step: {call_name}")
+                continue
+
+            step_engine = step.get("engine", "thread")  # "thread" (default) or "process"
+            step_workers = max(1, int(step.get("workers", args.workers)))
 
             def _run_one(ix_and_path: Tuple[int, Path]):
                 i, p = ix_and_path
                 itm = manifest["items"][i]
-                return (i, *run_item_step_for_one_input(
-                    step=step, input_path=p, potato=potato,
-                    item_artifacts=itm["artifacts"], globals_ctx=globals_ctx, vars_ctx=vars_ctx
-                ))
+                status, new_artifacts, err = run_item_step_for_one_input(
+                    step=step,
+                    input_path=p,
+                    potato=potato,
+                    item_artifacts=itm["artifacts"],
+                    globals_ctx=globals_ctx,
+                    vars_ctx=vars_ctx,
+                )
+                return i, status, new_artifacts, err
 
             results: List[Tuple[int, str, Dict[str, Any], Dict[str, Any]]] = []
-
-            # Choose executor backend per step
-            ExecutorCls = cf.ProcessPoolExecutor if step_engine == "process" else cf.ThreadPoolExecutor
-
-            # Important: keep a *single* pool for this step, so workers persist across items.
-            # That way, heavyweight libs are imported once per worker process.
-            with ExecutorCls(max_workers=step_workers) as pool:
+            Executor = cf.ProcessPoolExecutor if step_engine == "process" else cf.ThreadPoolExecutor
+            with Executor(max_workers=step_workers) as pool:
                 futures = [pool.submit(_run_one, (i, p)) for i, p in enumerate(inputs)]
                 for fut in cf.as_completed(futures):
                     results.append(fut.result())
 
-
             for i, status, new_artifacts, err in results:
                 itm = manifest["items"][i]
                 if status == "ok":
-                    for k, v in new_artifacts.items():
+                    for k, v in (new_artifacts or {}).items():
                         itm["artifacts"][k] = _json_safe(v)
                     if itm["status"] != "error":
                         itm["status"] = "ok"
@@ -361,24 +387,29 @@ def main():
 
         elif scope == "global":
             status, new_globals, err = run_global_step(
-                step=step, potato=potato, globals_ctx=globals_ctx, vars_ctx=vars_ctx, manifest_path=out_manifest_path
+                step=step,
+                potato=potato,
+                globals_ctx=globals_ctx,
+                vars_ctx=vars_ctx,
+                manifest_path=out_manifest_path,
             )
             if status != "ok":
                 print(f"[pipeline] GLOBAL step failed: {err.get('error')}")
+                manifest["errors"].append(err.get("error", "unknown error"))
                 break
-            for k, v in new_globals.items():
+            for k, v in (new_globals or {}).items():
                 globals_ctx[k] = v
                 manifest["globals"][k] = _json_safe(v)
 
         else:
             raise ValueError(f"Invalid scope: {scope}")
 
+        # Persist manifest after each step
         out_manifest_path.parent.mkdir(parents=True, exist_ok=True)
         with out_manifest_path.open("w", encoding="utf-8") as f:
             json.dump(_json_safe(manifest), f, indent=2, ensure_ascii=False)
 
     print(f"[pipeline] Manifest written to: {out_manifest_path}")
-
 
 if __name__ == "__main__":
     main()

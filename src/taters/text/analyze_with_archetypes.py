@@ -109,24 +109,27 @@ def analyze_with_archetypes(
     #   • one or more directories containing CSVs (recursively).
     #
     # We lean on the shared find_files helper to avoid redundancy.
-    raw_sources = [Path(p) for p in archetype_csvs]
-    resolved: list[Path] = []
 
-    for src in raw_sources:
-        if src.is_dir():
-            # Use the helper to find all *.csv (recursive by default)
+    # 2) Resolve/validate archetype CSVs
+    resolved_archetype_csvs: list[Path] = []
+
+    for src in archetype_csvs:
+        src_path = Path(src)
+        if src_path.is_dir():
+            # find all *.csv under this folder (recursive)
             found = find_files(
-                root_dir=src,
-                kind="custom",
+                root_dir=src_path,
                 extensions=[".csv"],
                 recursive=True,
+                absolute=True,
+                sort=True,
             )
-            resolved.extend(Path(p) for p in found)
+            resolved_archetype_csvs.extend(Path(f) for f in found)
         else:
-            resolved.append(src)
+            resolved_archetype_csvs.append(src_path)
 
-    # De-dup and normalize
-    archetype_csvs = sorted({p.resolve() for p in resolved})
+    # De-dup, normalize, and sort
+    archetype_csvs = sorted({p.resolve() for p in resolved_archetype_csvs})
 
     if not archetype_csvs:
         raise ValueError(
@@ -135,6 +138,7 @@ def analyze_with_archetypes(
     for p in archetype_csvs:
         if not p.exists():
             raise FileNotFoundError(f"Archetype CSV not found: {p}")
+
 
 
     # 3) Stream (text_id, text) → middle layer → features CSV

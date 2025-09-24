@@ -109,6 +109,6 @@ class _HelpersAPI:
         return _forward(find_files, kwargs)
     
     def feature_gather(self, **kwargs):
-        from .helpers import feature_gather
-        return _forward(feature_gather, kwargs)
+        from .helpers.feature_gather import gather_csvs_to_one
+        return _forward(gather_csvs_to_one, kwargs)
     
