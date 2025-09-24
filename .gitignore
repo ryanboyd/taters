@@ -191,3 +191,5 @@ runme.py
 
 # other stuff to omit
 taters.png
+docs/
+mkdocs.yml

@@ -185,47 +185,46 @@ steps:
 # ------------------------------------------------------------
 # GLOBAL: Gather/aggregate features across all processed files
 # ------------------------------------------------------------
-global:
 
-  # 1) Gather DICTIONARY features into one CSV (no aggregation)
-  - name: gather_dictionary_features
-    call: potato.helpers.feature_gather.gather_csvs_to_one
+  # Global steps — Gather features!
+
+  # ---------- DICTIONARY (concat only) ----------
+  - call: potato.helpers.feature_gather
+    scope: global
     with:
       root_dir: "features/dictionary"
-      # default output → features/dictionary.csv
+      # no out_csv -> defaults to "<root_dir>.csv"
+      aggregate: false
       overwrite_existing: "{{var:overwrite_existing}}"
+    save_as: dict_merged
 
-  # 2) Gather ARCHETYPE features into one CSV (no aggregation)
-  - name: gather_archetype_features
-    call: potato.helpers.feature_gather.gather_csvs_to_one
+  # ---------- ARCHETYPES (concat only) ----------
+  - call: potato.helpers.feature_gather
+    scope: global
     with:
       root_dir: "features/archetypes"
-      # default output → features/archetypes.csv
+      aggregate: false
       overwrite_existing: "{{var:overwrite_existing}}"
+    save_as: archetypes_merged
 
-  # 3) Aggregate WHISPER EMBEDDINGS by speaker (mean, std)
-  #    - Per-file grouping prevents mixing identical speaker labels across different inputs.
-  #    - Exclude time columns so they don't get averaged.
-  - name: aggregate_whisper_embeddings_by_speaker
-    call: potato.helpers.feature_gather.aggregate_features
-    with:
-      root_dir: "features/whisper-embeddings"
-      # default output → features/whisper-embeddings.csv
-      group_by: ["speaker"]
-      per_file: true
-      stats: ["mean", "std"]
-      exclude_cols: ["start_time", "end_time"]
-      overwrite_existing: "{{var:overwrite_existing}}"
-
-  # 4) Aggregate SENTENCE EMBEDDINGS by speaker (mean, std)
-  #    - If your sentence-embeddings CSVs don’t have a 'speaker' column,
-  #      change group_by or add it upstream in extraction.
-  - name: aggregate_sentence_embeddings_by_speaker
-    call: potato.helpers.feature_gather.aggregate_features
+  # ---------- SENTENCE EMBEDDINGS (aggregate per file by speaker) ----------
+  - call: potato.helpers.feature_gather
+    scope: global
     with:
       root_dir: "features/sentence-embeddings"
-      # default output → features/sentence-embeddings.csv
+      aggregate: false
+      overwrite_existing: "{{var:overwrite_existing}}"
+    save_as: sent_emb_merged
+
+  # ---------- WHISPER EMBEDDINGS (aggregate per file by speaker) ----------
+  - call: potato.helpers.feature_gather
+    scope: global
+    with:
+      root_dir: "features/whisper-embeddings"
+      aggregate: true
       group_by: ["speaker"]
       per_file: true
-      stats: ["mean", "std"]
+      stats: ["mean"]
+      exclude_cols: ["start_time", "end_time"]           # whisper segment CSVs have times; drop before stats
       overwrite_existing: "{{var:overwrite_existing}}"
+    save_as: whisper_emb_merged

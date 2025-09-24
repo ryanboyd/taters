@@ -45,10 +45,11 @@ def _read_csv_add_source(
     delimiter: str = ",",
     encoding: str = "utf-8-sig",
     add_source_path: bool = False,
+    # kept for backward compat but unused in layout now
     source_col_stem: str = "source_stem",
     source_col_path: str = "source_path",
 ) -> pd.DataFrame:
-    """Read a CSV and add columns identifying its origin."""
+    """Read a CSV and add origin columns, with 'source' inserted first."""
     # Robust CSV field size (giant text cells)
     try:
         csv.field_size_limit(sys.maxsize)
@@ -56,10 +57,118 @@ def _read_csv_add_source(
         csv.field_size_limit(2**31 - 1)
 
     df = pd.read_csv(path, dtype="object", sep=delimiter, encoding=encoding)
-    df[source_col_stem] = path.stem
+
+    # New canonical name & position
+    df.insert(0, "source", path.stem)
+
+    # Optional full path just after source
     if add_source_path:
-        df[source_col_path] = str(path.resolve())
+        df.insert(1, "source_path", str(path.resolve()))
+
+    # (Optional backwards compatibility columns—uncomment if other code relies on them)
+    # df["source_stem"] = path.stem
+
     return df
+
+
+# ---------------------------------
+# Figure out what we're going to do
+# ---------------------------------
+
+def make_plan(
+    *,
+    group_by: Sequence[str],
+    per_file: bool = True,
+    stats: Sequence[str] = ("mean", "std"),
+    exclude_cols: Sequence[str] = (),
+    include_regex: Optional[str] = None,
+    exclude_regex: Optional[str] = None,
+    dropna: bool = True,
+) -> AggregationPlan:
+    """Convenience factory for AggregationPlan."""
+    return AggregationPlan(
+        group_by=tuple(group_by),
+        per_file=per_file,
+        stats=tuple(stats),
+        exclude_cols=tuple(exclude_cols),
+        include_regex=include_regex,
+        exclude_regex=exclude_regex,
+        dropna=dropna,
+    )
+
+
+# -----------------------------------------------------
+# Gather features sub-functions, abstracted and unified
+# -----------------------------------------------------
+
+def feature_gather(
+    *,
+    root_dir: PathLike,
+    pattern: str = "*.csv",
+    recursive: bool = True,
+    delimiter: str = ",",
+    encoding: str = "utf-8-sig",
+    add_source_path: bool = False,
+    # toggle aggregation; when True you must pass a plan (or plan_args below)
+    aggregate: bool = False,
+    plan: Optional[AggregationPlan] = None,
+    # optional “quick plan” args (only used if plan=None and aggregate=True)
+    group_by: Optional[Sequence[str]] = None,
+    per_file: bool = True,
+    stats: Sequence[str] = ("mean", "std"),
+    exclude_cols: Sequence[str] = (),
+    include_regex: Optional[str] = None,
+    exclude_regex: Optional[str] = None,
+    dropna: bool = True,
+    # output
+    out_csv: Optional[PathLike] = None,
+    overwrite_existing: bool = False,
+) -> Path:
+    """
+    Single entry point:
+      - aggregate=False → concatenate CSVs into one (adds source_stem/_path).
+      - aggregate=True  → aggregate numeric columns per AggregationPlan.
+
+    If aggregate=True and no 'plan' is provided, a plan is constructed from
+    the *quick plan* args above (group_by, per_file, stats, …).
+    """
+    if not aggregate:
+        return gather_csvs_to_one(
+            root_dir=root_dir,
+            pattern=pattern,
+            recursive=recursive,
+            delimiter=delimiter,
+            encoding=encoding,
+            add_source_path=add_source_path,
+            out_csv=out_csv,
+            overwrite_existing=overwrite_existing,
+        )
+
+    # aggregate=True
+    if plan is None:
+        if not group_by:
+            raise ValueError("When aggregate=True, you must provide 'plan' or 'group_by'.")
+        plan = make_plan(
+            group_by=group_by,
+            per_file=per_file,
+            stats=stats,
+            exclude_cols=exclude_cols,
+            include_regex=include_regex,
+            exclude_regex=exclude_regex,
+            dropna=dropna,
+        )
+
+    return aggregate_features(
+        root_dir=root_dir,
+        pattern=pattern,
+        recursive=recursive,
+        delimiter=delimiter,
+        encoding=encoding,
+        add_source_path=add_source_path,
+        plan=plan,
+        out_csv=out_csv,
+        overwrite_existing=overwrite_existing,
+    )
 
 
 def gather_csvs_to_one(
@@ -114,6 +223,14 @@ def gather_csvs_to_one(
         raise RuntimeError("No CSVs could be read successfully.")
 
     merged = pd.concat(frames, axis=0, ignore_index=True)
+
+    # Ensure 'source' is first (and 'source_path' next if present)
+    cols = list(merged.columns)
+    if "source" in cols:
+        lead = ["source"] + (["source_path"] if "source_path" in cols else [])
+        rest = [c for c in cols if c not in lead]
+        merged = merged[lead + rest]
+
     merged.to_csv(out_csv, index=False, encoding=encoding)
     return out_csv
 
@@ -229,9 +346,9 @@ def aggregate_features(
     # Build group keys
     group_keys = list(plan.group_by)
     if plan.per_file:
-        if "source_stem" not in df_f.columns:
-            raise ValueError("source_stem column is missing; cannot group per_file.")
-        group_keys = ["source_stem"] + group_keys
+        if "source" not in df_f.columns:
+            raise ValueError("source column is missing; cannot group per_file.")
+        group_keys = ["source"] + group_keys
 
     if plan.dropna:
         df_f = df_f.dropna(subset=[k for k in group_keys if k in df_f.columns], how="any")
@@ -253,9 +370,15 @@ def aggregate_features(
     agg_ops = {c: list(plan.stats) for c in numeric_df.columns}
     grouped = gdf.groupby(group_keys, dropna=False).agg(agg_ops)
 
-    # Flatten MultiIndex columns: "<col>__<stat>"
+    # Flatten MultiIndex columns and order 'source' first
     grouped.columns = [f"{c}__{stat}" for (c, stat) in grouped.columns]
     grouped = grouped.reset_index()
+
+    # Ensure 'source' (and 'source_path' if present) lead the output
+    cols = list(grouped.columns)
+    lead = [c for c in ("source", "source_path") if c in cols]
+    rest = [c for c in cols if c not in lead]
+    grouped = grouped[lead + rest]
 
     grouped.to_csv(out_csv, index=False, encoding=encoding)
     return out_csv
@@ -272,7 +395,7 @@ def _build_parser():
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    # gather
+    # existing: gather
     g = sub.add_parser("gather", help="Concatenate CSVs with source metadata.")
     g.add_argument("--root_dir", required=True, help="Root folder (or a single CSV file)")
     g.add_argument("--pattern", default="*.csv")
@@ -283,7 +406,7 @@ def _build_parser():
     g.add_argument("--out-csv", default=None)
     g.add_argument("--overwrite-existing", action="store_true", default=False)
 
-    # aggregate
+    # existing: aggregate
     a = sub.add_parser("aggregate", help="Aggregate numeric columns by keys.")
     a.add_argument("--root_dir", required=True)
     a.add_argument("--pattern", default="*.csv")
@@ -299,6 +422,24 @@ def _build_parser():
     a.add_argument("--exclude-regex", default=None)
     a.add_argument("--out-csv", default=None)
     a.add_argument("--overwrite-existing", action="store_true", default=False)
+
+    # new: run (single entry; toggle aggregation with a flag)
+    r = sub.add_parser("run", help="Single entry: concat or aggregate depending on --aggregate.")
+    r.add_argument("--root_dir", required=True)
+    r.add_argument("--pattern", default="*.csv")
+    r.add_argument("--no-recursive", action="store_true")
+    r.add_argument("--delimiter", default=",")
+    r.add_argument("--encoding", default="utf-8-sig")
+    r.add_argument("--add-source-path", action="store_true")
+    r.add_argument("--aggregate", action="store_true", help="Enable aggregation mode")
+    r.add_argument("--group-by", nargs="+", help="Keys for aggregation (required if --aggregate)")
+    r.add_argument("--per-file", action="store_true", help="Group per file via source_stem")
+    r.add_argument("--stats", nargs="+", default=["mean", "std"])
+    r.add_argument("--exclude-cols", nargs="*", default=[], help="Columns to drop before aggregation")
+    r.add_argument("--include-regex", default=None)
+    r.add_argument("--exclude-regex", default=None)
+    r.add_argument("--out-csv", default=None)
+    r.add_argument("--overwrite-existing", action="store_true", default=False)
 
     return p
 
@@ -343,6 +484,28 @@ def main():
         )
         print(str(out))
         return
+
+    if args.cmd == "run":
+        out = feature_gather(
+            root_dir=args.root_dir,
+            pattern=args.pattern,
+            recursive=not args.no_recursive,
+            delimiter=args.delimiter,
+            encoding=args.encoding,
+            add_source_path=args.add_source_path,
+            aggregate=args.aggregate,
+            group_by=args.group_by,          # may be None if aggregate=False
+            per_file=args.per_file,
+            stats=tuple(args.stats),
+            exclude_cols=tuple(args.exclude_cols or []),
+            include_regex=args.include_regex,
+            exclude_regex=args.exclude_regex,
+            out_csv=args.out_csv,
+            overwrite_existing=args.overwrite_existing,
+        )
+        print(str(out))
+        return
+
 
 
 if __name__ == "__main__":
