@@ -2,14 +2,10 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import Iterable, List, Optional, Literal, Union
 import argparse
 import csv
-import html
-import io
 import re
-import sys
-import textwrap
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -293,6 +289,51 @@ def render_to_vtt(segs: Iterable[SubtitleSegment], out_path: Union[str, Path]) -
 
 
 # ---------------------------------------------------------------------------
+# Primary Function
+# ---------------------------------------------------------------------------
+
+def convert_subtitles(
+    *,
+    input: Union[str, Path],
+    to: Literal["csv", "srt", "vtt"],
+    output: Optional[Union[str, Path]] = None,
+    encoding: Optional[str] = None,
+    include_name: bool = False,
+) -> Path:
+    """
+    Programmatic API that mirrors the CLI behavior.
+
+    Args:
+        input: Path to input .srt or .vtt file.
+        to: Output format: "csv", "srt", or "vtt".
+        output: Optional explicit output path. If None, defaults to
+                ./features/subtitles/<input_stem>.<ext>
+        encoding: Optional forced input encoding. If None, tries chardet then utf-8.
+        include_name: Include 'name' column in CSV (if available).
+
+    Returns:
+        Path to the written output file.
+    """
+    in_path = Path(input).resolve()
+    segs = parse_subtitles(in_path, encoding=encoding)
+
+    # Default output location if not provided
+    if output is not None:
+        out_path = Path(output)
+    else:
+        out_dir = _default_out_dir()
+        ext = {"csv": ".csv", "srt": ".srt", "vtt": ".vtt"}[to]
+        out_path = out_dir / f"{in_path.stem}{ext}"
+
+    # Render
+    if to == "csv":
+        return render_to_csv(segs, out_path, include_name=include_name)
+    elif to == "srt":
+        return render_to_srt(segs, out_path)
+    else:  # "vtt"
+        return render_to_vtt(segs, out_path)
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -310,26 +351,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 def main():
     args = _build_arg_parser().parse_args()
-    in_path = Path(args.input).resolve()
-    segs = parse_subtitles(in_path, encoding=args.encoding)
+    out = convert_subtitles(
+        input=args.input,
+        to=args.to,
+        output=args.output,
+        encoding=args.encoding,
+        include_name=args.include_name,
+    )
+    print(str(out))
 
-    # Default output location if not provided
-    if args.output:
-        out_path = Path(args.output)
-    else:
-        out_dir = _default_out_dir()
-        ext = {"csv": ".csv", "srt": ".srt", "vtt": ".vtt"}[args.to]
-        out_path = out_dir / f"{in_path.stem}{ext}"
-
-    # Render
-    if args.to == "csv":
-        path = render_to_csv(segs, out_path, include_name=args.include_name)
-    elif args.to == "srt":
-        path = render_to_srt(segs, out_path)
-    else:
-        path = render_to_vtt(segs, out_path)
-
-    print(str(path))
 
 if __name__ == "__main__":
     main()

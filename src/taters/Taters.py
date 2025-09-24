@@ -37,6 +37,7 @@ class Taters:
     def analyze_with_dictionaries(self, **kwargs):              return self.text.analyze_with_dictionaries(**kwargs)
     def analyze_with_archetypes(self, **kwargs):                return self.text.analyze_with_archetypes(**kwargs)
     def extract_sentence_embeddings(self, **kwargs):            return self.text.extract_sentence_embeddings(**kwargs)
+    def convert_subtitles(self, **kwargs):                       return self.text.convert_subtitles(**kwargs)
     
     # helpers
     def txt_folder_to_analysis_ready_csv(self, **kwargs):       return self.helpers.txt_folder_to_analysis_ready_csv(**kwargs)
@@ -45,13 +46,7 @@ class Taters:
     def feature_gather(self, **kwargs):                         return self.helpers.feature_gather(**kwargs)
     
 
-    def txt_folder_to_analysis_ready_csv(self, **kwargs):
-        from .helpers.text_gather import txt_folder_to_analysis_ready_csv
-        return _forward(txt_folder_to_analysis_ready_csv, kwargs)
-    
-    def csv_to_analysis_ready_csv(self, **kwargs):
-        from .helpers.text_gather import csv_to_analysis_ready_csv
-        return _forward(csv_to_analysis_ready_csv, kwargs)
+
 
 
 class _AudioAPI:
@@ -92,6 +87,10 @@ class _TextAPI:
     def extract_sentence_embeddings(self, **kwargs):
         from .text.extract_sentence_embeddings import analyze_with_sentence_embeddings
         return _forward(analyze_with_sentence_embeddings, kwargs)
+    
+    def convert_subtitles(self, **kwargs):
+        from .text.subtitle_parser import convert_subtitles
+        return _forward(convert_subtitles, kwargs)
 
 
 class _HelpersAPI:
