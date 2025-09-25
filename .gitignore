@@ -145,6 +145,8 @@ venv.bak/
 
 # mkdocs documentation
 /site
+/docs
+mkdocs.yml
 
 # mypy
 .mypy_cache/
@@ -191,5 +193,3 @@ runme.py
 
 # other stuff to omit
 taters.png
-docs/
-mkdocs.yml

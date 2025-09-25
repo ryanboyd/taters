@@ -50,10 +50,108 @@ def analyze_with_archetypes(
     rounding: int = 4,
 ) -> Path:
     """
-    Build/accept an analysis-ready CSV (columns: text_id,text) and compute archetype scores
-    via multi_archetype_analyzer, writing one wide CSV:
-      text_id, WC, <fileprefix>__<ArchetypeName>, ...
+    Compute archetype scores for text rows and write a wide, analysis-ready features CSV.
+
+    This function supports three input modes:
+
+    1. ``analysis_csv`` — Use a prebuilt CSV with exactly two columns: ``text_id`` and ``text``.
+    2. ``csv_path`` — Gather text from an arbitrary CSV by specifying ``text_cols`` (and optionally
+    ``id_cols`` and ``group_by``) to construct an analysis-ready CSV on the fly.
+    3. ``txt_dir`` — Gather text from a folder of ``.txt`` files.
+
+    Archetype scoring is delegated to a middle layer that embeds text with a Sentence-Transformers
+    model and evaluates cosine similarity to one or more archetype CSVs. If ``out_features_csv`` is
+    omitted, the default path is ``./features/archetypes/<analysis_ready_filename>``.
+
+    Parameters
+    ----------
+    csv_path : str or pathlib.Path, optional
+        Source CSV for gathering. Mutually exclusive with ``txt_dir`` and ``analysis_csv``.
+    txt_dir : str or pathlib.Path, optional
+        Folder of ``.txt`` files to gather from. Mutually exclusive with the other input modes.
+    analysis_csv : str or pathlib.Path, optional
+        Precomputed analysis-ready CSV containing exactly the columns ``text_id`` and ``text``.
+    out_features_csv : str or pathlib.Path, optional
+        Output path for the features CSV. If ``None``, defaults to
+        ``./features/archetypes/<analysis_ready_filename>``.
+    overwrite_existing : bool, default=False
+        If ``False`` and the output file already exists, skip recomputation and return the existing path.
+    archetype_csvs : Sequence[str or pathlib.Path]
+        One or more archetype CSVs (name → seed phrases). Directories are allowed and expanded
+        recursively to all ``.csv`` files.
+    encoding : str, default="utf-8-sig"
+        Text encoding for CSV I/O.
+    delimiter : str, default=","
+        Field delimiter for CSV I/O.
+    text_cols : Sequence[str], default=("text",)
+        When gathering from a CSV: column(s) that contain text. Used only if ``csv_path`` is provided.
+    id_cols : Sequence[str], optional
+        When gathering from a CSV: optional ID columns to carry into grouping (e.g., ``["speaker"]``).
+    mode : {"concat", "separate"}, default="concat"
+        Gathering behavior when multiple ``text_cols`` are provided. ``"concat"`` joins into a single
+        text field; ``"separate"`` creates one row per text column.
+    group_by : Sequence[str], optional
+        Optional grouping keys used during gathering (e.g., ``["speaker"]``). In ``"concat"`` mode,
+        members are concatenated into one row per group.
+    joiner : str, default=" "
+        Separator used when concatenating multiple text chunks.
+    num_buckets : int, default=512
+        Number of temporary hash buckets used for scalable CSV gathering.
+    max_open_bucket_files : int, default=64
+        Maximum number of bucket files to keep open concurrently during gathering.
+    tmp_root : str or pathlib.Path, optional
+        Root directory for temporary files used by gathering.
+    recursive : bool, default=True
+        When gathering from a text folder, whether to recurse into subdirectories.
+    pattern : str, default="*.txt"
+        Filename glob used when gathering from a text folder.
+    id_from : {"stem", "name", "path"}, default="stem"
+        How to derive the ``text_id`` when gathering from a text folder.
+    include_source_path : bool, default=True
+        Whether to include the absolute source path as an additional column when gathering from a text folder.
+    model_name : str, default="sentence-transformers/all-roberta-large-v1"
+        Sentence-Transformers model used to embed text for archetype scoring.
+    mean_center_vectors : bool, default=True
+        If ``True``, mean-center embedding vectors prior to scoring.
+    fisher_z_transform : bool, default=False
+        If ``True``, apply the Fisher z-transform to correlations.
+    rounding : int, default=4
+        Number of decimal places to round numeric outputs. Use ``None`` to disable rounding.
+
+    Returns
+    -------
+    pathlib.Path
+        Path to the written features CSV.
+
+    Raises
+    ------
+    FileNotFoundError
+        If an input file or folder does not exist, or an archetype CSV path is invalid.
+    ValueError
+        If required arguments are incompatible or missing (e.g., no input mode chosen),
+        or if the analysis-ready CSV lacks ``text_id``/``text`` columns.
+
+    Examples
+    --------
+    Run on a transcript CSV, grouped by speaker:
+
+    >>> analyze_with_archetypes(
+    ...     csv_path="transcripts/session.csv",
+    ...     text_cols=["text"],
+    ...     id_cols=["speaker"],
+    ...     group_by=["speaker"],
+    ...     archetype_csvs=["dictionaries/archetypes"],
+    ...     model_name="sentence-transformers/all-roberta-large-v1",
+    ... )
+    PosixPath('.../features/archetypes/session.csv')
+
+    Notes
+    -----
+    If ``out_features_csv`` exists and ``overwrite_existing=False``, the existing path is returned
+    without recomputation. Directories passed in ``archetype_csvs`` are expanded recursively to
+    all ``.csv`` files and deduplicated before scoring.
     """
+
 
     # 1) Use analysis-ready CSV if given; otherwise gather from csv_path or txt_dir
     if analysis_csv is not None:
@@ -144,6 +242,29 @@ def analyze_with_archetypes(
     # 3) Stream (text_id, text) → middle layer → features CSV
     def _iter_items_from_csv(path: Path, *, id_col: str = "text_id", text_col: str = "text") -> Iterable[Tuple[str, str]]:
         with path.open("r", newline="", encoding=encoding) as f:
+            """
+            Stream ``(text_id, text)`` pairs from an analysis-ready CSV.
+
+            Parameters
+            ----------
+            path : pathlib.Path
+                Path to the analysis-ready CSV containing at least ``text_id`` and ``text``.
+            id_col : str, default="text_id"
+                Name of the identifier column to read.
+            text_col : str, default="text"
+                Name of the text column to read.
+
+            Yields
+            ------
+            tuple of (str, str)
+                The ``(text_id, text)`` for each row. Missing text values are emitted as empty strings.
+
+            Raises
+            ------
+            ValueError
+                If the required columns are not present in the CSV header.
+            """
+
             reader = csv.DictReader(f, delimiter=delimiter)
             if id_col not in reader.fieldnames or text_col not in reader.fieldnames:
                 raise ValueError(
@@ -171,6 +292,20 @@ def analyze_with_archetypes(
 
 # --- CLI ------------------------------------------------------------
 def _build_arg_parser():
+    """
+    Create and configure an ``argparse.ArgumentParser`` for the archetype CLI.
+
+    The parser exposes three mutually exclusive input modes (``--csv``, ``--txt-dir``,
+    ``--analysis-csv``), output and overwrite flags, repeatable ``--archetype`` paths,
+    I/O parameters, gathering options for CSV/TXT inputs, and archetype scoring options.
+
+    Returns
+    -------
+    argparse.ArgumentParser
+        A parser with subcommands/flags matching the function parameters of
+        :func:`analyze_with_archetypes`.
+    """
+
     import argparse
     p = argparse.ArgumentParser(
         description="Archetype scoring into a single CSV (globals once + per-archetype blocks)."
@@ -229,6 +364,22 @@ def _build_arg_parser():
 
 
 def main():
+    """
+    Command-line entry point for archetype scoring.
+
+    Parses arguments using :func:`_build_arg_parser`, normalizes list-like defaults,
+    invokes :func:`analyze_with_archetypes`, and prints the resulting output path.
+
+    Notes
+    -----
+    This function is executed when the module is run as a script:
+
+        python -m taters.text.analyze_with_archetypes \
+            --analysis-csv transcripts/X/X.csv \
+            --archetype dictionaries/archetypes \
+            --model-name sentence-transformers/all-roberta-large-v1
+    """
+
     args = _build_arg_parser().parse_args()
 
     # Defaults for list-ish args

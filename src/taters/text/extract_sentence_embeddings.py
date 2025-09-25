@@ -29,10 +29,29 @@ PathLike = Union[str, Path]
 
 def _ensure_nltk_punkt(verbose: bool = True) -> bool:
     """
-    Ensure NLTK sentence tokenizer data is available.
-    Tries 'punkt' first; falls back to 'punkt_tab' (used in newer NLTK builds).
-    Returns True if sent_tokenize is usable; False otherwise.
+    Ensure the NLTK sentence tokenizer is available.
+
+    Checks for the presence of NLTK's ``punkt`` (and, for newer NLTK builds,
+    ``punkt_tab``). If missing, attempts a quiet download. Prints a short
+    status message when ``verbose`` is True.
+
+    Parameters
+    ----------
+    verbose : bool, default=True
+        Whether to print status messages about tokenizer availability.
+
+    Returns
+    -------
+    bool
+        ``True`` if NLTK's tokenizer is usable; ``False`` if a regex fallback
+        should be used instead.
+
+    Notes
+    -----
+    This helper does not load heavy NLP models. It only ensures that sentence
+    segmentation can proceed.
     """
+
     try:
         nltk.data.find("tokenizers/punkt")
         ok = True
@@ -62,7 +81,29 @@ def _ensure_nltk_punkt(verbose: bool = True) -> bool:
     return ok
 
 def _split_sentences(text: str) -> list[str]:
-    """Prefer NLTK sent_tokenize if available; fallback to a simple regex."""
+    """
+    Split a text string into sentences.
+
+    Prefers ``nltk.tokenize.sent_tokenize`` if available; otherwise falls back
+    to a lightweight regex that splits on end punctuation followed by whitespace.
+
+    Parameters
+    ----------
+    text : str
+        Input text. ``None``/empty values are treated as empty strings.
+
+    Returns
+    -------
+    list of str
+        List of non-empty, stripped sentences. Returns an empty list when the
+        input is empty or contains no sentence-like chunks.
+
+    Notes
+    -----
+    The regex fallback is intentionally simple and language-agnostic; it may
+    under-segment or over-segment compared to NLTK's tokenizer.
+    """
+
     txt = (text or "").strip()
     if not txt:
         return []
@@ -76,6 +117,34 @@ def _split_sentences(text: str) -> list[str]:
 
 def _iter_items_from_csv(path: Path, *, id_col: str = "text_id", text_col: str = "text",
                          encoding: str = "utf-8-sig", delimiter: str = ",") -> Iterable[Tuple[str, str]]:
+    """
+    Stream ``(text_id, text)`` pairs from an analysis-ready CSV.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        Path to the CSV file.
+    id_col : str, default="text_id"
+        Name of the identifier column in the CSV.
+    text_col : str, default="text"
+        Name of the text column in the CSV.
+    encoding : str, default="utf-8-sig"
+        File encoding.
+    delimiter : str, default=","
+        Field delimiter.
+
+    Yields
+    ------
+    tuple of (str, str)
+        The ``(text_id, text)`` for each row. Missing text values are emitted
+        as empty strings.
+
+    Raises
+    ------
+    ValueError
+        If the required ``id_col`` and ``text_col`` are not present in the header.
+    """
+
     with path.open("r", newline="", encoding=encoding) as f:
         reader = csv.DictReader(f, delimiter=delimiter)
         if id_col not in reader.fieldnames or text_col not in reader.fieldnames:
@@ -122,13 +191,119 @@ def analyze_with_sentence_embeddings(
     show_progress: bool = False,
 ) -> Path:
     """
-    Build/accept an analysis-ready CSV (columns: text_id,text) and write
-    one average sentence-embedding vector per row:
-        text_id, e0, e1, ..., e{D-1}
+    Average sentence embeddings per row of text and write a wide features CSV.
 
-    If out_features_csv is not provided, defaults to:
-        ./features/sentence-embeddings/<analysis_ready_filename>
+    Supports three mutually exclusive input modes:
+
+    1. ``analysis_csv`` — Use a prebuilt file with columns ``text_id`` and ``text``.
+    2. ``csv_path`` — Gather from a CSV using ``text_cols`` (and optional
+    ``id_cols``/``group_by``) to build an analysis-ready CSV.
+    3. ``txt_dir`` — Gather from a folder of ``.txt`` files.
+
+    For each row, the text is split into sentences (NLTK if available; otherwise
+    a regex fallback). Each sentence is embedded with a Sentence-Transformers
+    model and the vectors are averaged into one row-level embedding. Optionally,
+    vectors are L2-normalized. The output CSV schema is:
+
+    ``text_id, e0, e1, ..., e{D-1}``
+
+    If ``out_features_csv`` is omitted, the default is
+    ``./features/sentence-embeddings/<analysis_ready_filename>``. When
+    ``overwrite_existing`` is ``False`` and the output exists, the function
+    returns the existing path without recomputation.
+
+    Parameters
+    ----------
+    csv_path : str or pathlib.Path, optional
+        Source CSV to gather from. Mutually exclusive with ``txt_dir`` and ``analysis_csv``.
+    txt_dir : str or pathlib.Path, optional
+        Folder of ``.txt`` files to gather from. Mutually exclusive with the other modes.
+    analysis_csv : str or pathlib.Path, optional
+        Prebuilt analysis-ready CSV containing exactly ``text_id`` and ``text``.
+    out_features_csv : str or pathlib.Path, optional
+        Output features CSV path. If ``None``, a default path is derived from the
+        analysis-ready filename under ``./features/sentence-embeddings/``.
+    overwrite_existing : bool, default=False
+        If ``False`` and the output file already exists, skip processing and return it.
+
+    encoding : str, default="utf-8-sig"
+        CSV I/O encoding.
+    delimiter : str, default=","
+        CSV field delimiter.
+
+    text_cols : Sequence[str], default=("text",)
+        When gathering from a CSV: column(s) containing text.
+    id_cols : Sequence[str], optional
+        When gathering from a CSV: optional ID columns to carry through.
+    mode : {"concat", "separate"}, default="concat"
+        Gathering behavior if multiple ``text_cols`` are provided. ``"concat"`` joins
+        them with ``joiner``; ``"separate"`` creates one row per column.
+    group_by : Sequence[str], optional
+        Optional grouping keys used during CSV gathering (e.g., ``["speaker"]``).
+    joiner : str, default=" "
+        Separator used when concatenating text in ``"concat"`` mode.
+    num_buckets : int, default=512
+        Number of temporary hash buckets for scalable gathering.
+    max_open_bucket_files : int, default=64
+        Maximum number of bucket files kept open concurrently during gathering.
+    tmp_root : str or pathlib.Path, optional
+        Root directory for temporary gathering artifacts.
+
+    recursive : bool, default=True
+        When gathering from a text folder, recurse into subdirectories.
+    pattern : str, default="*.txt"
+        Glob pattern for selecting text files.
+    id_from : {"stem", "name", "path"}, default="stem"
+        How to derive ``text_id`` when gathering from a text folder.
+    include_source_path : bool, default=True
+        Whether to include the absolute source path as an additional column when
+        gathering from a text folder.
+
+    model_name : str, default="sentence-transformers/all-roberta-large-v1"
+        Sentence-Transformers model name or path.
+    batch_size : int, default=32
+        Batch size for model encoding.
+    normalize_l2 : bool, default=True
+        If ``True``, L2-normalize each row's final vector.
+    rounding : int or None, default=None
+        If provided, round floats to this many decimals (useful for smaller files).
+    show_progress : bool, default=False
+        Show a progress bar during embedding.
+
+    Returns
+    -------
+    pathlib.Path
+        Path to the written features CSV.
+
+    Raises
+    ------
+    FileNotFoundError
+        If an input file or directory does not exist.
+    ImportError
+        If ``sentence-transformers`` is not installed.
+    ValueError
+        If input modes are misconfigured (e.g., multiple or none provided),
+        or if the analysis-ready CSV lacks ``text_id``/``text``.
+
+    Examples
+    --------
+    Compute row-level embeddings from a transcript CSV, grouped by speaker:
+
+    >>> analyze_with_sentence_embeddings(
+    ...     csv_path="transcripts/session.csv",
+    ...     text_cols=["text"], id_cols=["speaker"], group_by=["speaker"],
+    ...     model_name="sentence-transformers/all-roberta-large-v1",
+    ...     normalize_l2=True
+    ... )
+    PosixPath('.../features/sentence-embeddings/session.csv')
+
+    Notes
+    -----
+    - Rows with no recoverable sentences produce **empty** feature cells (not zeros).
+    - The embedding dimensionality ``D`` is taken from the model and used to
+    construct header columns ``e0..e{D-1}``.
     """
+
     # pre-check that nltk sent_tokenizer is usable
     use_nltk = _ensure_nltk_punkt(verbose=True)
 
@@ -239,6 +414,19 @@ def analyze_with_sentence_embeddings(
 
 # --- CLI ------------------------------------------------------------
 def _build_arg_parser():
+    """
+    Create an ``argparse.ArgumentParser`` for the sentence-embedding CLI.
+
+    Defines mutually exclusive input sources (``--csv``, ``--txt-dir``,
+    ``--analysis-csv``), output/overwrite flags, CSV/TXT gathering options,
+    and Sentence-Transformers parameters.
+
+    Returns
+    -------
+    argparse.ArgumentParser
+        Configured parser instance.
+    """
+
     import argparse
     p = argparse.ArgumentParser(
         description="Average sentence embeddings per row (Sentence-Transformers)."
@@ -292,6 +480,21 @@ def _build_arg_parser():
     return p
 
 def main():
+    """
+    Command-line entry point for row-level sentence embeddings.
+
+    Parses CLI arguments via :func:`_build_arg_parser`, normalizes list-like
+    defaults (e.g., ``--text-col``, ``--id-col``, ``--group-by``), invokes
+    :func:`analyze_with_sentence_embeddings`, and prints the resulting path.
+
+    Examples
+    --------
+    $ python -m taters.text.extract_sentence_embeddings \\
+        --csv transcripts/session.csv \\
+        --text-col text --id-col speaker --group-by speaker \\
+        --model-name sentence-transformers/all-roberta-large-v1 \\
+        --normalize-l2
+    """
     args = _build_arg_parser().parse_args()
 
     # Defaults for list-ish args

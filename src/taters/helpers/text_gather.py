@@ -185,28 +185,84 @@ def csv_to_analysis_ready_csv(
     tmp_root: PathLike | None = None,     # where to place partitions (default: system tmp)
 ) -> Path:
     """
-    Convert an arbitrary (possibly huge, unsorted) CSV into an "analysis-ready" CSV with a stable schema:
-        text_id,text[,source_col]
+    Stream a (possibly huge) CSV into a compact **analysis-ready** CSV with a
+    stable schema and optional external grouping.
 
-    - No grouping: single streaming pass (constant memory).
-    - With grouping: two-pass external aggregation that does NOT require presorting.
+    Output schema
+    -------------
+    Always writes a header and enforces a consistent column order:
 
-    Args:
-        csv_path: input CSV
-        out_csv: output CSV to write (will be created/overwritten)
-        text_cols: columns containing the text
-        id_cols: optional columns to compose text_id (if grouping is None). If omitted, uses row index.
-        mode:
-            "concat"   -> join all text_cols per row (or per group) into one text
-            "separate" -> emit one row per (row, col) (or per (group, col)) with source_col metadata
-        group_by: optional list of columns to aggregate by (unsorted OK).
-        delimiter, encoding, joiner: parsing options
-        num_buckets: number of hash partitions for external grouping
-        max_open_bucket_files: limit for open file handles during partitioning
-        tmp_root: optional temp directory root
+    • No grouping:
+        `text_id,text`                            (plus `source_col` if `mode="separate"`)
+    • With grouping:
+        `text_id,text,group_count`                (plus `source_col` if `mode="separate"`)
 
-    Returns:
-        Path to the written CSV.
+    Where:
+      - `text_id` is either the composed ID from `id_cols` or `row_<n>` when
+        `id_cols=None`.
+      - `mode="concat"` joins all `text_cols` using `joiner` per row or group.
+      - `mode="separate"` emits one row per (`row_or_group`, `text_col`) and
+        fills `source_col` with the contributing column name.
+
+    Grouping at scale
+    -----------------
+    If `group_by` is provided, the function performs a **two-pass external
+    grouping** that does not require presorting:
+      1) Hash-partition rows to on-disk “bucket” CSVs (bounded writers with LRU).
+      2) Aggregate each bucket into final rows (concat or separate mode), writing
+         `group_count` to record how many pieces contributed. :contentReference[oaicite:1]{index=1}
+
+    Parameters
+    ----------
+    csv_path
+        Source CSV with at least the columns in `text_cols` (and `group_by` if
+        grouping).
+    out_csv
+        Destination CSV. If `None`, a name is derived from the input and options
+        (e.g., `<stem>_grouped_<group_by>.csv` or `<stem>_concat_<cols>.csv`).
+    overwrite_existing
+        If `False` (default) and `out_csv` exists, the function returns early.
+    text_cols
+        One or more text fields to concatenate or emit separately.
+    id_cols
+        Optional columns to compose `text_id` when not grouping. When omitted, a
+        synthetic `row_<n>` is used.
+    mode
+        `"concat"` (default) or `"separate"`. See schema above.
+    group_by
+        Optional list of columns to aggregate by; works on unsorted CSVs.
+    delimiter, encoding, joiner
+        Parsing/formatting options. If `delimiter=None`, sniffs from a sample.
+    num_buckets, max_open_bucket_files, tmp_root
+        External grouping controls (partition count, LRU limit, temp root).
+
+    Returns
+    -------
+    Path
+        Path to the analysis-ready CSV.
+
+    Raises
+    ------
+    ValueError
+        If required columns are missing or `mode` is invalid.
+
+    Examples
+    --------
+    Concatenate two text fields per row:
+
+    >>> csv_to_analysis_ready_csv(
+    ...     csv_path="transcripts.csv",
+    ...     text_cols=["prompt","response"],
+    ...     id_cols=["speaker"],
+    ... )
+
+    Group by speaker and join rows:
+
+    >>> csv_to_analysis_ready_csv(
+    ...     csv_path="transcripts.csv",
+    ...     text_cols=["text"],
+    ...     group_by=["speaker"],
+    ... )
     """
     in_path = _ensure_path(csv_path)
 
@@ -373,7 +429,44 @@ def txt_folder_to_analysis_ready_csv(
 
 ) -> Path:
     """
-    Stream a folder of .txt files into an analysis-ready CSV: text_id,text[,source_path]
+    Stream a folder of `.txt` files into an analysis-ready CSV with predictable,
+    reproducible IDs.
+
+    For each file matching `pattern`, the emitted row contains:
+      - `text_id`: the basename (stem), full filename, or relative path (see
+        `id_from`), and
+      - `text`: the file contents.
+      - `source_path`: optional column with path relative to `root_dir`.
+
+    Parameters
+    ----------
+    root_dir
+        Folder containing `.txt` files.
+    out_csv
+        Destination CSV. If `None`, a descriptive default is created next to
+        `root_dir` (e.g., `<folder>_txt_recursive_*.csv`).
+    recursive
+        Recurse into subfolders. Default: `False`.
+    pattern
+        Glob for matching text files. Default: `"*.txt"`.
+    encoding
+        File decoding. Default: `"utf-8"`.
+    id_from
+        How to derive `text_id`: `"stem"` (basename without extension),
+        `"name"` (filename), or `"path"` (relative path).
+    include_source_path
+        If `True` (default), add a `source_path` column showing the relative path.
+    overwrite_existing
+        If `False` (default) and `out_csv` exists, returns the existing file.
+
+    Returns
+    -------
+    Path
+        Path to the analysis-ready CSV.
+
+    Examples
+    --------
+    >>> txt_folder_to_analysis_ready_csv(root_dir="notes", recursive=True, id_from="path")
     """
     root = _ensure_path(root_dir)
     out_path = _ensure_path(out_csv) if out_csv is not None else _default_txt_out_path(

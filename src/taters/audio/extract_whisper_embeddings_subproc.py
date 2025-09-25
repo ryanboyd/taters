@@ -1,4 +1,21 @@
 # -*- coding: utf-8 -*-
+
+"""Subprocess worker that computes Whisper encoder embeddings.
+
+This module is meant to be executed with ``python -m ...`` by the wrapper in
+``extract_whisper_embeddings.py``. It avoids importing heavyweight torch
+packages in the parent process and keeps CUDA state isolated.
+
+Two entry functions implement I/O and shape-handling:
+
+- :func:`export_segment_embeddings_csv` — transcript-driven, one vector per row.
+- :func:`export_audio_embeddings_csv` — general WAVs; segmentation + optional pooling.
+
+Both functions use `faster-whisper` (CTranslate2 backend) and `WhisperFeatureExtractor`
+to produce encoder features, then pool the encoder outputs into fixed-length vectors.
+"""
+
+
 from __future__ import annotations
 
 # Keep Transformers from touching torch/TF/Flax in this module
@@ -190,11 +207,46 @@ def export_segment_embeddings_csv(
     sr: int = 16000,
 ) -> Path:
     """
-    Build a CSV of Whisper encoder embeddings per (start,end,speaker) row in the transcript,
-    using faster-whisper (CTranslate2) and the matching HF WhisperFeatureExtractor.
+    Compute Whisper encoder embeddings for each transcript segment and write a CSV.
 
-    Output columns: start_time, end_time, speaker, e0..e{D-1}
+    Expected transcript columns (auto-resolved with fallbacks):
+    - start_time (or: start, from, t0, start_ms, start_sec)
+    - end_time   (or: end, to, t1, end_ms, end_sec)
+    - speaker    (optional; fallbacks include speaker_label, spk, speaker_id, ...)
+
+    Parameters
+    ----------
+    transcript_csv : str | Path
+        CSV with segment timings (and optionally speaker labels).
+    source_wav : str | Path
+        Audio file to slice. Will be resampled to `sr`.
+    output_dir : str | Path | None, optional
+        Directory for the output CSV. If None, defaults to the WAV's parent.
+    config : EmbedConfig, keyword-only
+        Configuration for model name, device, compute type, and time unit.
+    start_col, end_col, speaker_col : str
+        Column name hints. The function will fall back to common aliases if the
+        exact names are not present.
+    sr : int, default 16000
+        Sample rate for feature extraction (audio is resampled as needed).
+
+    Returns
+    -------
+    Path
+        Path to the written CSV: ``<output_dir>/<wav_stem>_embeddings.csv``
+
+    Behavior
+    --------
+    - Attempts to infer time units ("s", "ms", "samples") when config.time_unit == "auto".
+    - Skips invalid or tiny segments (< 2 samples after rounding).
+    - Pools encoder outputs to a fixed-length vector (mean over time).
+    - Writes header even if no valid segments remain (empty payload).
+
+    See Also
+    --------
+    export_audio_embeddings_csv : transcript-free embeddings.
     """
+
     transcript_csv = Path(transcript_csv)
     source_wav = Path(source_wav)
 
@@ -386,17 +438,41 @@ def export_audio_embeddings_csv(
     aggregate: Literal["none", "mean"] = "none",
 ) -> Path:
     """
-    Export Whisper encoder embeddings for any WAV — no transcript required.
+    Compute Whisper encoder embeddings for an arbitrary WAV (no transcript).
 
-    strategy="windows": split the file into fixed windows (default 30s, hop 15s).
-    strategy="nonsilent": use librosa.effects.split to find non-silent spans; long
-                          spans are subdivided into ~window_s chunks.
+    Parameters
+    ----------
+    source_wav : str | Path
+        Input audio (any format `librosa` can read).
+    output_dir : str | Path | None, optional
+        Directory for the output CSV. Defaults to the WAV's parent if None.
+    config : EmbedConfig, keyword-only
+        Model/device/compute configuration.
+    sr : int, default 16000
+        Resample rate used by the feature extractor.
+    strategy : {"windows","nonsilent"}, default "windows"
+        - "windows": fixed windows with hop (overlap allowed).
+        - "nonsilent": energy-based voice activity detection via librosa.
+    window_s, hop_s : float
+        Window length and hop size (seconds). Used by both strategies.
+    min_seg_s : float
+        Discard segments shorter than this length (seconds).
+    top_db : float
+        Silence threshold for "nonsilent". Higher → fewer segments.
+    aggregate : {"none","mean"}, default "none"
+        If "mean", write a single pooled vector over the whole file.
 
-    If aggregate="mean", write a single pooled embedding row for the whole file.
-    Otherwise, write one row per chunk (start_time,end_time,'SEGMENT_i',e0..eD-1).
+    Returns
+    -------
+    Path
+        CSV path: ``<output_dir>/<wav_stem>_embeddings.csv``.
 
-    Returns: Path to <source_stem>_embeddings.csv in output_dir (or WAV's folder).
+    Notes
+    -----
+    - When `aggregate="none"`, rows are ``start_time,end_time,SEGMENT_i,e0..``.
+    - When `aggregate="mean"`, a single row ``0.000,<dur>,GLOBAL_MEAN,e0..`` is written.
     """
+
     source_wav = Path(source_wav)
     if output_dir is None:
         output_dir = source_wav.parent

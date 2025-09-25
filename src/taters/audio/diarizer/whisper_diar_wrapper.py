@@ -135,10 +135,60 @@ def run_whisper_diarization_repo(
     num_speakers: Optional[int] = None,
 ) -> DiarizationOutputFiles:
     """
-    Wraps MahmoudAshraf97/whisper-diarization and normalizes outputs.
-    Produces: .txt, .srt, .csv in a per-file work_dir, then deletes the local WAV copy
-    and (by default) purges temp_outputs* folders.
+    Run the vendored Whisper diarization scripts and normalize their outputs.
+
+    Parameters
+    ----------
+    audio_path : str | Path
+        Input audio (WAV recommended).
+    out_dir : str | Path
+        Output directory for transcript artifacts. If it does not exist, it will
+        be created.
+    repo_dir : str | Path | None
+        Optional explicit location of the diarization repo. If None, the
+        vendored copy is used.
+    whisper_model : str, default "medium.en"
+        Whisper ASR model to use (e.g., "small", "base", "large-v3").
+    language : str | None
+        Language hint for Whisper (e.g., "en"); if None, autodetection is used.
+    device : {"cpu","cuda"} | None
+        Runtime device. If "cpu", environment variables are set to hide GPUs.
+    batch_size : int, default 0
+        Whisper batch size; 0 disables batching.
+    no_stem : bool, default False
+        Pass through to demucs/whisper scripts to disable vocal/instrument stems.
+    suppress_numerals : bool, default False
+        Heuristic to reduce spurious numeral tokens.
+    parallel : bool, default False
+        Use parallel diarization script if available.
+    timeout : int | None
+        Subprocess timeout in seconds; None means no timeout.
+    use_custom : bool, default True
+        Prefer the customized script if present (adds CSV emission and minor cleanup).
+    keep_temp : bool, default False
+        If False (default), temporary folders created by demucs/whisper are removed.
+    num_speakers : int | None
+        Force a fixed number of speakers, if the downstream diarizer supports it.
+
+    Returns
+    -------
+    DiarizationOutputFiles
+        Paths to ``.txt``, ``.srt``, and ``.csv`` (if produced) in a per-file working
+        directory, plus an (empty) ``speaker_wavs`` mapping for API compatibility.
+
+    Notes
+    -----
+    - The function copies the input WAV to a per-file work directory before running,
+      to ensure relative paths inside the third-party scripts resolve correctly.
+    - If `device="cpu"`, CUDA is disabled in the child environment.
+    - On success, the local WAV copy is deleted and temporary folders are tidied up.
+
+    See Also
+    --------
+    taters.audio.split_wav_by_speaker.make_speaker_wavs_from_csv :
+        Build per-speaker WAVs from the diarization CSV.
     """
+
 
     # Decide device if user passed "auto" (or None)
     resolved_device = _resolve_device(device)

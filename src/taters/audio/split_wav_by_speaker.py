@@ -37,14 +37,63 @@ def make_speaker_wavs_from_csv(
     min_dur_ms: int = 50,              # skip ultra-short blips
 ) -> Dict[str, Path]:
     """
-    Build one WAV per speaker by concatenating only that speaker's segments.
-    Inserts silence before and after each segment (pre + clip + post).
+    Concatenate speaker-specific segments into per-speaker WAV files.
 
-    Output filenames are <source_stem>_<Friendly Speaker>.wav
+    The function reads a timestamped transcript, extracts the corresponding
+    audio regions from `source_wav`, and concatenates them into one output WAV
+    per unique speaker label. Optional silence can be inserted before/after each
+    segment to avoid clicks or tight joins.
 
-    If `output_dir` is not provided, files are written to:
-        <cwd>/audio_split/<source_stem>/
+    Parameters
+    ----------
+    source_wav : str | Path
+        Path to the source WAV.
+    transcript_csv_path : str | Path
+        CSV with timing and speaker columns (e.g., diarization output).
+    output_dir : str | Path | None, optional
+        Where to write the per-speaker files. If None, defaults to
+        ``<cwd>/audio/speakers``.
+    start_col, end_col, speaker_col : str
+        Names of the columns in `transcript_csv_path` for segment start, end,
+        and speaker ID/name.
+    time_unit : {"ms","s"}, default "ms"
+        Units for the start/end columns.
+    silence_ms : int, default 1000
+        If `pre_silence_ms`/`post_silence_ms` are None, this value is used for
+        both sides of each segment. Set to 0 to disable padding.
+    pre_silence_ms, post_silence_ms : int | None
+        Explicit padding (ms) before/after each segment. Overrides `silence_ms`.
+    sr : int | None, default 16000
+        Resample output to this rate. If None, keep original rate.
+    mono : bool, default True
+        If True, downmix to mono.
+    min_dur_ms : int, default 50
+        Skip segments shorter than this duration (ms).
+
+    Returns
+    -------
+    dict[str, Path]
+        Mapping from friendly speaker label → output WAV path.
+
+    Behavior
+    --------
+    - Input speaker labels are sanitized for filenames but a more readable label
+      (without path-hostile characters) is preserved for naming.
+    - Segments are sorted by start time per speaker before concatenation.
+    - If a speaker ends up with zero valid segments, no file is written.
+
+    Examples
+    --------
+    >>> make_speaker_wavs_from_csv(
+    ...     source_wav="audio/session.wav",
+    ...     transcript_csv_path="transcripts/session.csv",
+    ...     time_unit="ms",
+    ...     silence_ms=0,  # no padding
+    ...     sr=16000,
+    ...     mono=True,
+    ... )
     """
+
     if time_unit not in ("ms", "s"):
         raise ValueError("time_unit must be 'ms' or 's'")
 

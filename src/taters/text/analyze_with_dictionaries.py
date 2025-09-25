@@ -52,10 +52,110 @@ def analyze_with_dictionaries(
     retain_captures: bool = False,
     wildcard_mem: bool = True,
 ) -> Path:
-    """Gather text into an analysis-ready CSV and pipe it to multi_dict_analyzer,
-    which writes one wide CSV with globals once (from first dict) then per-dict blocks.
-    Returns the path to `out_features_csv`.
     """
+    Compute LIWC-style dictionary features for text rows and write a wide features CSV.
+
+    The function supports exactly one of three input modes:
+
+    1. ``analysis_csv`` — Use a prebuilt file with columns ``text_id`` and ``text``.
+    2. ``csv_path`` — Gather text from an arbitrary CSV using ``text_cols`` (and optional
+    ``id_cols``/``group_by``) to produce an analysis-ready file.
+    3. ``txt_dir`` — Gather text from a folder of ``.txt`` files.
+
+    If ``out_features_csv`` is omitted, the default output path is
+    ``./features/dictionary/<analysis_ready_filename>``. Multiple dictionaries are supported;
+    passing a directory discovers all ``.dic``, ``.dicx``, and ``.csv`` dictionary files
+    recursively in a stable order. Global columns (e.g., word counts, punctuation) are emitted
+    once (from the first dictionary) and each dictionary contributes a namespaced block.
+
+    Parameters
+    ----------
+    csv_path : str or pathlib.Path, optional
+        Source CSV to gather from. Mutually exclusive with ``txt_dir`` and ``analysis_csv``.
+    txt_dir : str or pathlib.Path, optional
+        Folder containing ``.txt`` files to gather from. Mutually exclusive with other modes.
+    analysis_csv : str or pathlib.Path, optional
+        Prebuilt analysis-ready CSV with exactly two columns: ``text_id`` and ``text``.
+    out_features_csv : str or pathlib.Path, optional
+        Output file path. If ``None``, defaults to
+        ``./features/dictionary/<analysis_ready_filename>``.
+    overwrite_existing : bool, default=False
+        If ``False`` and the output file already exists, skip processing and return the path.
+    dict_paths : Sequence[str or pathlib.Path]
+        One or more dictionary inputs (files or directories). Supported extensions:
+        ``.dic``, ``.dicx``, ``.csv``. Directories are expanded recursively.
+    encoding : str, default="utf-8-sig"
+        Text encoding used for reading/writing CSV files.
+    text_cols : Sequence[str], default=("text",)
+        When gathering from a CSV, name(s) of the column(s) containing text.
+    id_cols : Sequence[str] or None, optional
+        Optional ID columns to carry into grouping when gathering from CSV.
+    mode : {"concat", "separate"}, default="concat"
+        Gathering behavior when multiple text columns are provided. ``"concat"`` joins them
+        into one text field using ``joiner``; ``"separate"`` creates one row per column.
+    group_by : Sequence[str] or None, optional
+        Optional grouping keys used during CSV gathering (e.g., ``["speaker"]``).
+    delimiter : str, default=","
+        Delimiter for reading/writing CSV files.
+    joiner : str, default=" "
+        Separator used when concatenating multiple text chunks in ``"concat"`` mode.
+    num_buckets : int, default=512
+        Number of temporary hash buckets used during scalable CSV gathering.
+    max_open_bucket_files : int, default=64
+        Maximum number of bucket files kept open concurrently during gathering.
+    tmp_root : str or pathlib.Path or None, optional
+        Root directory for temporary gathering artifacts.
+    recursive : bool, default=True
+        When gathering from a text folder, recurse into subdirectories.
+    pattern : str, default="*.txt"
+        Glob pattern for selecting text files when gathering from a folder.
+    id_from : {"stem", "name", "path"}, default="stem"
+        How to derive ``text_id`` for gathered ``.txt`` files.
+    include_source_path : bool, default=True
+        If ``True``, include the absolute source path as an additional column when gathering
+        from a text folder.
+    relative_freq : bool, default=True
+        Emit relative frequencies instead of raw counts, when supported by the dictionary engine.
+    drop_punct : bool, default=True
+        Drop punctuation prior to analysis (dictionary-dependent).
+    rounding : int, default=4
+        Decimal places to round numeric outputs. Use ``None`` to disable rounding.
+    retain_captures : bool, default=False
+        Pass-through flag to the underlying analyzer to retain capture groups, if applicable.
+    wildcard_mem : bool, default=True
+        Pass-through optimization flag for wildcard handling in the analyzer.
+
+    Returns
+    -------
+    pathlib.Path
+        Path to the written features CSV.
+
+    Raises
+    ------
+    FileNotFoundError
+        If input files/folders or any dictionary file cannot be found.
+    ValueError
+        If input modes are misconfigured (e.g., multiple sources provided or none),
+        required columns are missing from the analysis-ready CSV, or unsupported
+        dictionary extensions are encountered.
+
+    Examples
+    --------
+    Run on a transcript CSV, grouped by speaker:
+
+    >>> analyze_with_dictionaries(
+    ...     csv_path="transcripts/session.csv",
+    ...     text_cols=["text"], id_cols=["speaker"], group_by=["speaker"],
+    ...     dict_paths=["dictionaries/liwc/LIWC-22 Dictionary (2022-01-27).dicx"]
+    ... )
+    PosixPath('.../features/dictionary/session.csv')
+
+    Notes
+    -----
+    If ``overwrite_existing`` is ``False`` and the output exists, the existing file path
+    is returned without recomputation.
+    """
+
 
     # 1) Produce or accept the analysis-ready CSV (must have columns: text_id,text)
     if analysis_csv is not None:
@@ -108,6 +208,28 @@ def analyze_with_dictionaries(
 
     # 2) Validate dictionaries
     def _expand_dict_inputs(paths):
+        """
+        Normalize dictionary inputs into a unique, ordered list of files.
+
+        Parameters
+        ----------
+        paths : Iterable[Union[str, pathlib.Path]]
+            Files or directories. Directories are expanded recursively to files with
+            extensions ``.dic``, ``.dicx``, or ``.csv``.
+
+        Returns
+        -------
+        list[pathlib.Path]
+            Deduplicated, resolved file paths in stable order.
+
+        Raises
+        ------
+        FileNotFoundError
+            If a referenced file or directory does not exist.
+        ValueError
+            If a file has an unsupported extension or if no dictionary files are found.
+        """
+
         out = []
         seen = set()
         for p in map(Path, paths):
@@ -145,6 +267,29 @@ def analyze_with_dictionaries(
     def _iter_items_from_csv(
         path: Path, *, id_col: str = "text_id", text_col: str = "text"
     ) -> Iterable[Tuple[str, str]]:
+        """
+        Stream ``(text_id, text)`` pairs from an analysis-ready CSV.
+
+        Parameters
+        ----------
+        path : pathlib.Path
+            Path to the analysis-ready CSV file.
+        id_col : str, default="text_id"
+            Name of the identifier column to read.
+        text_col : str, default="text"
+            Name of the text column to read.
+
+        Yields
+        ------
+        tuple[str, str]
+            ``(text_id, text)`` for each row; missing text values are emitted as empty strings.
+
+        Raises
+        ------
+        ValueError
+            If the required columns are not present in the CSV header.
+        """
+
         with path.open("r", newline="", encoding=encoding) as f:
             reader = csv.DictReader(f, delimiter=delimiter)
             if id_col not in reader.fieldnames or text_col not in reader.fieldnames:
@@ -174,6 +319,20 @@ def analyze_with_dictionaries(
 
 # --- CLI ------------------------------------------------------------
 def _build_arg_parser():
+    """
+    Create an ``argparse.ArgumentParser`` for the dictionary coding CLI.
+
+    The parser exposes three mutually exclusive input modes (``--csv``, ``--txt-dir``,
+    ``--analysis-csv``), output/overwrite options, repeatable ``--dict`` arguments
+    (accepting files or directories), gathering parameters for CSV/TXT inputs,
+    and analyzer pass-through options.
+
+    Returns
+    -------
+    argparse.ArgumentParser
+        Configured parser instance.
+    """
+
     import argparse
     p = argparse.ArgumentParser(
         description="ContentCoder: multi-dictionary coding into one CSV (globals once + per-dict blocks)."
@@ -234,6 +393,28 @@ def _build_arg_parser():
     return p
 
 def main():
+    """
+    Command-line entry point for multi-dictionary content coding.
+
+    Parses CLI arguments via :func:`_build_arg_parser`, normalizes list-like defaults,
+    invokes :func:`analyze_with_dictionaries`, and prints the resulting output path.
+
+    Examples
+    --------
+    Basic usage on a CSV with grouping by speaker:
+
+    $ python -m taters.text.analyze_with_dictionaries \
+        --csv transcripts/session.csv \
+        --text-col text --id-col speaker --group-by speaker \
+        --dict dictionaries/liwc/LIWC-22\ Dictionary\ (2022-01-27).dicx
+
+    Notes
+    -----
+    Boolean flags include positive/negative pairs (e.g., ``--recursive`` /
+    ``--no-recursive``, ``--relative-freq`` / ``--no-relative-freq``) to make
+    CLI behavior explicit.
+    """
+
     args = _build_arg_parser().parse_args()
 
     # Defaults for list-ish args

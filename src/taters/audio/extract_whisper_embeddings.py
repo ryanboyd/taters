@@ -1,3 +1,22 @@
+"""High-level, environment-safe wrapper for exporting Whisper encoder embeddings.
+
+This module provides a single entry point, :func:`extract_whisper_embeddings`,
+which (by default) launches a subprocess to extract embeddings using a dedicated
+worker module. The subprocess approach avoids CUDA/Torch collisions with other
+parts of your pipeline.
+
+Two modes are supported:
+
+1) Transcript-driven mode
+   Pass ``transcript_csv`` to compute one embedding vector per transcript row
+   (e.g., per diarized segment). The output is a CSV with columns
+   ``start_time,end_time,speaker,e0..e{D-1}``.
+
+2) General-audio mode
+   Omit ``transcript_csv`` to analyze the raw WAV. You can segment by fixed
+   windows or by non-silent regions; optionally aggregate to a single mean row.
+"""
+
 from __future__ import annotations
 import os, sys, shlex, subprocess
 from pathlib import Path
@@ -38,15 +57,88 @@ def extract_whisper_embeddings(
     extractor_module: str = "taters.audio.extract_whisper_embeddings_subproc",
 ) -> Path:
     """
-    Export Whisper encoder embeddings to CSV.
+    Export Whisper encoder embeddings to a CSV file, using a subprocess by default.
 
-    Modes:
-      • Transcript-driven (if transcript_csv is provided): one row per transcript segment.
-      • General-audio (no transcript): fixed windows or non-silent spans; optional mean pooling.
+    Parameters
+    ----------
+    source_wav : str | Path
+        Path to the input WAV. Must be readable by `librosa`.
+    transcript_csv : str | Path | None, optional
+        If provided, enables transcript-driven mode. The CSV is expected to contain
+        timestamp columns and (optionally) a speaker column. A row is emitted per
+        transcript segment.
+    time_unit : {"auto","ms","s","samples"}, default "auto"
+        How to interpret timestamps in `transcript_csv`. In "auto", the worker
+        heuristically infers the unit from max end time vs audio duration.
+    strategy : {"windows","nonsilent"}, default "windows"
+        General-audio mode only. "windows" uses fixed sized windows with overlap;
+        "nonsilent" uses an energy-based splitter (librosa.effects.split).
+    window_s, hop_s : float, default 30.0, 15.0
+        General-audio mode only. Window length and hop (seconds).
+    min_seg_s : float, default 1.0
+        General-audio mode only. Skip segments shorter than this many seconds.
+    top_db : float, default 30.0
+        General-audio mode only ("nonsilent"). Threshold (dB) below reference to
+        consider as silence. Smaller → more segments; larger → fewer.
+    aggregate : {"none","mean"}, default "none"
+        General-audio mode only. If "mean", a single pooled row is written covering
+        the entire file; otherwise one row per segment.
+    output_dir : str | Path | None, optional
+        Directory for the output CSV. If None, defaults to
+        ``./features/whisper-embeddings``.
+    model_name : str, default "base"
+        Model identifier passed through to the worker (e.g., "tiny", "base",
+        "small", "large-v3" or a local CTranslate2 model directory).
+    device : {"auto","cuda","cpu"}, default "auto"
+        Runtime device. If "cpu", environment variables are set to disable CUDA
+        in the child process.
+    compute_type : str, default "float16"
+        CTranslate2 compute type (e.g., "float16", "int8", "float32"); passed to
+        the worker module.
+    run_in_subprocess : bool, default True
+        If True (recommended), runs extraction in a separate Python process to
+        isolate Torch/CUDA state from the parent process.
+    extra_env : dict | None, optional
+        Additional environment variables to inject into the child process.
+    verbose : bool, default True
+        If True, print the launched command and the child's stdout.
+    extractor_module : str, default "chopshop.audio.extract_whisper_embeddings_subproc"
+        Dotted module path whose ``__main__`` implements the extractor CLI.
 
-    Returns:
-      <output_dir>/<source_stem>_embeddings.csv
-      (defaults to ./features/whisper-embeddings if output_dir is not provided)
+    Returns
+    -------
+    Path
+        Path to the written embeddings CSV. Pattern:
+        ``<output_dir>/<source_stem>_embeddings.csv``.
+
+    Notes
+    -----
+    - The subprocess writes and exits. The parent returns once the file exists.
+    - If `transcript_csv` is supplied, the worker runs in transcript mode; otherwise
+      general-audio mode is used with the given segmentation strategy.
+    - Failures in the child process are re-raised with the captured stdout/stderr
+      to ease debugging.
+
+    Examples
+    --------
+    Transcript per-segment embeddings:
+
+    >>> extract_whisper_embeddings(
+    ...     source_wav="audio/session.wav",
+    ...     transcript_csv="transcripts/session.csv",
+    ...     time_unit="ms",
+    ...     model_name="small",
+    ...     device="cuda",
+    ... )
+
+    Whole-file mean embedding:
+
+    >>> extract_whisper_embeddings(
+    ...     source_wav="audio/session.wav",
+    ...     strategy="nonsilent",
+    ...     aggregate="mean",
+    ...     output_dir="features/whisper-embeddings",
+    ... )
     """
     
     source_wav = Path(source_wav).resolve()

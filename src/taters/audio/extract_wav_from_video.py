@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
 # save as split_audio_streams.py
 
+"""Extract all audio streams from a video/container into standalone WAV files.
+
+This utility probes the container with `ffprobe`, lists audio streams (with
+index and tags), and then maps each stream with `ffmpeg` to a separate PCM WAV.
+It is useful for multi-track recordings (e.g., Zoom, OBS, ProRes with stems).
+:contentReference[oaicite:1]{index=1}
 """
-Split all audio streams from a video into individual WAV files.
 
-Requirements:
-  - ffmpeg and ffprobe must be installed and on PATH.
-
-Importable API:
-  split_audio_streams_to_wav(input_path, output_dir=None, sample_rate=48000, bit_depth=16, overwrite=False) -> list[str]
-
-CLI usage:
-  python split_audio_streams.py /path/to/video.mp4 [optional:/path/to/outdir] --sr 48000 --bit-depth 16 --overwrite
-"""
 
 from __future__ import annotations
 
@@ -81,13 +77,41 @@ def split_audio_streams_to_wav(
     overwrite: bool = True,
 ) -> List[str]:
     """
-    Extract each audio stream in `input_path` to a separate WAV.
+    Extract each audio stream in a container to its own WAV file.
 
-    If `output_dir` is not provided, WAVs are written to:
-        <cwd>/audio/<input_stem>/
+    Parameters
+    ----------
+    input_path : str | os.PathLike
+        Video or audio container readable by FFmpeg.
+    output_dir : str | os.PathLike | None, optional
+        Destination directory. If None, defaults to ``./audio`` in the current
+        working directory (predictable write location).
+    sample_rate : int, default 48000
+        Target sample rate for the output WAVs (Hz).
+    bit_depth : {16,24,32}, default 16
+        Output PCM bit depth (little-endian).
+    overwrite : bool, default True
+        If True, overwrite existing files. If False and a target exists,
+        raises :class:`FileExistsError`.
 
-    Returns a list of created file paths.
+    Returns
+    -------
+    list[str]
+        Absolute paths to the created WAVs.
+
+    Behavior
+    --------
+    - Output file names are constructed from the input base name and stream
+      metadata: ``<stem>_a<index>[_<lang>][_<title>].wav`` with safe slugs.
+    - Uses ``-map 0:a:<N>`` to select the N-th audio stream in the container.
+    - Runs FFmpeg with ``-nostdin`` and quiet loglevel to avoid TTY lockups.
+
+    Examples
+    --------
+    >>> split_audio_streams_to_wav("session.mp4")
+    ['.../audio/session_a0_eng.wav', '.../audio/session_a1_eng.wav']
     """
+
     _check_binaries()
 
     in_path = Path(input_path)

@@ -123,11 +123,74 @@ def find_files(
     ffprobe_verify: bool = False,                   # confirm stream presence via ffprobe (audio/video only)
 ) -> List[Path]:
     """
-    Return a list of paths under `root_dir` that match the requested media criteria.
+    Discover media files under a folder using smart, FFmpeg-friendly filters.
 
-    - If `extensions` is given, it overrides `file_type` and matches by file extension (case-insensitive).
-    - If `ffprobe_verify` is True and file_type is 'audio' or 'video', keeps only files with at least
-      one matching stream as reported by ffprobe.
+    You can either (a) choose a built-in **group** of extensions via `file_type`
+    (`"audio"|"video"|"image"|"subtitle"|"archive"|"any"`) or (b) pass an explicit
+    list of `extensions` to match. Matching is case-insensitive; dots are optional
+    (e.g., `".wav"` and `"wav"` are equivalent). Hidden files and directories are
+    excluded by default.
+
+    For audio/video, `ffprobe_verify=True` additionally checks that at least one
+    corresponding stream is present (e.g., exclude MP4s with no audio when
+    `file_type="audio"`). This is slower but robust when your dataset contains
+    “container only” files. :contentReference[oaicite:0]{index=0}
+
+    Parameters
+    ----------
+    root_dir
+        Folder to scan.
+    file_type
+        Built-in group selector. Ignored if `extensions` is provided.
+    extensions
+        Explicit extensions to include (e.g., `[".wav",".flac"]`). Overrides `file_type`.
+    recursive
+        Recurse into subfolders. Default: `True`.
+    follow_symlinks
+        Follow directory symlinks during traversal. Default: `False`.
+    include_hidden
+        Include dot-files and dot-dirs. Default: `False`.
+    include_globs / exclude_globs
+        Additional glob filters applied after extension filtering; `include_globs`
+        uses OR-semantics, then `exclude_globs` removes matches.
+    absolute
+        Return absolute paths when `True` (default) else relative to `root_dir`.
+    sort
+        Sort lexicographically (case-insensitive). Default: `True`.
+    ffprobe_verify
+        For `audio`/`video`, keep only files where `ffprobe` reports ≥1 matching
+        stream.
+
+    Returns
+    -------
+    list[pathlib.Path]
+        The matched files.
+
+    Raises
+    ------
+    FileNotFoundError
+        If `root_dir` does not exist.
+    ValueError
+        If `file_type` is not one of the supported groups.
+
+    Examples
+    --------
+    Find all videos (recursive), as absolute paths:
+
+    >>> find_files("dataset", file_type="video")
+
+    Use explicit extensions and keep paths relative:
+
+    >>> find_files("dataset", extensions=[".wav",".flac"], absolute=False)
+
+    Only include files matching a glob and exclude temp folders:
+
+    >>> find_files("dataset", file_type="audio",
+    ...            include_globs=["**/*session*"], exclude_globs=["**/tmp/**"])
+
+    Verify playable audio streams exist:
+
+    >>> find_files("dataset", file_type="audio", ffprobe_verify=True)
     """
     root_dir = Path(root_dir)
     if not root_dir.exists():

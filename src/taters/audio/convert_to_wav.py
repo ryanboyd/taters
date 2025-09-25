@@ -23,14 +23,44 @@ def convert_audio_to_wav(
     overwrite_existing: bool = False,  # if the file already exists, let's not overwrite by default
 ) -> Path:
     """
-    Convert any audio (or A/V container) to a PCM WAV file using ffmpeg.
+    Convert any FFmpeg-readable audio/video file to a linear PCM WAV.
 
-    If output_path is None and output_dir is None, writes <input_stem>.wav next to input.
-    If output_dir is given (and output_path is None), writes <output_dir>/<input_stem>.wav.
-    If output_path is given, it takes precedence.
+    Parameters
+    ----------
+    input_path : str | Path
+        Source media file (audio or video container). FFmpeg must be able to read it.
+    output_path : str | Path | None, optional
+        Target WAV path. If None, defaults to
+        ``<cwd>/audio/<input_stem>.wav``.
+    sample_rate : int, default 16000
+        Desired sample rate (Hz).
+    bit_depth : {16,24,32}, default 16
+        Output PCM bit depth; maps to ``pcm_s{bit_depth}le`` codec.
+    channels : int | None, default 1
+        If provided, set number of output channels (e.g., 1=mono, 2=stereo).
+        If None, keep original channel count.
+    overwrite_existing : bool, default False
+        Overwrite `output_path` if it already exists.
 
-    Returns the Path to the created WAV.
+    Returns
+    -------
+    Path
+        Path to the written WAV file.
+
+    Raises
+    ------
+    FileNotFoundError
+        If `input_path` does not exist.
+    RuntimeError
+        If FFmpeg/FFprobe are missing or the conversion fails.
+
+    Notes
+    -----
+    - Video inputs are supported: the audio stream is extracted and converted.
+    - For multi-channel sources and `channels is None`, channel layout is preserved.
+    - We run FFmpeg with ``-nostdin`` to avoid TTY issues in pipelines.
     """
+
     _check_ffmpeg()
 
     in_path = Path(input_path).resolve()

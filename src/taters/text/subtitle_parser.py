@@ -13,7 +13,27 @@ import re
 
 @dataclass(frozen=True)
 class SubtitleSegment:
-    """One subtitle entry (normalized across formats)."""
+    """
+    Normalized subtitle cue spanning a time interval.
+
+    Parameters
+    ----------
+    number : int or None
+        SRT block index if present; ``None`` for VTT or SRTs without explicit numbering.
+    start_ms : int
+        Start time in milliseconds.
+    end_ms : int
+        End time in milliseconds.
+    text : str
+        Cue text content. May contain embedded newlines if the source had multiple lines.
+    name : str or None, optional
+        Optional speaker/name field (not populated by the built-in parsers).
+
+    Notes
+    -----
+    Instances are immutable (``frozen=True``) so they can be safely shared and hashed.
+    """
+
     number: Optional[int]           # SRT index if present; None for VTT/no-number
     start_ms: int                   # start time in milliseconds
     end_ms: int                     # end time in milliseconds
@@ -29,12 +49,50 @@ _TS_SRT = re.compile(r"^(\d{1,2}):([0-5]\d):([0-5]\d)[,.](\d{3})$")
 _TS_VTT = _TS_SRT  # Same format; VTT uses '.' between seconds and ms, but we accept both , and .
 
 def _to_ms(hh: int, mm: int, ss: int, ms: int) -> int:
+    """
+    Convert separate time components to milliseconds.
+
+    Parameters
+    ----------
+    hh : int
+        Hours.
+    mm : int
+        Minutes (0–59).
+    ss : int
+        Seconds (0–59).
+    ms : int
+        Milliseconds (0–999).
+
+    Returns
+    -------
+    int
+        Time in milliseconds.
+    """
+
     return ((hh * 60 + mm) * 60 + ss) * 1000 + ms
 
 def _parse_timestamp(ts: str) -> int:
     """
-    Accepts 'HH:MM:SS,mmm' or 'HH:MM:SS.mmm' (SRT & VTT).
+    Parse a timestamp string into milliseconds.
+
+    Accepts both ``HH:MM:SS,mmm`` and ``HH:MM:SS.mmm`` forms (SRT/VTT).
+
+    Parameters
+    ----------
+    ts : str
+        Timestamp string.
+
+    Returns
+    -------
+    int
+        Time in milliseconds.
+
+    Raises
+    ------
+    ValueError
+        If the timestamp does not match the expected pattern.
     """
+
     m = _TS_SRT.match(ts.strip())
     if not m:
         raise ValueError(f"Invalid timestamp: {ts!r}")
@@ -42,6 +100,20 @@ def _parse_timestamp(ts: str) -> int:
     return _to_ms(hh, mm, ss, ms)
 
 def _fmt_ms_srt(ms: int) -> str:
+    """
+    Format milliseconds as an SRT timestamp.
+
+    Parameters
+    ----------
+    ms : int
+        Time in milliseconds.
+
+    Returns
+    -------
+    str
+        Timestamp formatted as ``HH:MM:SS,mmm``.
+    """
+
     hh = ms // 3_600_000
     mm = (ms // 60_000) % 60
     ss = (ms // 1000) % 60
@@ -49,6 +121,20 @@ def _fmt_ms_srt(ms: int) -> str:
     return f"{hh:02}:{mm:02}:{ss:02},{mmm:03}"
 
 def _fmt_ms_vtt(ms: int) -> str:
+    """
+    Format milliseconds as a WebVTT timestamp.
+
+    Parameters
+    ----------
+    ms : int
+        Time in milliseconds.
+
+    Returns
+    -------
+    str
+        Timestamp formatted as ``HH:MM:SS.mmm``.
+    """
+
     hh = ms // 3_600_000
     mm = (ms // 60_000) % 60
     ss = (ms // 1000) % 60
@@ -57,8 +143,21 @@ def _fmt_ms_vtt(ms: int) -> str:
 
 def _detect_encoding(path: Path) -> str:
     """
-    Try chardet if available; otherwise utf-8.
+    Best-effort file encoding detection.
+
+    Uses ``chardet.UniversalDetector`` when available; otherwise falls back to ``"utf-8"``.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        Path to a text file.
+
+    Returns
+    -------
+    str
+        Detected encoding (or ``"utf-8"`` if detection is unavailable).
     """
+
     try:
         import chardet  # type: ignore
     except Exception:
@@ -74,6 +173,15 @@ def _detect_encoding(path: Path) -> str:
         return enc
 
 def _default_out_dir() -> Path:
+    """
+    Return the default output directory for converted subtitle files.
+
+    Returns
+    -------
+    pathlib.Path
+        ``<cwd>/features/subtitles``.
+    """
+
     return Path.cwd() / "features" / "subtitles"
 
 
@@ -85,8 +193,29 @@ _SRT_TS_LINE = re.compile(r"^\s*(?P<start>[^ ]+)\s*-->\s*(?P<end>[^ ]+).*$")
 
 def parse_srt(text: str) -> List[SubtitleSegment]:
     """
-    Minimal, robust SRT parser that tolerates blank lines and extra whitespace.
+    Parse SRT content into normalized subtitle segments.
+
+    The parser tolerates extra whitespace and the optional numeric index line.
+    Each cue must include a timestamp line of the form
+    ``HH:MM:SS,mmm --> HH:MM:SS,mmm`` (a dot separator for milliseconds is also
+    accepted for robustness).
+
+    Parameters
+    ----------
+    text : str
+        Entire SRT file content.
+
+    Returns
+    -------
+    list[SubtitleSegment]
+        Parsed cues with millisecond times and original (joined) text.
+
+    Raises
+    ------
+    ValueError
+        If a well-formed timestamp line is missing where expected.
     """
+
     lines = [ln.rstrip("\r") for ln in text.splitlines()]
     i = 0
     n = len(lines)
@@ -151,9 +280,31 @@ def parse_srt(text: str) -> List[SubtitleSegment]:
 
 def parse_vtt(text: str) -> List[SubtitleSegment]:
     """
-    Minimal WebVTT parser: skips 'WEBVTT' header and NOTE/STYLE blocks.
-    Speaker names (if present) are not parsed specifically; keep text as-is.
+    Parse WebVTT content into normalized subtitle segments.
+
+    Behavior:
+    - Skips the ``WEBVTT`` header and any header metadata.
+    - Skips ``NOTE`` and ``STYLE`` blocks.
+    - Ignores optional cue identifiers.
+    - Requires a timestamp line of the form
+    ``HH:MM:SS.mmm --> HH:MM:SS.mmm`` (comma also accepted).
+
+    Parameters
+    ----------
+    text : str
+        Entire VTT file content.
+
+    Returns
+    -------
+    list[SubtitleSegment]
+        Parsed cues with millisecond times and original (joined) text.
+
+    Raises
+    ------
+    ValueError
+        If a required timestamp line is malformed or missing.
     """
+
     lines = [ln.rstrip("\r") for ln in text.splitlines()]
     i = 0
     n = len(lines)
@@ -228,8 +379,30 @@ def parse_vtt(text: str) -> List[SubtitleSegment]:
 
 def parse_subtitles(input_path: Union[str, Path], *, encoding: Optional[str] = None) -> List[SubtitleSegment]:
     """
-    Auto-detect format by extension; returns normalized segments list.
+    Auto-detect and parse a subtitle file by extension.
+
+    ``.vtt`` files are parsed as WebVTT; ``.srt`` and unknown extensions are
+    parsed as SRT. Input encoding is detected with ``chardet`` when available,
+    otherwise UTF-8 is assumed. Decoding errors are replaced.
+
+    Parameters
+    ----------
+    input_path : str or pathlib.Path
+        Path to an SRT or VTT file.
+    encoding : str, optional
+        Override input encoding. If omitted, try detect then fall back to UTF-8.
+
+    Returns
+    -------
+    list[SubtitleSegment]
+        Normalized subtitle segments.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the path does not exist.
     """
+
     path = Path(input_path)
     if not path.exists():
         raise FileNotFoundError(f"Subtitle file not found: {path}")
@@ -250,6 +423,31 @@ def parse_subtitles(input_path: Union[str, Path], *, encoding: Optional[str] = N
 # ---------------------------------------------------------------------------
 
 def render_to_csv(segs: Iterable[SubtitleSegment], out_path: Union[str, Path], *, include_name: bool = False) -> Path:
+    """
+    Write segments to a CSV file.
+
+    The CSV schema is:
+
+    ``start_time,end_time[,name],text``
+
+    Times are written as integer milliseconds (stringified) to preserve exact
+    alignment for downstream tools.
+
+    Parameters
+    ----------
+    segs : Iterable[SubtitleSegment]
+        Segments to write.
+    out_path : str or pathlib.Path
+        Output CSV path.
+    include_name : bool, default=False
+        Include a ``name`` column (useful if upstream added speaker names).
+
+    Returns
+    -------
+    pathlib.Path
+        Path to the written CSV file.
+    """
+
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8", newline="") as f:
@@ -268,6 +466,24 @@ def render_to_csv(segs: Iterable[SubtitleSegment], out_path: Union[str, Path], *
     return out_path
 
 def render_to_srt(segs: Iterable[SubtitleSegment], out_path: Union[str, Path]) -> Path:
+    """
+    Write segments to SRT format.
+
+    Blocks are 1-indexed and use ``HH:MM:SS,mmm`` timestamps.
+
+    Parameters
+    ----------
+    segs : Iterable[SubtitleSegment]
+        Segments to write.
+    out_path : str or pathlib.Path
+        Output ``.srt`` path.
+
+    Returns
+    -------
+    pathlib.Path
+        Path to the written SRT file.
+    """
+
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8", newline="") as f:
@@ -278,6 +494,24 @@ def render_to_srt(segs: Iterable[SubtitleSegment], out_path: Union[str, Path]) -
     return out_path
 
 def render_to_vtt(segs: Iterable[SubtitleSegment], out_path: Union[str, Path]) -> Path:
+    """
+    Write segments to WebVTT format.
+
+    Includes a standard ``WEBVTT`` header and uses ``HH:MM:SS.mmm`` timestamps.
+
+    Parameters
+    ----------
+    segs : Iterable[SubtitleSegment]
+        Segments to write.
+    out_path : str or pathlib.Path
+        Output ``.vtt`` path.
+
+    Returns
+    -------
+    pathlib.Path
+        Path to the written VTT file.
+    """
+
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8", newline="") as f:
@@ -301,19 +535,38 @@ def convert_subtitles(
     include_name: bool = False,
 ) -> Path:
     """
-    Programmatic API that mirrors the CLI behavior.
+    Convert an SRT/VTT file to CSV/SRT/VTT.
 
-    Args:
-        input: Path to input .srt or .vtt file.
-        to: Output format: "csv", "srt", or "vtt".
-        output: Optional explicit output path. If None, defaults to
-                ./features/subtitles/<input_stem>.<ext>
-        encoding: Optional forced input encoding. If None, tries chardet then utf-8.
-        include_name: Include 'name' column in CSV (if available).
+    Reads a subtitle file, parses into normalized segments, and renders to the
+    requested format. When ``output`` is omitted, a default path is created at
+    ``./features/subtitles/<input_stem>.<ext>``.
 
-    Returns:
+    Parameters
+    ----------
+    input : str or pathlib.Path
+        Path to the input ``.srt`` or ``.vtt`` file.
+    to : {'csv', 'srt', 'vtt'}
+        Desired output format.
+    output : str or pathlib.Path, optional
+        Explicit output path. If ``None``, use the default location.
+    encoding : str, optional
+        Input encoding override; otherwise auto-detected (or UTF-8).
+    include_name : bool, default=False
+        When ``to='csv'``, include a ``name`` column if available.
+
+    Returns
+    -------
+    pathlib.Path
         Path to the written output file.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the input file does not exist.
+    ValueError
+        If the output format is unsupported or input content is malformed.
     """
+
     in_path = Path(input).resolve()
     segs = parse_subtitles(in_path, encoding=encoding)
 
@@ -338,6 +591,22 @@ def convert_subtitles(
 # ---------------------------------------------------------------------------
 
 def _build_arg_parser() -> argparse.ArgumentParser:
+    """
+    Create an ``argparse.ArgumentParser`` for the subtitle converter CLI.
+
+    The parser supports:
+    - ``--input``: path to ``.srt`` or ``.vtt``
+    - ``--to``: output format (``csv``, ``srt``, ``vtt``)
+    - ``--output``: optional explicit output path
+    - ``--encoding``: optional input encoding override
+    - ``--include-name``: include ``name`` column when writing CSV
+
+    Returns
+    -------
+    argparse.ArgumentParser
+        Configured parser instance.
+    """
+
     p = argparse.ArgumentParser(
         prog="taters.text.subtitle_parser",
         description="Parse SRT/WebVTT subtitles and export to CSV/SRT/VTT."
@@ -350,6 +619,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return p
 
 def main():
+    """
+    Command-line entry point for subtitle parsing and conversion.
+
+    Parses arguments via :func:`_build_arg_parser`, calls
+    :func:`convert_subtitles`, and prints the resulting output path.
+
+    Examples
+    --------
+    $ python -m taters.text.subtitle_parser \
+        --input transcript.srt --to csv \
+        --output features/subtitles/transcript.csv
+    """
+
     args = _build_arg_parser().parse_args()
     out = convert_subtitles(
         input=args.input,

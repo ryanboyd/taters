@@ -20,7 +20,31 @@ def _iter_csv_files(
     pattern: str = "*.csv",
     recursive: bool = True,
 ):
-    """Yield CSV files under one folder (optionally recursive)."""
+    """
+    Yield CSV files under a root directory, optionally searching recursively.
+
+    Parameters
+    ----------
+    root_dir : PathLike
+        Root directory to search, or a single CSV file. If a file is passed
+        and it matches `pattern`, it is yielded.
+    pattern : str, default="*.csv"
+        Glob pattern for file discovery.
+    recursive : bool, default=True
+        If True, search with ``Path.rglob``; otherwise use ``Path.glob`` in the
+        top-level folder only.
+
+    Yields
+    ------
+    pathlib.Path
+        Absolute paths to files that match the pattern.
+
+    Notes
+    -----
+    If `root_dir` does not exist, nothing is yielded. If `root_dir` is a file
+    and matches `pattern`, it is yielded even though the typical use is a folder.
+    """
+
     root = Path(root_dir)
     if not root.exists():
         return
@@ -49,7 +73,41 @@ def _read_csv_add_source(
     source_col_stem: str = "source_stem",
     source_col_path: str = "source_path",
 ) -> pd.DataFrame:
-    """Read a CSV and add origin columns, with 'source' inserted first."""
+    """
+    Read a CSV and insert origin metadata columns.
+
+    The function reads a CSV into a DataFrame (all columns as object dtype),
+    then inserts a leading ``"source"`` column with the file stem. If
+    ``add_source_path`` is True, it also inserts a ``"source_path"`` column
+    immediately after ``"source"`` with the absolute path.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        Path to the CSV file.
+    delimiter : str, default=","
+        Field delimiter for the CSV.
+    encoding : str, default="utf-8-sig"
+        Text encoding for the CSV file.
+    add_source_path : bool, default=False
+        If True, include a ``"source_path"`` column with the absolute path.
+    source_col_stem : str, default="source_stem"
+        Deprecated/compatibility parameter; not used.
+    source_col_path : str, default="source_path"
+        Deprecated/compatibility parameter; not used.
+
+    Returns
+    -------
+    pandas.DataFrame
+        The loaded DataFrame with ``"source"`` (and optionally ``"source_path"``)
+        inserted at the beginning.
+
+    Notes
+    -----
+    The CSV field size limit is raised to handle very large text fields. Non-fatal
+    read errors should be handled by the caller.
+    """
+
     # Robust CSV field size (giant text cells)
     try:
         csv.field_size_limit(sys.maxsize)
@@ -85,7 +143,32 @@ def make_plan(
     exclude_regex: Optional[str] = None,
     dropna: bool = True,
 ) -> AggregationPlan:
-    """Convenience factory for AggregationPlan."""
+    """
+    Create an :class:`AggregationPlan` from simple arguments.
+
+    Parameters
+    ----------
+    group_by : Sequence[str]
+        Grouping key(s) to use (e.g., ``["speaker"]``).
+    per_file : bool, default=True
+        If True, group within files by including ``"source"`` in group keys.
+    stats : Sequence[str], default=("mean", "std")
+        Statistical reductions to compute per numeric column.
+    exclude_cols : Sequence[str], default=()
+        Columns to drop prior to feature selection.
+    include_regex : str or None, default=None
+        Regex to include feature columns by name.
+    exclude_regex : str or None, default=None
+        Regex to exclude feature columns by name.
+    dropna : bool, default=True
+        Drop rows with NA in any group key.
+
+    Returns
+    -------
+    AggregationPlan
+        A configured plan instance for :func:`aggregate_features`.
+    """
+
     return AggregationPlan(
         group_by=tuple(group_by),
         per_file=per_file,
@@ -125,13 +208,69 @@ def feature_gather(
     overwrite_existing: bool = False,
 ) -> Path:
     """
-    Single entry point:
-      - aggregate=False → concatenate CSVs into one (adds source_stem/_path).
-      - aggregate=True  → aggregate numeric columns per AggregationPlan.
+    Single entry point to concatenate or aggregate feature CSVs from one folder.
 
-    If aggregate=True and no 'plan' is provided, a plan is constructed from
-    the *quick plan* args above (group_by, per_file, stats, …).
+    If ``aggregate=False``, CSVs are concatenated with origin metadata
+    (see :func:`gather_csvs_to_one`). If ``aggregate=True``, numeric feature
+    columns are aggregated per the provided or constructed plan
+    (see :func:`aggregate_features`).
+
+    Parameters
+    ----------
+    root_dir : PathLike
+        Folder containing per-item CSVs (or a single CSV file).
+    pattern : str, default="*.csv"
+        Glob pattern for selecting CSV files.
+    recursive : bool, default=True
+        Recurse into subdirectories when True.
+    delimiter : str, default=","
+        CSV delimiter.
+    encoding : str, default="utf-8-sig"
+        CSV encoding.
+    add_source_path : bool, default=False
+        If True, include a ``"source_path"`` column in outputs.
+    aggregate : bool, default=False
+        Toggle aggregation mode. If False, files are concatenated.
+    plan : AggregationPlan or None, default=None
+        Explicit plan for aggregation. Required if ``aggregate=True`` and
+        ``group_by`` is not given.
+    group_by : Sequence[str] or None, default=None
+        Quick-plan keys. Used only when ``aggregate=True`` and ``plan`` is None.
+    per_file : bool, default=True
+        Quick-plan flag; include ``"source"`` in grouping keys to aggregate per file.
+    stats : Sequence[str], default=("mean", "std")
+        Quick-plan statistics to compute per numeric column.
+    exclude_cols : Sequence[str], default=()
+        Quick-plan columns to drop before numeric selection.
+    include_regex : str or None, default=None
+        Quick-plan regex to include feature columns by name.
+    exclude_regex : str or None, default=None
+        Quick-plan regex to exclude feature columns by name.
+    dropna : bool, default=True
+        Quick-plan NA handling for group keys.
+    out_csv : PathLike or None, default=None
+        Output CSV path. If None, defaults to
+        ``<root_dir_parent>/<root_dir_name>.csv``.
+    overwrite_existing : bool, default=False
+        If False and `out_csv` exists, the existing path is returned without
+        recomputation.
+
+    Returns
+    -------
+    pathlib.Path
+        Path to the resulting CSV.
+
+    Raises
+    ------
+    ValueError
+        If ``aggregate=True`` and neither ``plan`` nor ``group_by`` is provided.
+
+    See Also
+    --------
+    gather_csvs_to_one : Concatenate CSVs with origin metadata.
+    aggregate_features : Aggregate numeric columns according to a plan.
     """
+
     if not aggregate:
         return gather_csvs_to_one(
             root_dir=root_dir,
@@ -183,13 +322,51 @@ def gather_csvs_to_one(
     overwrite_existing: bool = False,
 ) -> Path:
     """
-    Concatenate many CSVs from one folder into a single CSV with 'source_stem'
-    (and optional 'source_path'). Returns the output path.
+    Concatenate many CSVs into a single CSV with origin metadata.
 
-    Default out path (if not provided):
-        <root_dir_parent>/<root_dir_name>.csv
-        e.g., /features/whisper-embeddings → /features/whisper-embeddings.csv
+    Each input CSV is loaded (all columns as object dtype), a leading
+    ``"source"`` column is inserted (and optionally ``"source_path"``), and
+    rows are appended. The final CSV ensures ``"source"`` (and, if present,
+    ``"source_path"``) lead the column order.
+
+    Parameters
+    ----------
+    root_dir : PathLike
+        Folder containing CSVs, or a single CSV file.
+    pattern : str, default="*.csv"
+        Glob pattern for selecting files.
+    recursive : bool, default=True
+        Recurse into subdirectories when True.
+    delimiter : str, default=","
+        CSV delimiter.
+    encoding : str, default="utf-8-sig"
+        CSV encoding for read/write.
+    add_source_path : bool, default=False
+        If True, include absolute path in ``"source_path"``.
+    out_csv : PathLike or None, default=None
+        Output path. If None, defaults to
+        ``<root_dir_parent>/<root_dir_name>.csv``.
+    overwrite_existing : bool, default=False
+        If False and `out_csv` exists, return it without recomputation.
+
+    Returns
+    -------
+    pathlib.Path
+        Path to the written CSV.
+
+    Raises
+    ------
+    FileNotFoundError
+        If no files match the pattern under `root_dir`.
+    RuntimeError
+        If files were found but none could be read successfully.
+
+    Notes
+    -----
+    Input rows are not type-coerced beyond object dtype. Column order from
+    inputs is preserved after the leading origin columns.
     """
+
     root = Path(root_dir)
     if out_csv is None:
         out_csv = root.parent / f"{root.name}.csv"
@@ -242,15 +419,38 @@ def gather_csvs_to_one(
 @dataclass
 class AggregationPlan:
     """
-    Plan for aggregating numeric columns.
-    - group_by: keys to group on (e.g., ["speaker"])
-    - per_file: if True, include 'source_stem' in grouping (stats per input file);
-                if False, aggregate across files globally.
-    - stats: stat names understood by pandas ('mean', 'std', 'median', etc.)
-    - exclude_cols: columns to drop before aggregation (e.g., 'start_time', 'end_time', 'text')
-    - include_regex / exclude_regex: optional regex filters for feature column names
-    - dropna: whether to drop rows with NA in group keys
+    Plan describing how numeric feature columns should be aggregated.
+
+    Parameters
+    ----------
+    group_by : Sequence[str]
+        One or more column names used as grouping keys (e.g., ``["speaker"]``).
+    per_file : bool, default=True
+        If True, include ``"source"`` in the grouping keys to aggregate within
+        each input file; if False, aggregate across all files globally.
+    stats : Sequence[str], default=("mean", "std")
+        Statistical reductions to compute for each numeric feature column.
+        Values are passed to ``pandas.DataFrame.agg`` (e.g., ``"mean"``, ``"std"``,
+        ``"median"``, etc.).
+    exclude_cols : Sequence[str], default=()
+        Columns to drop before filtering/selecting numeric features (e.g.,
+        timestamps or free text).
+    include_regex : str or None, default=None
+        Optional regex; if provided, only columns matching this pattern are kept
+        (after excluding `exclude_cols`).
+    exclude_regex : str or None, default=None
+        Optional regex; if provided, columns matching this pattern are removed
+        (after applying `include_regex`, if any).
+    dropna : bool, default=True
+        Whether to drop rows with NA in any of the group-by keys before grouping.
+
+    Notes
+    -----
+    This plan is consumed by :func:`aggregate_features`. Column filtering happens
+    before numeric selection; only columns that remain and can be coerced to numeric
+    will be aggregated.
     """
+
     group_by: Sequence[str]
     per_file: bool = True
     stats: Sequence[str] = ("mean", "std")
@@ -267,7 +467,27 @@ def _filter_columns(
     include_regex: Optional[str],
     exclude_regex: Optional[str],
 ) -> pd.DataFrame:
-    """Apply include/exclude filters to columns before numeric selection."""
+    """
+    Filter columns prior to numeric feature selection.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input frame containing group keys and feature columns.
+    exclude_cols : Sequence[str]
+        Columns to drop unconditionally.
+    include_regex : str or None
+        If provided, keep only columns whose names match this regex.
+    exclude_regex : str or None
+        If provided, drop columns whose names match this regex (applied after
+        `include_regex`).
+
+    Returns
+    -------
+    pandas.DataFrame
+        A view of `df` with columns filtered according to the rules.
+    """
+
     cols = list(df.columns)
     keep = [c for c in cols if c not in set(exclude_cols)]
     if include_regex:
@@ -280,7 +500,26 @@ def _filter_columns(
 
 
 def _numeric_subframe(df: pd.DataFrame) -> pd.DataFrame:
-    """Coerce to numeric where possible; keep only numeric columns."""
+    """
+    Coerce columns to numeric and return only numeric columns.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input frame containing candidate feature columns.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Frame consisting only of columns that could be coerced to numeric
+        (non-numeric values become NaN and non-numeric columns are dropped).
+
+    Notes
+    -----
+    Uses ``pandas.to_numeric(errors="coerce")`` followed by
+    ``select_dtypes(include=[numpy.number])``.
+    """
+
     num_df = df.apply(pd.to_numeric, errors="coerce")
     return num_df.select_dtypes(include=[np.number])
 
@@ -298,10 +537,57 @@ def aggregate_features(
     overwrite_existing: bool = False,
 ) -> Path:
     """
-    Discover → read → concat → aggregate numeric columns per plan.
-    Default out path (if not provided):
-        <root_dir_parent>/<root_dir_name>.csv
+    Discover files, read, concatenate, and aggregate numeric columns per plan.
+
+    This function consolidates CSVs from a single folder, filters columns,
+    coerces candidate features to numeric, groups by the specified keys,
+    and computes the requested statistics. Output columns for aggregated
+    features are flattened with the pattern ``"{column}__{stat}"``.
+
+    Parameters
+    ----------
+    root_dir : PathLike
+        Folder containing per-item CSVs, or a single CSV file.
+    pattern : str, default="*.csv"
+        Glob pattern for selecting files.
+    recursive : bool, default=True
+        Recurse into subdirectories when True.
+    delimiter : str, default=","
+        CSV delimiter.
+    encoding : str, default="utf-8-sig"
+        CSV encoding for read/write.
+    add_source_path : bool, default=False
+        If True, include absolute path in ``"source_path"`` prior to filtering.
+    plan : AggregationPlan
+        Aggregation configuration (group keys, stats, filters, NA handling).
+    out_csv : PathLike or None, default=None
+        Output path. If None, defaults to
+        ``<root_dir_parent>/<root_dir_name>.csv``.
+    overwrite_existing : bool, default=False
+        If False and `out_csv` exists, return it without recomputation.
+
+    Returns
+    -------
+    pathlib.Path
+        Path to the written CSV of aggregated features.
+
+    Raises
+    ------
+    FileNotFoundError
+        If no files match the pattern under `root_dir`.
+    RuntimeError
+        If files were found but none could be read successfully.
+    ValueError
+        If required group-by columns are missing,
+        or if no numeric columns remain after filtering,
+        or if per-file grouping is requested but the ``"source"`` column is absent.
+
+    Notes
+    -----
+    Group keys are preserved as leading columns in the output. The output places
+    ``"source"`` (and optionally ``"source_path"``) first when present.
     """
+
     root = Path(root_dir)
     if out_csv is None:
         out_csv = root.parent / f"{root.name}.csv"
@@ -389,6 +675,21 @@ def aggregate_features(
 # ---------------------------
 
 def _build_parser():
+    """
+    Create an ``argparse.ArgumentParser`` for the CLI.
+
+    The parser defines three subcommands:
+
+    - ``gather``: Concatenate CSVs with origin metadata.
+    - ``aggregate``: Aggregate numeric columns by group keys.
+    - ``run``: Single entry point; toggles aggregation via ``--aggregate``.
+
+    Returns
+    -------
+    argparse.ArgumentParser
+        Configured parser with subcommands and options.
+    """
+
     import argparse
     p = argparse.ArgumentParser(
         description="Gather and optionally aggregate feature CSVs across a single folder."
@@ -445,6 +746,20 @@ def _build_parser():
 
 
 def main():
+    """
+    Entry point for the command-line interface.
+
+    Parses arguments, dispatches to :func:`gather_csvs_to_one`,
+    :func:`aggregate_features`, or :func:`feature_gather` depending on the
+    selected subcommand, and prints the resulting output path.
+
+    Notes
+    -----
+    This function is invoked when the module is executed as a script::
+
+        python -m taters.helpers.feature_gather <subcommand> [options]
+    """
+
     parser = _build_parser()
     args = parser.parse_args()
 
