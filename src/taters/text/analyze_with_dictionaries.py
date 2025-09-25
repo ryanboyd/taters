@@ -393,7 +393,7 @@ def _build_arg_parser():
     return p
 
 def main():
-    """
+    r"""
     Command-line entry point for multi-dictionary content coding.
 
     Parses CLI arguments via :func:`_build_arg_parser`, normalizes list-like defaults,
