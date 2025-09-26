@@ -7,8 +7,8 @@
 
 Taters is a Python toolkit (and CLI) for getting from raw media to analysis-ready artifacts — fast, repeatable, and with predictable outputs. Point it at video, audio, or text and it helps you build end-to-end workflows: extract WAV from video, diarize and transcribe, compute embeddings, run dictionary/archetype analyses, then gather everything into tidy datasets you can model or visualize.
 
-> 🥔 Documentation: **[https://www.taters.wiki](https://www.taters.wiki)**
-> 🥔 Status: early but usable; APIs will probably evolve. Pin versions if you need stability.
+* 🥔 Documentation: **[https://www.taters.wiki](https://www.taters.wiki)**
+* 🥔 Status: early but usable; APIs will probably evolve. Pin versions if you need stability.
 
 ---
 
