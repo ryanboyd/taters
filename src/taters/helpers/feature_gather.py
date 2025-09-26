@@ -375,7 +375,7 @@ def gather_csvs_to_one(
     out_csv.parent.mkdir(parents=True, exist_ok=True)
 
     if out_csv.exists() and not overwrite_existing:
-        print("Aggregated feature output file already exists; returning existing file.")
+        print(f"Aggregated feature output file already exists; returning existing file: {out_csv}")
         return out_csv
 
     files = list(_iter_csv_files(root, pattern=pattern, recursive=recursive))
@@ -595,7 +595,7 @@ def aggregate_features(
     out_csv.parent.mkdir(parents=True, exist_ok=True)
 
     if out_csv.exists() and not overwrite_existing:
-        print("Aggregated feature output file already exists; returning existing file.")
+        print(f"Aggregated feature output file already exists; returning existing file: {out_csv}")
         return out_csv
 
     files = list(_iter_csv_files(root, pattern=pattern, recursive=recursive))

@@ -26,6 +26,7 @@ import concurrent.futures as cf
 import importlib
 import json
 import re
+from collections import ChainMap
 from dataclasses import is_dataclass, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -280,124 +281,153 @@ def _deep_get(d: Any, dotted: str) -> Any:
             raise KeyError(f"Could not resolve '{part}' in {_json_safe(cur)}")
     return cur
 
-def _eval_expr(expr: str, *, item_ctx: dict, globals_ctx: dict, vars_ctx: dict, input_path: Path) -> Any:
+def _eval_expr(
+    expr: str,
+    *,
+    item_ctx: dict,
+    globals_ctx: dict,
+    vars_ctx: dict,
+    input_path: Path
+) -> Any:
     """
     Evaluate a single templating expression and return a native Python value.
 
-    Supported expressions:
-      - `input`      → the current item's input path (string)
-      - `cwd`        → current working directory (string)
-      - `var:<key>`  → look up `vars[<key>]`
-      - `global.<p>` → deep lookup on the globals context
-      - `pick:<artifact>.<path>` → deep lookup inside an item artifact
-      - `<artifact>` → direct lookup in the item's artifact dict
+    Supported expressions
+    ---------------------
+      - input              → absolute path to the current item's input
+      - cwd                → current working directory
+      - var:<key>          → look up vars[<key>]
+      - global.<path>      → deep lookup on globals (explicit)
+      - pick:<name>.<path> → deep lookup inside an artifact; searches item, then globals
+      - <name>             → *bare* artifact name; resolves from item_ctx, else globals_ctx
 
     Notes
     -----
-    If the expression cannot be resolved by any rule, the raw `{{...}}`
-    string is returned as a literal—this allows progressive templating or
-    clearer error messages at call time.
-
-    Parameters
-    ----------
-    expr : str
-        Expression content without the surrounding `{{` and `}}`.
-    item_ctx : dict
-        Per-item artifact dictionary (things saved via `save_as`).
-    globals_ctx : dict
-        Global artifact dictionary (set by GLOBAL steps).
-    vars_ctx : dict
-        Variables merged from preset → vars file → `--var` flags.
-    input_path : Path
-        Path of the current input item, for `input`.
-
-    Returns
-    -------
-    Any
-        Native Python value that represents the expression.
+    - If the expression cannot be resolved by any rule, the raw {{...}} string
+      is returned unchanged. This preserves progressive templating behavior
+      and yields clearer downstream errors if something stays unresolved.
     """
     expr = expr.strip()
+
+    # Special literals
     if expr == "input":
         return str(input_path)
     if expr == "cwd":
         return str(Path.cwd())
+
+    # Variables
     if expr.startswith("var:"):
         key = expr.split(":", 1)[1]
         if key not in vars_ctx:
             raise KeyError(f"Variable '{key}' not found")
         return vars_ctx[key]
+
+    # Explicit global lookup: {{global.foo.bar}}
     if expr.startswith("global."):
-        key = expr.split(".", 1)[1]
-        return _deep_get(globals_ctx, key) if key else globals_ctx
+        keypath = expr.split(".", 1)[1]
+        return _deep_get(globals_ctx, keypath) if keypath else globals_ctx
+
+    # Nested artifact lookup with pick:
+    # Prefer item artifacts; fall back to globals if not found in item.
     if expr.startswith("pick:"):
         path = expr.split(":", 1)[1]
         if "." not in path:
             raise KeyError("pick: requires 'artifact.nested.path'")
         art, nested = path.split(".", 1)
-        if art not in item_ctx:
-            raise KeyError(f"Artifact '{art}' not found")
-        return _deep_get(item_ctx[art], nested)
+        base = item_ctx.get(art, None)
+        if base is None:
+            base = globals_ctx.get(art, None)
+        if base is None:
+            raise KeyError(f"Artifact '{art}' not found in item or globals context")
+        return _deep_get(base, nested)
+
+    # Bare artifact name: resolve from item first, then globals
     if expr in item_ctx:
         return item_ctx[expr]
-    # fallback: return raw template if unknown
+    if expr in globals_ctx:
+        return globals_ctx[expr]
+
+    # Fallback: leave template as-is (string)
     return "{{" + expr + "}}"
 
-def render_value(val: Any, *, item_ctx: dict, globals_ctx: dict, vars_ctx: dict, input_path: Path) -> Any:
+
+def render_value(
+    val: Any,
+    *,
+    item_ctx: dict,
+    globals_ctx: dict,
+    vars_ctx: dict,
+    input_path: Path
+) -> Any:
     """
     Render templating expressions within a value (str, list, or dict).
 
-    Behavior:
-      * If `val` is a dict or list/tuple, render recursively.
-      * If `val` is a string and the ENTIRE string is a single template
-        (e.g., `\"{{var:text_cols}}\"`), return the native value
-        (list, int, bool, etc.) of that expression.
-      * Otherwise, perform string substitution on all `{{...}}` occurrences
-        and return the string result.
+    Behavior
+    --------
+      - Dicts/lists/tuples: render recursively.
+      - If a string is exactly one template token (e.g., "{{var:text_cols}}"),
+        return the *native* value of that expression (list, int, bool, ...).
+      - Otherwise, perform string substitution for every {{...}} occurrence and
+        return the resulting string.
 
-    This “native-type preserving” rule is crucial for YAML presets:
-    ```
-      text_cols: "{{var:text_cols}}"  # becomes a list, not the string "['text']"
-    ```
-
-    Parameters
-    ----------
-    val : Any
-        The value to render (string, list/tuple, dict, or other).
-    item_ctx : dict
-        Per-item artifacts for `{{pick:...}}` and artifact references.
-    globals_ctx : dict
-        Globals for `{{global...}}` lookups.
-    vars_ctx : dict
-        Variables context for `{{var:...}}` lookups.
-    input_path : Path
-        The current input item (for `{{input}}`).
-
-    Returns
-    -------
-    Any
-        Rendered value, with native types preserved where applicable.
+    Resolution rules (summary)
+    --------------------------
+      - {{input}} / {{cwd}}
+      - {{var:key}}
+      - {{global.path}} (explicit globals)
+      - {{pick:name.path}}  → search item, then globals
+      - {{name}}            → bare name; search item, then globals
     """
     if isinstance(val, dict):
-        return {k: render_value(v, item_ctx=item_ctx, globals_ctx=globals_ctx, vars_ctx=vars_ctx, input_path=input_path)
-                for k, v in val.items()}
+        return {
+            k: render_value(
+                v,
+                item_ctx=item_ctx,
+                globals_ctx=globals_ctx,
+                vars_ctx=vars_ctx,
+                input_path=input_path,
+            )
+            for k, v in val.items()
+        }
     if isinstance(val, (list, tuple)):
-        return [render_value(v, item_ctx=item_ctx, globals_ctx=globals_ctx, vars_ctx=vars_ctx, input_path=input_path)
-                for v in val]
+        return [
+            render_value(
+                v,
+                item_ctx=item_ctx,
+                globals_ctx=globals_ctx,
+                vars_ctx=vars_ctx,
+                input_path=input_path,
+            )
+            for v in val
+        ]
     if not isinstance(val, str):
         return val
 
-    # If the whole string is a single {{...}}, return the native value
+    # Entire string is a single template → return native type
     m = _VAR_RE.fullmatch(val.strip())
     if m:
-        native = _eval_expr(m.group(1), item_ctx=item_ctx, globals_ctx=globals_ctx, vars_ctx=vars_ctx, input_path=input_path)
-        return native
+        return _eval_expr(
+            m.group(1),
+            item_ctx=item_ctx,
+            globals_ctx=globals_ctx,
+            vars_ctx=vars_ctx,
+            input_path=input_path,
+        )
 
-    # Otherwise do string substitution with each expr -> str(value)
+    # Otherwise substitute each token as a string
     def _subst(match: re.Match) -> str:
         expr = match.group(1)
-        v = _eval_expr(expr, item_ctx=item_ctx, globals_ctx=globals_ctx, vars_ctx=vars_ctx, input_path=input_path)
+        v = _eval_expr(
+            expr,
+            item_ctx=item_ctx,
+            globals_ctx=globals_ctx,
+            vars_ctx=vars_ctx,
+            input_path=input_path,
+        )
         return str(v)
+
     return _VAR_RE.sub(_subst, val)
+
 
 
 # ============== Call resolver (no hard-coded mapping) ==============

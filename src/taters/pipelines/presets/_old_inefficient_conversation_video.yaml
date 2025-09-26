@@ -1,0 +1,230 @@
+# Preset: conversation_video
+#
+# Pipeline shape
+#   1) video  → wav
+#   2) diarize (writes transcript CSV)
+#   3) per-speaker wavs from transcript
+#   4) whisper embeddings (segment-level, from transcript)
+#   5) dictionary content coding (group by speaker)
+#   6) archetypes analysis (group by speaker)
+#   7) sentence embeddings (row-level)
+#  [8-11) optional global gathers]
+
+vars:
+  # General toggles
+  overwrite_existing: false        # set true to recompute even if outputs exist
+  device: auto                     # auto | cuda | cpu
+  whisper_model: base              # tiny/base/small/medium/large-v3 (or ct2 dir)
+  language: en
+  num_speakers: null               # null → let diarizer decide; or set an integer
+
+  # Text-gather settings for dicts/archetypes/sentence embeddings
+  text_cols:
+    - text
+  id_cols:
+    - speaker
+  group_by: 
+    - speaker
+  delimiter: ","
+
+  # Dictionaries & Archetypes to run
+  dict_paths:
+    - dictionaries/liwc/
+
+  archetype_csvs:
+    - dictionaries/archetypes/
+
+  # Sentence-Transformers model used for archetypes & sentence embeddings
+  nlp_model: sentence-transformers/all-roberta-large-v1
+
+steps:
+  # ------------------------------------------------------------
+  # 1) Extract WAV from video (per item)
+  # ------------------------------------------------------------
+  - call: potato.audio.convert_to_wav
+    scope: item
+    with:
+      input_path: "{{input}}"
+      sample_rate: 16000
+      channels: 1
+      overwrite_existing: "{{var:overwrite_existing}}"
+    save_as: wav
+    require: [input_path]
+
+  # ------------------------------------------------------------
+  # 2) Diarize to transcript CSV/SRT/TXT (per item)
+  # ------------------------------------------------------------
+  - call: potato.audio.diarize_with_thirdparty
+    scope: item
+    with:
+      audio_path: "{{wav}}"
+      whisper_model: "{{var:whisper_model}}"
+      language: "{{var:language}}"
+      device: "{{var:device}}"            # auto/cuda/cpu supported by wrapper
+      batch_size: 0
+      use_custom: true
+      keep_temp: false
+      num_speakers: "{{var:num_speakers}}"
+    save_as: diar
+    require: [audio_path]
+
+  # ------------------------------------------------------------
+  # 3) Split per-speaker WAVs (per item)
+  # ------------------------------------------------------------
+  - call: potato.audio.split_wav_by_speaker
+    scope: item
+    with:
+      source_wav: "{{wav}}"
+      transcript_csv_path: "{{pick:diar.raw_files.csv}}"
+      time_unit: "ms"              # diar CSVs use ms by default
+      silence_ms: 500
+      sr: 16000
+      mono: true
+    save_as: speaker_wavs
+    require: [source_wav, transcript_csv_path]
+
+  # ------------------------------------------------------------
+  # 4) Whisper embeddings (segment-level from transcript) (per item)
+  #     Defaults to ./features/whisper-embeddings/ if output_dir not set.
+  # ------------------------------------------------------------
+  - call: potato.audio.extract_whisper_embeddings
+    scope: item
+    with:
+      source_wav: "{{wav}}"
+      transcript_csv: "{{pick:diar.raw_files.csv}}"
+      model_name: "{{var:whisper_model}}"
+      device: "{{var:device}}"
+      time_unit: "ms"
+      compute_type: "float16"
+      run_in_subprocess: true
+      verbose: true
+    save_as: whisper_embed_csv
+    require: [source_wav, transcript_csv]
+
+  # ------------------------------------------------------------
+  # 5) Dictionary content coding (grouped by speaker) (per item)
+  #     Defaults to ./features/dictionary/<filename> when out_features_csv omitted.
+  # ------------------------------------------------------------
+  - call: potato.text.analyze_with_dictionaries
+    scope: item
+    with:
+      csv_path: "{{pick:diar.raw_files.csv}}"
+      dict_paths: "{{var:dict_paths}}"
+      encoding: "utf-8-sig"
+      delimiter: "{{var:delimiter}}"
+      text_cols: "{{var:text_cols}}"
+      id_cols: "{{var:id_cols}}"
+      group_by: "{{var:group_by}}"
+      relative_freq: true
+      drop_punct: true
+      rounding: 4
+      retain_captures: false
+      wildcard_mem: true
+      overwrite_existing: "{{var:overwrite_existing}}"
+    save_as: dict_features_csv
+    require: [csv_path, dict_paths]    # <— was [analysis_csv, dict_paths]
+
+
+  # ------------------------------------------------------------
+  # 6) Archetypes analysis (grouped by speaker) (per item)
+  #     Defaults to ./features/archetypes/<filename> when out_features_csv omitted.
+  # ------------------------------------------------------------
+  - call: potato.text.analyze_with_archetypes
+    scope: item
+    engine: thread     
+    workers: 1          # <— one worker avoids concurrent torch loads
+    # if you want to do multiple analyses concurrently, you could instead not worry about
+    # the number of workers and instead run as isolated subprocesses. this will avoid the
+    # issues with torch/HF/CUDA collisions, but has more overhead for model loading and
+    # will be vastly more memory-intensive. this could be done as such:
+    # engine: process # run as a cf.ProcessPoolExecutor to avoid CUDA/meta-tensor collisions
+    with:
+      csv_path: "{{pick:diar.raw_files.csv}}"
+      archetype_csvs: "{{var:archetype_csvs}}"
+      encoding: "utf-8-sig"
+      delimiter: "{{var:delimiter}}"
+      text_cols: "{{var:text_cols}}"
+      id_cols: "{{var:id_cols}}"
+      group_by: "{{var:group_by}}"
+      model_name: "{{var:nlp_model}}"
+      mean_center_vectors: true
+      fisher_z_transform: false
+      rounding: 4
+      overwrite_existing: "{{var:overwrite_existing}}"
+    save_as: archetypes_csv
+    require: [csv_path, archetype_csvs]   # <— was [analysis_csv, archetype_csvs]
+
+
+
+  # ------------------------------------------------------------
+  # 7) Sentence embeddings (average per row) (per item)
+  #     Defaults to ./features/sentence-embeddings/<filename> when out_features_csv omitted.
+  # ------------------------------------------------------------
+  - call: potato.text.extract_sentence_embeddings
+    scope: item
+    engine: thread     
+    workers: 1          # <— one worker avoids concurrent torch loads
+    # if you want to do multiple analyses concurrently, you could instead not worry about
+    # the number of workers and instead run as isolated subprocesses. this will avoid the
+    # issues with torch/HF/CUDA collisions, but has more overhead for model loading and
+    # will be vastly more memory-intensive. this could be done as such:
+    # engine: process # run as a cf.ProcessPoolExecutor to avoid CUDA/meta-tensor collisions
+    with:
+      csv_path: "{{pick:diar.raw_files.csv}}"
+      delimiter: "{{var:delimiter}}"
+      text_cols: "{{var:text_cols}}"
+      id_cols: "{{var:id_cols}}"
+      group_by: "{{var:group_by}}"
+      model_name: "{{var:nlp_model}}"
+      normalize_l2: false
+      rounding: null
+      overwrite_existing: "{{var:overwrite_existing}}"
+    save_as: sent_emb_csv
+    require: [csv_path]
+
+# ------------------------------------------------------------
+# GLOBAL: Gather/aggregate features across all processed files
+# ------------------------------------------------------------
+
+  # Global steps — Gather features!
+
+  # ---------- DICTIONARY (concat only) ----------
+  - call: potato.helpers.feature_gather
+    scope: global
+    with:
+      root_dir: "features/dictionary"
+      # no out_csv -> defaults to "<root_dir>.csv"
+      aggregate: false
+      overwrite_existing: "{{var:overwrite_existing}}"
+    save_as: dict_merged
+
+  # ---------- ARCHETYPES (concat only) ----------
+  - call: potato.helpers.feature_gather
+    scope: global
+    with:
+      root_dir: "features/archetypes"
+      aggregate: false
+      overwrite_existing: "{{var:overwrite_existing}}"
+    save_as: archetypes_merged
+
+  # ---------- SENTENCE EMBEDDINGS (aggregate per file by speaker) ----------
+  - call: potato.helpers.feature_gather
+    scope: global
+    with:
+      root_dir: "features/sentence-embeddings"
+      aggregate: false
+      overwrite_existing: "{{var:overwrite_existing}}"
+    save_as: sent_emb_merged
+
+  # ---------- WHISPER EMBEDDINGS (aggregate per file by speaker) ----------
+  - call: potato.helpers.feature_gather
+    scope: global
+    with:
+      root_dir: "features/whisper-embeddings"
+      aggregate: true
+      group_by: ["speaker"]
+      per_file: true
+      stats: ["mean"]
+      exclude_cols: ["start_time", "end_time"]           # whisper segment CSVs have times; drop before stats
+      overwrite_existing: "{{var:overwrite_existing}}"
+    save_as: whisper_emb_merged
