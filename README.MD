@@ -71,7 +71,7 @@ python -m taters.pipelines.run_pipeline \
 ```
 
 Details, presets, and how to write your own:
-👉 **[https://www.taters.wiki/pipelines](https://www.taters.wiki/pipelines)**
+👉 **[https://www.taters.wiki/guides/pipelines/](https://www.taters.wiki/guides/pipelines/)**
 
 ---
 
