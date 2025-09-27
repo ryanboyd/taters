@@ -97,39 +97,31 @@ def make_speaker_wavs_from_csv(
     if time_unit not in ("ms", "s"):
         raise ValueError("time_unit must be 'ms' or 's'")
 
-    # --- small helper for filename-friendly labels (keeps spaces) ---
     def _friendly_filename_label(name: str) -> str:
         s = (name or "").strip()
-        s = s.replace("/", "_").replace("\\", "_")     # forbid path separators
-        s = re.sub(r'[<>:"|?*]', "", s)               # trim problematic chars
-        s = re.sub(r"\s+", " ", s)                    # collapse whitespace
+        s = s.replace("/", "_").replace("\\", "_")
+        s = re.sub(r'[<>:"|?*]', "", s)
+        s = re.sub(r"\s+", " ", s)
         return s or "SPEAKER_0"
 
-    # Resolve paths
     source_wav = Path(source_wav)
     transcript_csv_path = Path(transcript_csv_path)
-
-    # Default predictable location if none provided
     out_dir = Path(output_dir) if output_dir is not None else (Path.cwd() / "audio_split" / source_wav.stem)
     out_dir.mkdir(parents=True, exist_ok=True)
     base_stem = source_wav.stem
 
-    # Load audio once
     audio = AudioSegment.from_file(source_wav)
     if sr:
         audio = audio.set_frame_rate(sr)
     if mono:
         audio = audio.set_channels(1)
 
-    # Factor to convert CSV time to milliseconds
     factor = 1000.0 if time_unit == "s" else 1.0
     audio_len_ms = len(audio)
 
-    # Read CSV
     with transcript_csv_path.open(newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
 
-    # Collect segments by (sanitized) speaker key and remember friendly label
     segs_by_spk: Dict[str, List[tuple[int, int]]] = {}
     label_for_key: Dict[str, str] = {}
 
@@ -153,23 +145,14 @@ def make_speaker_wavs_from_csv(
         if end_ms <= start_ms:
             continue
 
-        spk_key = _sanitize_speaker(raw_spk)  # stable dict key
+        spk_key = _sanitize_speaker(raw_spk)
         segs_by_spk.setdefault(spk_key, []).append((start_ms, end_ms))
         label_for_key.setdefault(spk_key, _friendly_filename_label(raw_spk))
 
-    # check to see if files already exist
-    friendly = label_for_key.get(spk_key, spk_key)
-    out_path = out_dir / f"{base_stem}_{friendly}.wav"
-
-    if not overwrite_existing and Path(out_path).is_file():
-        print("WAV file already exists; returning existing file.")
-        return out_path
-
-    # Sort by start time per speaker
+    # Sort segments by start time for each speaker
     for spk_key in segs_by_spk:
         segs_by_spk[spk_key].sort(key=lambda t: (t[0], t[1]))
 
-    # Silence chunks
     pre_ms  = silence_ms if pre_silence_ms  is None else pre_silence_ms
     post_ms = silence_ms if post_silence_ms is None else post_silence_ms
     pre_sil  = AudioSegment.silent(duration=max(0, pre_ms),  frame_rate=audio.frame_rate)
@@ -178,9 +161,18 @@ def make_speaker_wavs_from_csv(
         pre_sil  = pre_sil.set_channels(1)
         post_sil = post_sil.set_channels(1)
 
-    # Build one file per speaker; name = <source_stem>_<Friendly Label>.wav
     results: Dict[str, Path] = {}
+
+    # ---- FIX: build path per speaker and check overwrite per file ----
     for spk_key, segs in segs_by_spk.items():
+        friendly = label_for_key.get(spk_key, spk_key)
+        out_path = out_dir / f"{base_stem}_{friendly}.wav"
+
+        if (not overwrite_existing) and out_path.is_file():
+            # File already exists; record and skip rendering for this speaker
+            results[friendly] = out_path
+            continue
+
         out = AudioSegment.silent(duration=0, frame_rate=audio.frame_rate)
         if mono:
             out = out.set_channels(1)
@@ -192,6 +184,7 @@ def make_speaker_wavs_from_csv(
             out += pre_sil + clip + post_sil
 
         if len(out) == 0:
+            # no valid segments collected for this speaker
             continue
 
         out.export(out_path, format="wav", codec="pcm_s16le")

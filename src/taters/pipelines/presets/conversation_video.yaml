@@ -1,18 +1,71 @@
-# ==========================================
-# Conversation video → unified features (v2)
-# ==========================================
-# Shape:
-# 1) item  : video → wav
-# 2) item  : diarize (writes transcript CSV/SRT/TXT)
-# 3) item  : per-speaker wavs from transcript
-# 4) item  : whisper embeddings (segment-level, from transcript)
-# 5) global: gather whisper embeddings (aggregate by speaker → means)
-#
-# 6) global: gather ALL transcripts → one CSV (no aggregation)
-# 7) global: dictionary coding on unified CSV (group by source,speaker)
-# 8) global: archetypes on unified CSV (group by source,speaker)
-# 9) global: sentence embeddings (row-level, no grouping)
-# 10) global: aggregate sentence embeddings by source,speaker → means
+# conversation_video.yaml
+
+meta:
+  id: conversation_video                 # short, stable identifier (file stem by default)
+  title: Conversation video → transcripts + features
+  summary: >
+    Extract audio, diarize, compute Whisper embeddings, then unify
+    transcripts and get a whole boatload of text-based features/measures.
+  use_cases:
+    - Video recordings of conversations
+    - Interview studies
+    - Focus groups
+    - etc.
+  inputs:
+    file type: video files (e.g., mkv, mp4, etc.)
+#  outputs:
+#    - path: ./transcripts/<stem>/<stem>.csv
+#      desc: Diarized transcripts with start_time,end_time,speaker,text
+#    - path: ./features/whisper-embeddings.csv
+#      desc: Speaker-mean Whisper encoder embeddings
+  requirements:
+    cpu: true
+    gpu/cuda: optional
+    ffmpeg: true
+    extras:
+      - diarization
+      - cuda
+      - readability
+  variables:
+    device:
+      default: auto
+      desc: Which device you would like to use for pytorch-heavy stuff (cpu|cuda|auto)
+    overwrite_existing:
+      default: false
+      desc: Do not overwrite outputs unless true
+    whisper_model:
+      default: base
+      desc: Faster-Whisper model size
+    num_speakers:
+      default: null
+      desc: For diarization - how many speakers would you like to try to cluster the data into?
+    dictionaries_path:
+      default: "./dictionaries/liwc"
+      desc: > 
+        A folder or list full of LIWC-formatted dictionary files 
+        (.dicx, .dic, .csv) that you want to apply to the transcripts.
+    archetypes_dict_path:
+      default: "./dictionaries/archetypes"
+      desc: >
+        A folder or list of .CSV archetype dictionaries that you want 
+        to apply to the transcripts.
+    # Output roots (override if you want)
+    transcripts_dir:
+      default: "./transcripts/"
+      desc: The base directory where you would like your individual transcripts to be saved.
+    features_dir:
+      default: "./features/"
+      desc: The base directory where you would like your feature files to be saved.
+  tags: [audio, video, diarization, embeddings]
+  version: 2
+  authors: ["Ryan L. Boyd"]
+  notes: |
+    Safe to re-run; steps short-circuit if outputs exist. See docs for tuning.
+  cli_example: >
+    python -m taters.pipelines.run_pipeline --root_dir video-data --file_type video 
+    --preset conversation_video --workers 8 --var device=cuda
+
+# Begin specification of pipeline
 
 vars:
   device: "auto"
@@ -122,7 +175,24 @@ steps:
     overwrite_existing: "{{var:overwrite_existing}}"
     relative_freq: true
 
-# 8) ARCHETYPES on the unified transcript CSV
+# 8) READABILITY on the unified transcript CSV
+#     Group by (source, speaker) so each speaker-per-file becomes one text blob.
+- scope: global
+  call: potato.text.analyze_readability
+  save_as: readability_features
+  with:
+    csv_path: "{{transcripts_all}}"          # the unified transcript CSV from step 6
+    out_features_csv: "features/readability.csv"
+    text_cols: ["text"]
+    id_cols: ["source","speaker"]            # carry these through
+    group_by: ["source","speaker"]           # aggregate utterances → per speaker
+    mode: "concat"                           # join rows within each (source,speaker)
+    delimiter: ","
+    encoding: "utf-8-sig"
+    overwrite_existing: "{{var:overwrite_existing}}"
+
+
+# 9) ARCHETYPES on the unified transcript CSV
 #    Same grouping → comparable per-speaker rows.
 - scope: global
   call: potato.text.analyze_with_archetypes
@@ -139,7 +209,7 @@ steps:
     rounding: 4
     overwrite_existing: "{{var:overwrite_existing}}"
 
-# 9) SENTENCE EMBEDDINGS (row-level, no grouping, from unified CSV)
+# 10) SENTENCE EMBEDDINGS (row-level, no grouping, from unified CSV)
 - scope: global
   call: potato.text.extract_sentence_embeddings
   save_as: sent_embeds
@@ -152,7 +222,7 @@ steps:
     normalize_l2: true
     overwrite_existing: "{{var:overwrite_existing}}"
 
-# 10) Aggregate SENTENCE EMBEDDINGS by (source, speaker) → mean
+# 11) Aggregate SENTENCE EMBEDDINGS by (source, speaker) → mean
 - scope: global
   call: potato.helpers.feature_gather
   save_as: sent_embeds_agg

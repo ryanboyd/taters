@@ -26,12 +26,83 @@ import concurrent.futures as cf
 import importlib
 import json
 import re
+import sys
 from collections import ChainMap
 from dataclasses import is_dataclass, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-import yaml
+import textwrap, yaml
+
+PRESET_DIRS = [
+    Path(__file__).parent / "presets",   # built-in
+    Path.cwd() / "pipelines",            # project-local (optional)
+]
+
+# ============ List/Describe Presets ============
+
+def _iter_presets():
+    for base in PRESET_DIRS:
+        if not base.is_dir():
+            continue
+        for p in sorted(base.glob("**/*.yaml")):
+            yield p
+
+def _load_preset_meta(path: Path) -> dict:
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        data = {}
+    meta = data.get("meta", {}) or {}
+    # sensible fallbacks
+    meta.setdefault("id", path.stem)
+    meta.setdefault("title", path.stem.replace("_"," "))
+    meta.setdefault("summary", "")
+    meta.setdefault("tags", [])
+    return meta
+
+def _cmd_list_presets():
+    rows = []
+    for p in _iter_presets():
+        m = _load_preset_meta(p)
+        rows.append((m["id"], m["title"], ", ".join(m.get("tags", [])), str(p)))
+    if not rows:
+        print("No presets found.")
+        return
+    w_id = max(len(r[0]) for r in rows)
+    w_title = max(len(r[1]) for r in rows)
+    print(f"{'ID'.ljust(w_id)}  {'Title'.ljust(w_title)}  Tags")
+    print(f"{'-'*w_id}  {'-'*w_title}  {'-'*20}")
+    for r in rows:
+        print(f"{r[0].ljust(w_id)}  {r[1].ljust(w_title)}  {r[2]}")
+
+def _cmd_describe_preset(preset_name: str):
+    # search by id or file stem match
+    for p in _iter_presets():
+        m = _load_preset_meta(p)
+        if preset_name in {m["id"], p.stem}:
+            print(f"{m['title']}  [{m['id']}]")
+            if m.get("summary"):
+                print("\nSummary:\n" + textwrap.fill(m["summary"], 100))
+            if m.get("use_cases"):
+                print("\nUse cases: " + ", ".join(m["use_cases"]))
+            if m.get("inputs"):
+                print("\nInputs:", m["inputs"])
+            if m.get("outputs"):
+                print("\nOutputs:")
+                for o in m["outputs"]:
+                    print(f"  - {o.get('path','')} — {o.get('desc','')}")
+            if m.get("variables"):
+                print("\nVariables:")
+                for k, spec in m["variables"].items():
+                    default = spec.get("default", "")
+                    desc = spec.get("desc", "")
+                    print(f"  - {k} (default: {default}) — {desc}")
+            if m.get("cli_example"):
+                print("\nExample:\n" + m["cli_example"])
+            print(f"\nFile: {p}")
+            return
+    print(f"Preset '{preset_name}' not found.")
 
 # ============== JSON-safe casting ==============
 
@@ -666,18 +737,46 @@ def main():
     # ---------------------------
     # CLI
     # ---------------------------
-    ap = argparse.ArgumentParser(description="Taters Pipeline Runner (robust templating + flexible calls)")
-    ap.add_argument("--root_dir", default=None, help="Folder to scan for inputs (required only if preset has ITEM steps)")
-    ap.add_argument("--file_type", default="any", choices=["audio", "video", "any"], help="Input type filter for discovery")
-    group = ap.add_mutually_exclusive_group(required=True)
+    ap = argparse.ArgumentParser(
+        description="Taters Pipeline Runner (robust templating + flexible calls)"
+    )
+    ap.add_argument("--root_dir", default=None,
+                    help="Folder to scan for inputs (required only if preset has ITEM steps)")
+    ap.add_argument("--file_type", default="any", choices=["audio", "video", "any"],
+                    help="Input type filter for discovery")
+
+    # NOTE: not required here — we enforce after handling list/describe.
+    group = ap.add_mutually_exclusive_group(required=False)
     group.add_argument("--preset", help="Preset name (taters/pipelines/presets/<name>.yaml)")
     group.add_argument("--preset-file", dest="preset_file", help="Path to preset YAML")
+
     ap.add_argument("--vars-file", dest="vars_file", help="YAML file with 'vars' overrides")
     ap.add_argument("--var", action="append", default=[], help="Single override key=value (repeatable)")
     ap.add_argument("--workers", type=int, default=4, help="Concurrency for ITEM steps")
     ap.add_argument("--out-manifest", dest="out_manifest", default=None,
                     help="Run manifest (JSON). Default: ./run_manifest.json")
+
+    # discovery / docs helpers
+    ap.add_argument("--list-presets", action="store_true",
+                    help="List all discovered presets and exit")
+    ap.add_argument("--describe-preset", metavar="NAME",
+                    help="Show metadata for a preset (by id or filename) and exit")
+
     args = ap.parse_args()
+
+    # Early-exit helpers (no preset required)
+    if args.list_presets:
+        _cmd_list_presets()
+        sys.exit(0)
+
+    if args.describe_preset:
+        _cmd_describe_preset(args.describe_preset)
+        sys.exit(0)
+
+    # Now enforce that one of --preset/--preset-file is present
+    if not (args.preset or args.preset_file):
+        ap.error("one of --preset or --preset-file is required "
+                 "unless using --list-presets or --describe-preset")
 
     # ---------------------------
     # Load preset and vars first
