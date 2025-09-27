@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "taters"
-version = "0.1.7"
+version = "0.1.8"
 authors = [{ name = "Ryan L. Boyd", email = "ryan@ryanboyd.io" }]
 description = "Analyze, process, and extract from many types of input data. Highly modular/customizable."
 
@@ -75,7 +75,15 @@ packages = { find = { where = ["src"], include = ["taters*"] } }
 
 [tool.setuptools.package-data]
 # Because I vendored the diarizer repo under taters/audio/diarizer/whisper-diarization/
-"taters.diarizer" = ["whisper-diarization/**"]
+"taters.audio.diarizer" = [
+  "whisper-diarization/**/*.yaml",
+  "whisper-diarization/**/*.yml",
+  "whisper-diarization/**/*.json",
+  "whisper-diarization/**/*.txt",
+  "whisper-diarization/**/*.cfg",
+  "whisper-diarization/**/*.ini",
+  "whisper-diarization/**/*.rttm"
+]
 "taters.pipelines.presets" = ["*.yaml"]
 
 [project.scripts]
