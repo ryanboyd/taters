@@ -42,6 +42,13 @@ Issues   = "https://github.com/ryanboyd/taters/issues"
 
 [project.optional-dependencies]
 # Full diarization pipeline (large downloads)
+
+all = [
+  "nemo-toolkit[asr]>=2.dev",
+  "nvidia-cudnn-cu12",
+  "textstat>=0.7,<0.8",
+]
+
 diarization = [
   "nemo-toolkit[asr]>=2.dev",
 ]
