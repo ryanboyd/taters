@@ -22,27 +22,28 @@ def _clamp(v: int, lo: int, hi: int) -> int:
 def make_speaker_wavs_from_csv(
     source_wav: Union[str, Path],
     transcript_csv_path: Union[str, Path],
-    output_dir: Union[str, Path, None] = None,   # <- renamed + optional
+    output_dir: Union[str, Path, None] = None,
     *,
-    overwrite_existing: bool = False,  # if the file already exists, let's not overwrite by default
+    overwrite_existing: bool = False,
     start_col: str = "start_time",
     end_col: str = "end_time",
     speaker_col: str = "speaker",
-    time_unit: str = "ms",             # "ms" (default) or "s"
-    silence_ms: int = 1000,            # silence length before/after each clip, in ms
-    pre_silence_ms: Optional[int] = None,  # optional override for pre-silence
-    post_silence_ms: Optional[int] = None, # optional override for post-silence
-    sr: Optional[int] = 16000,         # resample; None = keep original rate
-    mono: bool = True,                 # force mono output
-    min_dur_ms: int = 50,              # skip ultra-short blips
+    time_unit: str = "ms",             # "ms" or "s"
+    silence_ms: int = 1000,
+    pre_silence_ms: Optional[int] = None,
+    post_silence_ms: Optional[int] = None,
+    sr: Optional[int] = 16000,
+    mono: bool = True,
+    min_dur_ms: int = 50,
+    merge_consecutive: bool = True,    # NEW: merge back-to-back turns by same speaker
 ) -> Dict[str, Path]:
     """
     Concatenate speaker-specific segments into per-speaker WAV files.
 
-    The function reads a timestamped transcript, extracts the corresponding
-    audio regions from `source_wav`, and concatenates them into one output WAV
-    per unique speaker label. Optional silence can be inserted before/after each
-    segment to avoid clicks or tight joins.
+    If `merge_consecutive=True` (default), adjacent transcript rows with the same
+    speaker are merged into a single, longer segment spanning from the first
+    start to the last end — including any silence between those turns. If you
+    need the strict per-row behavior, set `merge_consecutive=False`.
 
     Parameters
     ----------
@@ -52,23 +53,24 @@ def make_speaker_wavs_from_csv(
         CSV with timing and speaker columns (e.g., diarization output).
     output_dir : str | Path | None, optional
         Where to write the per-speaker files. If None, defaults to
-        ``<cwd>/audio/speakers``.
+        ``./audio_split/<source_stem>/``.
     start_col, end_col, speaker_col : str
-        Names of the columns in `transcript_csv_path` for segment start, end,
-        and speaker ID/name.
+        Column names in the transcript CSV.
     time_unit : {"ms","s"}, default "ms"
-        Units for the start/end columns.
+        Units for start/end columns.
     silence_ms : int, default 1000
-        If `pre_silence_ms`/`post_silence_ms` are None, this value is used for
-        both sides of each segment. Set to 0 to disable padding.
+        If `pre_silence_ms`/`post_silence_ms` are None, use this for both sides.
     pre_silence_ms, post_silence_ms : int | None
-        Explicit padding (ms) before/after each segment. Overrides `silence_ms`.
+        Explicit padding (ms) before/after each segment; overrides `silence_ms`.
     sr : int | None, default 16000
         Resample output to this rate. If None, keep original rate.
     mono : bool, default True
-        If True, downmix to mono.
+        Downmix to mono if True.
     min_dur_ms : int, default 50
         Skip segments shorter than this duration (ms).
+    merge_consecutive : bool, default True
+        Merge back-to-back turns for the same speaker into one segment span
+        (including any inter-turn silence). If False, emit one clip per row.
 
     Returns
     -------
@@ -93,7 +95,6 @@ def make_speaker_wavs_from_csv(
     ...     mono=True,
     ... )
     """
-
     if time_unit not in ("ms", "s"):
         raise ValueError("time_unit must be 'ms' or 's'")
 
@@ -125,6 +126,9 @@ def make_speaker_wavs_from_csv(
     segs_by_spk: Dict[str, List[tuple[int, int]]] = {}
     label_for_key: Dict[str, str] = {}
 
+    # Build segments with awareness of original row order so that we can merge
+    # adjacent turns for the same speaker when requested.
+    prev_spk_key: Optional[str] = None
     for row in rows:
         try:
             start_raw = float(row[start_col])
@@ -137,8 +141,6 @@ def make_speaker_wavs_from_csv(
         end_ms   = int(round(end_raw   * factor))
         if end_ms <= start_ms:
             continue
-        if (end_ms - start_ms) < min_dur_ms:
-            continue
 
         start_ms = _clamp(start_ms, 0, audio_len_ms)
         end_ms   = _clamp(end_ms,   0, audio_len_ms)
@@ -146,12 +148,24 @@ def make_speaker_wavs_from_csv(
             continue
 
         spk_key = _sanitize_speaker(raw_spk)
-        segs_by_spk.setdefault(spk_key, []).append((start_ms, end_ms))
         label_for_key.setdefault(spk_key, _friendly_filename_label(raw_spk))
 
-    # Sort segments by start time for each speaker
-    for spk_key in segs_by_spk:
-        segs_by_spk[spk_key].sort(key=lambda t: (t[0], t[1]))
+        if merge_consecutive and prev_spk_key == spk_key and segs_by_spk.get(spk_key):
+            # Extend the last segment for this speaker to cover the new end
+            s0, e0 = segs_by_spk[spk_key][-1]
+            # Keep the earliest start, extend to the latest end
+            s_new = min(s0, start_ms)
+            e_new = max(e0, end_ms)
+            segs_by_spk[spk_key][-1] = (s_new, e_new)
+        else:
+            # Strictly append a new segment
+            segs_by_spk.setdefault(spk_key, []).append((start_ms, end_ms))
+
+        prev_spk_key = spk_key
+
+    # Optional: drop very short segments after merging
+    for spk_key, segs in list(segs_by_spk.items()):
+        segs_by_spk[spk_key] = [(s, e) for (s, e) in segs if (e - s) >= min_dur_ms]
 
     pre_ms  = silence_ms if pre_silence_ms  is None else pre_silence_ms
     post_ms = silence_ms if post_silence_ms is None else post_silence_ms
@@ -162,14 +176,14 @@ def make_speaker_wavs_from_csv(
         post_sil = post_sil.set_channels(1)
 
     results: Dict[str, Path] = {}
-
-    # ---- FIX: build path per speaker and check overwrite per file ----
     for spk_key, segs in segs_by_spk.items():
+        if not segs:
+            continue
+
         friendly = label_for_key.get(spk_key, spk_key)
         out_path = out_dir / f"{base_stem}_{friendly}.wav"
 
         if (not overwrite_existing) and out_path.is_file():
-            # File already exists; record and skip rendering for this speaker
             results[friendly] = out_path
             continue
 
@@ -184,13 +198,13 @@ def make_speaker_wavs_from_csv(
             out += pre_sil + clip + post_sil
 
         if len(out) == 0:
-            # no valid segments collected for this speaker
             continue
 
         out.export(out_path, format="wav", codec="pcm_s16le")
         results[friendly] = out_path
 
     return results
+
 
 
 # Optional CLI for ad-hoc use
@@ -208,6 +222,12 @@ if __name__ == "__main__":
     p.add_argument("--pre-silence-ms", type=int, default=None, help="Override pre-silence (ms)")
     p.add_argument("--post-silence-ms", type=int, default=None, help="Override post-silence (ms)")
     p.add_argument("--overwrite_existing", action="store_true", help="Overwrite existing output")
+    p.add_argument(
+    "--no-merge-consecutive",
+    dest="merge_consecutive",
+    action="store_false",
+    help="Do NOT merge adjacent rows for the same speaker; emit one clip per transcript row."
+    )
     args = p.parse_args()
 
     paths = make_speaker_wavs_from_csv(
@@ -220,5 +240,6 @@ if __name__ == "__main__":
         pre_silence_ms=args.pre_silence_ms,
         post_silence_ms=args.post_silence_ms,
         overwrite_existing=args.overwrite_existing,
+        merge_consecutive=args.merge_consecutive,
     )
     print("Wrote:", {k: str(v) for k, v in paths.items()})
