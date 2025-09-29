@@ -192,7 +192,34 @@ steps:
     overwrite_existing: "{{var:overwrite_existing}}"
 
 
-# 9) ARCHETYPES on the unified transcript CSV
+# 9) LEXICAL RICHNESS on the unified transcript CSV
+#     Group by (source, speaker) so each speaker-per-file becomes one text blob.
+- scope: global
+  call: potato.text.analyze_lexical_richness
+  save_as: lexrich_features
+  with:
+    csv_path: "{{transcripts_all}}"          # the unified transcript CSV from step 6
+    out_features_csv: "features/lexical-richness.csv"
+    text_cols: ["text"]
+    id_cols: ["source","speaker"]            # carry these through
+    group_by: ["source","speaker"]           # aggregate utterances → per speaker
+    mode: "concat"                           # join rows within each (source,speaker)
+    delimiter: ","
+    encoding: "utf-8-sig"
+    overwrite_existing: "{{var:overwrite_existing}}"
+
+    # (Optional) metric hyperparameters — uncomment to customize
+    # msttr_window: 100
+    # mattr_window: 100
+    # mtld_threshold: 0.72
+    # hdd_draws: 42
+    # vocd_ntokens: 50
+    # vocd_within_sample: 100
+    # vocd_iterations: 3
+    # vocd_seed: 42
+
+
+# 10) ARCHETYPES on the unified transcript CSV
 #    Same grouping → comparable per-speaker rows.
 - scope: global
   call: potato.text.analyze_with_archetypes
@@ -209,7 +236,7 @@ steps:
     rounding: 4
     overwrite_existing: "{{var:overwrite_existing}}"
 
-# 10) SENTENCE EMBEDDINGS (row-level, no grouping, from unified CSV)
+# 11) SENTENCE EMBEDDINGS (row-level, no grouping, from unified CSV)
 - scope: global
   call: potato.text.extract_sentence_embeddings
   save_as: sent_embeds
@@ -222,7 +249,7 @@ steps:
     normalize_l2: true
     overwrite_existing: "{{var:overwrite_existing}}"
 
-# 11) Aggregate SENTENCE EMBEDDINGS by (source, speaker) → mean
+# 12) Aggregate SENTENCE EMBEDDINGS by (source, speaker) → mean
 - scope: global
   call: potato.helpers.feature_gather
   save_as: sent_embeds_agg

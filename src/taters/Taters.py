@@ -37,6 +37,7 @@ class Taters:
     def analyze_with_dictionaries(self, **kwargs):              return self.text.analyze_with_dictionaries(**kwargs)
     def analyze_with_archetypes(self, **kwargs):                return self.text.analyze_with_archetypes(**kwargs)
     def analyze_readability(self, **kwargs):                    return self.text.analyze_readability(**kwargs)
+    def analyze_lexical_richness(self, **kwargs):               return self.text.analyze_lexical_richness(**kwargs)
     def extract_sentence_embeddings(self, **kwargs):            return self.text.extract_sentence_embeddings(**kwargs)
     def convert_subtitles(self, **kwargs):                      return self.text.convert_subtitles(**kwargs)
     
@@ -80,7 +81,7 @@ class _TextAPI:
     def analyze_with_dictionaries(self, **kwargs):
         from .text.analyze_with_dictionaries import analyze_with_dictionaries
         return _forward(analyze_with_dictionaries, kwargs)
-    
+
     def analyze_with_archetypes(self, **kwargs):
         from .text.analyze_with_archetypes import analyze_with_archetypes
         return _forward(analyze_with_archetypes, kwargs)
@@ -88,7 +89,11 @@ class _TextAPI:
     def analyze_readability(self, **kwargs):
         from .text.analyze_readability import analyze_readability
         return _forward(analyze_readability, kwargs)
-    
+
+    def analyze_lexical_richness(self, **kwargs):
+        from .text.analyze_lexical_richness import analyze_lexical_richness
+        return _forward(analyze_lexical_richness, kwargs)
+
     def extract_sentence_embeddings(self, **kwargs):
         from .text.extract_sentence_embeddings import analyze_with_sentence_embeddings
         return _forward(analyze_with_sentence_embeddings, kwargs)
