@@ -439,14 +439,14 @@ def analyze_lexical_richness(
     - ``ttr``: Type-Token Ratio (|V| / N)
     - ``rttr``: Root TTR (|V| / sqrt(N))
     - ``cttr``: Corrected TTR (|V| / sqrt(2N))
-    - ``herdan_c``: Herdan’s C (log |V| / log N)
-    - ``summer_s``: Summer’s S (log log |V| / log log N)
-    - ``dugast``: Dugast’s U ((log N)^2 / (log N − log |V|))
+    - ``herdan_c``: Herdan's C (log |V| / log N)
+    - ``summer_s``: Summer's S (log log |V| / log log N)
+    - ``dugast``: Dugast's U ((log N)^2 / (log N − log |V|))
     - ``maas``: Maas a^2 ((log N − log |V|) / (log N)^2)
-    - ``yule_k``: Yule’s K (dispersion of frequencies; higher = less diverse)
-    - ``yule_i``: Yule’s I (inverse of K, scaled)
-    - ``herdan_vm``: Herdan’s Vm
-    - ``simpson_d``: Simpson’s D (repeat-probability across tokens)
+    - ``yule_k``: Yule's K (dispersion of frequencies; higher = less diverse)
+    - ``yule_i``: Yule's I (inverse of K, scaled)
+    - ``herdan_vm``: Herdan's Vm
+    - ``simpson_d``: Simpson's D (repeat-probability across tokens)
     - ``msttr_{msttr_window}``: Mean Segmental TTR over fixed segments
     - ``mattr_{mattr_window}``: Moving-Average TTR over a sliding window
     - ``mtld_{mtld_threshold}``: Measure of Textual Lexical Diversity (bidirectional)
