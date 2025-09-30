@@ -614,13 +614,29 @@ def run_item_step_for_one_input(
     call = step["call"]
     params = step.get("with", {})
 
-    rendered = render_value(params, item_ctx=item_artifacts, globals_ctx=globals_ctx, vars_ctx=vars_ctx, input_path=input_path)
+    # --- templating can fail (e.g., pick:<artifact>.* when prior step failed)
+    try:
+        rendered = render_value(
+            params,
+            item_ctx=item_artifacts,
+            globals_ctx=globals_ctx,
+            vars_ctx=vars_ctx,
+            input_path=input_path
+        )
+    except KeyError as e:
+        # Common case: missing artifact because a previous step failed for this item
+        msg = f"Templating failed (likely missing artifact): {e}"
+        return ("error", {}, {"error": f"{call} failed: {msg}"})
+    except Exception as e:
+        return ("error", {}, {"error": f"{call} failed during templating: {e}"})
+
 
     # Required keys check (post-templating)
     for key in step.get("require", []):
         if key not in rendered or rendered[key] in (None, "", []):
             return ("error", {}, {"error": f"Missing required parameter '{key}' after templating"})
 
+    # --- invoke target
     func = resolve_call(call, potato)
     try:
         result = func(**rendered)
@@ -631,6 +647,7 @@ def run_item_step_for_one_input(
     if "save_as" in step:
         out[step["save_as"]] = result
     return ("ok", out, {})
+
 
 def run_global_step(
     *, step: dict, potato: Taters, globals_ctx: Dict[str, Any], vars_ctx: Dict[str, Any], manifest_path: Path
@@ -671,7 +688,21 @@ def run_global_step(
     vars_aug = dict(vars_ctx)
     vars_aug["run_manifest"] = str(manifest_path)
 
-    rendered = render_value(params, item_ctx={}, globals_ctx=globals_ctx, vars_ctx=vars_aug, input_path=manifest_path)
+    # --- templating can fail too (e.g., referencing a global that wasn't saved yet)
+    try:
+        rendered = render_value(
+            params,
+            item_ctx={},  # no item context in GLOBAL
+            globals_ctx=globals_ctx,
+            vars_ctx=vars_aug,
+            input_path=manifest_path
+        )
+    except KeyError as e:
+        msg = f"Templating failed (likely missing global artifact): {e}"
+        return ("error", {}, {"error": f"{call} failed: {msg}"})
+    except Exception as e:
+        return ("error", {}, {"error": f"{call} failed during templating: {e}"})
+
 
     func = resolve_call(call, potato)
     try:
@@ -857,12 +888,27 @@ def main():
                 )
                 return i, status, new_artifacts, err
 
+            # more robust than previous implementation. This way, even if something slips
+            # past our inner try/excepts, we still mark just that item as failed and the
+            # rest of the items keep running.
             results: List[Tuple[int, str, Dict[str, Any], Dict[str, Any]]] = []
             Executor = cf.ProcessPoolExecutor if step_engine == "process" else cf.ThreadPoolExecutor
             with Executor(max_workers=step_workers) as pool:
-                futures = [pool.submit(_run_one, (i, p)) for i, p in enumerate(inputs)]
-                for fut in cf.as_completed(futures):
-                    results.append(fut.result())
+                future_to_i = {}
+                for i, p in enumerate(inputs):
+                    f = pool.submit(_run_one, (i, p))
+                    future_to_i[f] = i
+
+                for fut in cf.as_completed(future_to_i):
+                    i = future_to_i[fut]
+                    try:
+                        results.append(fut.result())
+                    except Exception as e:
+                        # Last-resort catch: record a hard failure for this item and keep going
+                        itm = manifest["items"][i]
+                        itm["status"] = "error"
+                        itm["errors"].append(f"Worker crashed in step '{call_name}': {e}")
+
 
             for i, status, new_artifacts, err in results:
                 itm = manifest["items"][i]
