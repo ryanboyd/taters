@@ -147,19 +147,40 @@ def _open_out_csv(
     path: Path,
     include_source_col: bool,
     include_source_path: bool,
-    include_group_count: bool = False,  # ← NEW
+    include_group_count: bool = False,
+    id_col_names: Optional[List[str]] = None,      # NEW
+    group_by_names: Optional[List[str]] = None,    # NEW
 ) -> Tuple[csv.writer, io.TextIOBase, List[str]]:
-    cols = ["text_id", "text"]
+    """
+    Open an output CSV and write the header.
+
+    Column order:
+      - Non-grouped: text_id, <id_cols...>, text[, source_col][, source_path]
+      - Grouped:     text_id, <group_by...>, text, group_count[, source_col][, source_path]
+    """
+    id_col_names = list(id_col_names or [])
+    group_by_names = list(group_by_names or [])
+
+    cols = ["text_id"]
+    if group_by_names:
+        cols += group_by_names
+    elif id_col_names:
+        cols += id_col_names
+
+    cols.append("text")
     if include_group_count:
-        cols.append("group_count")      # ← placed right after 'text'
+        cols.append("group_count")
     if include_source_col:
         cols.append("source_col")
     if include_source_path:
         cols.append("source_path")
+
     fh = path.open("w", newline="", encoding="utf-8-sig")
     w = csv.writer(fh)
     w.writerow(cols)
     return w, fh, cols
+
+
 
 
 
@@ -171,18 +192,18 @@ def csv_to_analysis_ready_csv(
     *,
     csv_path: PathLike,
     out_csv: PathLike | None = None,
-    overwrite_existing: bool = False,  # if the file already exists, let's not overwrite by default
+    overwrite_existing: bool = False,
     text_cols: Sequence[str],
     id_cols: Sequence[str] | None = None,
-    mode: str = "concat",                 # "concat" or "separate"
+    mode: str = "concat",
     group_by: Sequence[str] | None = None,
     delimiter: str | None = None,
     encoding: str = DEFAULT_ENCODING,
     joiner: str = DEFAULT_JOINER,
-    # external grouping params
-    num_buckets: int = 1024,               # tune up if many groups / very large file
-    max_open_bucket_files: int = 64,      # file descriptor cap (LRU)
-    tmp_root: PathLike | None = None,     # where to place partitions (default: system tmp)
+    num_buckets: int = 1024,
+    max_open_bucket_files: int = 64,
+    tmp_root: PathLike | None = None,
+    include_id_cols: bool = True,             # NEW (default on)
 ) -> Path:
     """
     Stream a (possibly huge) CSV into a compact **analysis-ready** CSV with a
@@ -235,6 +256,8 @@ def csv_to_analysis_ready_csv(
         Parsing/formatting options. If `delimiter=None`, sniffs from a sample.
     num_buckets, max_open_bucket_files, tmp_root
         External grouping controls (partition count, LRU limit, temp root).
+    include_id_cols
+        When aggregating/concatenating, retains the identifiers in the output file.
 
     Returns
     -------
@@ -293,7 +316,14 @@ def csv_to_analysis_ready_csv(
 
     # If no grouping, we can stream straight to the output
     if not group_by:
-        writer, fh, _ = _open_out_csv(out_path, include_source_col, include_source_path)
+        writer, fh, _ = _open_out_csv(
+            out_path,
+            include_source_col,
+            include_source_path,
+            include_group_count=False,
+            id_col_names=(list(id_cols) if include_id_cols and id_cols else None),
+            group_by_names=None,
+        )
         try:
             with in_path.open("r", newline="", encoding=encoding) as f:
                 rdr = csv.DictReader(f, delimiter=delimiter)
@@ -308,13 +338,20 @@ def csv_to_analysis_ready_csv(
                         parts = [row.get(c, "") for c in text_cols if row.get(c, "")]
                         if not parts:
                             continue
-                        writer.writerow([text_id, joiner.join(parts)])
+                        row_prefix = [text_id]
+                        if include_id_cols and id_cols:
+                            row_prefix += [row.get(c, "") for c in id_cols]
+                        writer.writerow(row_prefix + [joiner.join(parts)])
                     else:
                         for col in text_cols:
                             val = row.get(col, "")
                             if not val:
                                 continue
-                            writer.writerow([text_id, val, col])
+                            row_prefix = [text_id]
+                            if include_id_cols and id_cols:
+                                row_prefix += [row.get(c, "") for c in id_cols]
+                            writer.writerow(row_prefix + [val, col])
+
         finally:
             fh.close()
         return out_path
@@ -357,11 +394,15 @@ def csv_to_analysis_ready_csv(
 
     # Phase 2: per-bucket aggregation → final writer
     writer, out_fh, _ = _open_out_csv(
-                                        out_path,
-                                        include_source_col,
-                                        include_source_path,
-                                        include_group_count=True,
-                                    )
+        out_path,
+        include_source_col,
+        include_source_path,
+        include_group_count=True,
+        id_col_names=None,
+        group_by_names=group_by,   # NEW
+    )
+
+
 
     try:
         for bfile in sorted(part_dir.glob("bucket_*.csv")):
@@ -380,7 +421,7 @@ def csv_to_analysis_ready_csv(
                 # Emit
                 for key, pieces in agg.items():
                     text_id = _compose_id(key) or "group"
-                    writer.writerow([text_id, joiner.join(pieces), len(pieces)])  # <- add count
+                    writer.writerow([text_id, *key, joiner.join(pieces), len(pieces)])
             else:
                 # key -> col -> list[text]
                 agg: Dict[Tuple[str, ...], Dict[str, List[str]]] = {}
@@ -400,7 +441,7 @@ def csv_to_analysis_ready_csv(
                         vals = per_col.get(col, [])
                         if not vals:
                             continue
-                        writer.writerow([text_id, joiner.join(vals), len(vals), col])  # <- count before source_col
+                        writer.writerow([text_id, *key, joiner.join(vals), len(vals), col])
 
     finally:
         out_fh.close()

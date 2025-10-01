@@ -189,6 +189,7 @@ def analyze_with_sentence_embeddings(
     normalize_l2: bool = True,       # set True if you want unit-length vectors
     rounding: Optional[int] = None,   # None = full precision; e.g., 6 for ~float32-ish text
     show_progress: bool = False,
+    pass_through_cols: Optional[Sequence[str]] = None,
 ) -> Path:
     """
     Average sentence embeddings per row of text and write a wide features CSV.
@@ -205,7 +206,7 @@ def analyze_with_sentence_embeddings(
     model and the vectors are averaged into one row-level embedding. Optionally,
     vectors are L2-normalized. The output CSV schema is:
 
-    ``text_id, e0, e1, ..., e{D-1}``
+    ``text_id[, <pass_through_cols...>], e0, e1, ..., e{D-1}``
 
     If ``out_features_csv`` is omitted, the default is
     ``./features/sentence-embeddings/<analysis_ready_filename>``. When
@@ -225,6 +226,10 @@ def analyze_with_sentence_embeddings(
         analysis-ready filename under ``./features/sentence-embeddings/``.
     overwrite_existing : bool, default=False
         If ``False`` and the output file already exists, skip processing and return it.
+    pass_through_cols : Sequence[str], optional
+        Column names from the analysis-ready CSV to copy into the output
+        alongside ``text_id`` (e.g., ``["source","speaker"]``). Missing
+        columns are ignored with a warning.
 
     encoding : str, default="utf-8-sig"
         CSV I/O encoding.
@@ -363,7 +368,9 @@ def analyze_with_sentence_embeddings(
     dim = int(getattr(model, "get_sentence_embedding_dimension", lambda: 768)())
 
     # 3) header
-    header = ["text_id"] + [f"e{i}" for i in range(dim)]
+    pt_cols: list[str] = list(pass_through_cols or [])
+    header = ["text_id"] + pt_cols + [f"e{i}" for i in range(dim)]
+
 
     # 4) stream rows → split → encode → average → (optional) L2 normalize → write
     def _norm(v: np.ndarray) -> np.ndarray:
@@ -377,36 +384,45 @@ def analyze_with_sentence_embeddings(
         writer = csv.writer(f)
         writer.writerow(header)
 
-        for text_id, text in _iter_items_from_csv(analysis_ready, encoding=encoding, delimiter=delimiter):
-            sents = _split_sentences(text)
-            if not sents:
-                vec = None
-            else:
-                emb = model.encode(
-                    sents,
-                    batch_size=batch_size,
-                    convert_to_numpy=True,
-                    normalize_embeddings=False,
-                    show_progress_bar=show_progress,
-                )
-                # Average across sentences → one vector
-                vec = emb.mean(axis=0).astype(np.float32, copy=False)
-            
-            
-            # L2 and rounding only if we have a vector
-            if vec is None:
-                values = [""] * dim  # <- write empty cells, not zeros/NaNs
-            else:
-                if normalize_l2:
-                    n = float(np.linalg.norm(vec))
-                    if n > 1e-12:
-                        vec = vec / n
-                if rounding is not None:
-                    values = [round(float(x), int(rounding)) for x in vec.tolist()]
-                else:
-                    values = [float(x) for x in vec.tolist()]
+        # Open the analysis-ready CSV as dicts so we can read extra cols
+        with analysis_ready.open("r", newline="", encoding=encoding) as rf:
+            reader = csv.DictReader(rf, delimiter=delimiter)
+            # Light validation: warn if any requested pass-through column is missing
+            missing = [c for c in pt_cols if c not in (reader.fieldnames or [])]
+            if missing:
+                print(f"[sentence-embeddings] WARNING: pass_through_cols missing in source: {missing}")
 
-            writer.writerow([text_id] + values)
+            for row in reader:
+                text_id = str(row.get("text_id", ""))
+                text = (row.get("text") or "")
+                pt_vals = [row.get(c, "") for c in pt_cols]
+
+                sents = _split_sentences(text)
+                if not sents:
+                    vec = None
+                else:
+                    emb = model.encode(
+                        sents,
+                        batch_size=batch_size,
+                        convert_to_numpy=True,
+                        normalize_embeddings=False,
+                        show_progress_bar=show_progress,
+                    )
+                    vec = emb.mean(axis=0).astype(np.float32, copy=False)
+
+                if vec is None:
+                    values = [""] * dim
+                else:
+                    if normalize_l2:
+                        n = float(np.linalg.norm(vec))
+                        if n > 1e-12:
+                            vec = vec / n
+                    values = [float(x) for x in vec.tolist()]
+                    if rounding is not None:
+                        values = [round(v, int(rounding)) for v in values]
+
+                writer.writerow([text_id] + pt_vals + values)
+
 
     return out_features_csv
 
@@ -476,6 +492,9 @@ def _build_arg_parser():
     p.add_argument("--rounding", type=int, default=None,
                    help="Round floats to N decimals (omit for full precision)")
     p.add_argument("--show-progress", action="store_true", default=False)
+    p.add_argument("--pass-through-col", dest="pass_through_cols", action="append",
+               help="Copy this column from the analysis-ready CSV into the output (repeatable)")
+
 
     return p
 
@@ -527,6 +546,7 @@ def main():
         normalize_l2=args.normalize_l2,
         rounding=args.rounding,
         show_progress=args.show_progress,
+        pass_through_cols=(args.pass_through_cols or None),
     )
     print(str(out))
 

@@ -242,11 +242,12 @@ steps:
   save_as: sent_embeds
   with:
     csv_path: "{{transcripts_all}}"
-    text_cols: ["text"]                  # analyze rows as-is (utterance-level)
-    id_cols: ["source","speaker"]        # include metadata in the output
+    text_cols: ["text"]
+    id_cols: ["source","speaker"]
     mode: "concat"
     model_name: "sentence-transformers/all-roberta-large-v1"
     normalize_l2: true
+    pass_through_cols: ["source","speaker"]
     overwrite_existing: "{{var:overwrite_existing}}"
 
 # 12) Aggregate SENTENCE EMBEDDINGS by (source, speaker) → mean
@@ -256,11 +257,11 @@ steps:
   with:
     root_dir: "{{sent_embeds}}"
     aggregate: true
-    group_by: ["text_id"]
-    per_file: false                     # we ran from a unified CSV; no need for 'source' from filenames
+    group_by: ["source", "speaker"]   # ← these become leading columns in the output
+    per_file: false                   # we’re already providing "source" explicitly
     stats: ["mean"]
     add_source_path: false
-    # Keep only the embedding columns (e0,e1,...) to speed things up:
     exclude_cols: ["start_time","end_time","text"]
     overwrite_existing: false
-    out_csv: "features/sentence-embeddings_aggregated.csv"                       # default → ./features/sentence-embeddings.csv
+    out_csv: "features/sentence-embeddings_aggregated.csv"
+

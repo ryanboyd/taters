@@ -69,9 +69,6 @@ def _read_csv_add_source(
     delimiter: str = ",",
     encoding: str = "utf-8-sig",
     add_source_path: bool = False,
-    # kept for backward compat but unused in layout now
-    source_col_stem: str = "source_stem",
-    source_col_path: str = "source_path",
 ) -> pd.DataFrame:
     """
     Read a CSV and insert origin metadata columns.
@@ -108,7 +105,7 @@ def _read_csv_add_source(
     read errors should be handled by the caller.
     """
 
-    # Robust CSV field size (giant text cells)
+    # Allow very large cells (long transcripts)
     try:
         csv.field_size_limit(sys.maxsize)
     except OverflowError:
@@ -116,15 +113,59 @@ def _read_csv_add_source(
 
     df = pd.read_csv(path, dtype="object", sep=delimiter, encoding=encoding)
 
-    # New canonical name & position
+    def _next_available(base: str, existing: set[str]) -> str:
+        """Return base.N with the smallest N>=1 not in existing."""
+        n = 1
+        candidate = f"{base}.{n}"
+        while candidate in existing:
+            n += 1
+            candidate = f"{base}.{n}"
+        return candidate
+
+    # ---- De-duplicate any pre-existing columns named exactly 'source'
+    cols = list(df.columns)
+    seen = set(cols)
+
+    # Rename exact 'source' occurrences
+    if "source" in seen:
+        new_cols = []
+        # We'll track taken names as we rename
+        taken = set(cols)
+        for name in cols:
+            if name == "source":
+                new_name = _next_available("source", taken)
+                new_cols.append(new_name)
+                taken.add(new_name)
+                taken.discard("source")  # doesn't matter, just for clarity
+            else:
+                new_cols.append(name)
+        df.columns = new_cols
+        cols = new_cols
+        seen = set(cols)
+
+    # Now we can safely insert our pipeline 'source'
     df.insert(0, "source", path.stem)
 
-    # Optional full path just after source
+    # ---- Handle source_path similarly if requested
     if add_source_path:
-        df.insert(1, "source_path", str(path.resolve()))
+        cols = list(df.columns)
+        seen = set(cols)
+        if "source_path" in seen:
+            new_cols = []
+            taken = set(cols)
+            for name in cols:
+                if name == "source_path":
+                    new_name = _next_available("source_path", taken)
+                    new_cols.append(new_name)
+                    taken.add(new_name)
+                    taken.discard("source_path")
+                else:
+                    new_cols.append(name)
+            df.columns = new_cols
 
-    # (Optional backwards compatibility columns—uncomment if other code relies on them)
-    # df["source_stem"] = path.stem
+        # place our 'source_path' right after 'source' if possible
+        insert_at = 1 if "source" in df.columns else 0
+        df.insert(insert_at, "source_path", str(path.resolve()))
 
     return df
 
@@ -466,6 +507,7 @@ def _filter_columns(
     exclude_cols: Sequence[str],
     include_regex: Optional[str],
     exclude_regex: Optional[str],
+    must_keep: Sequence[str] = (),
 ) -> pd.DataFrame:
     """
     Filter columns prior to numeric feature selection.
@@ -481,6 +523,7 @@ def _filter_columns(
     exclude_regex : str or None
         If provided, drop columns whose names match this regex (applied after
         `include_regex`).
+    must_keep : Sequence[str] or None
 
     Returns
     -------
@@ -496,6 +539,8 @@ def _filter_columns(
     if exclude_regex:
         rx = re.compile(exclude_regex)
         keep = [c for c in keep if not rx.search(c)]
+    # Always preserve group keys (and drop duplicates while preserving order)
+    keep = list(dict.fromkeys(list(must_keep) + keep))
     return df[keep]
 
 
@@ -621,20 +666,21 @@ def aggregate_features(
 
     df = pd.concat(frames, axis=0, ignore_index=True)
 
-    # Filter columns (remove known non-feature columns, optional regex filters)
+    # Build group keys first
+    group_keys = list(plan.group_by)
+    if plan.per_file:
+        if "source" not in df.columns:
+            raise ValueError("source column is missing; cannot group per_file.")
+        group_keys = ["source"] + group_keys
+    
+    # Then filter columns, but always keep group keys
     df_f = _filter_columns(
         df,
         exclude_cols=tuple(plan.exclude_cols) + ("source_path",),
         include_regex=plan.include_regex,
         exclude_regex=plan.exclude_regex,
+        must_keep=group_keys,
     )
-
-    # Build group keys
-    group_keys = list(plan.group_by)
-    if plan.per_file:
-        if "source" not in df_f.columns:
-            raise ValueError("source column is missing; cannot group per_file.")
-        group_keys = ["source"] + group_keys
 
     if plan.dropna:
         df_f = df_f.dropna(subset=[k for k in group_keys if k in df_f.columns], how="any")
