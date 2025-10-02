@@ -263,45 +263,58 @@ def analyze_with_dictionaries(
 
     dict_paths = _expand_dict_inputs(dict_paths)
 
-    # 3) Stream the analysis-ready CSV into the analyzer → features CSV
-    def _iter_items_from_csv(
-        path: Path, *, id_col: str = "text_id", text_col: str = "text"
-    ) -> Iterable[Tuple[str, str]]:
+        # 3) Stream the analysis-ready CSV into the analyzer → features CSV
+    def _iter_items_from_csv_with_meta(
+        path: Path,
+        *,
+        id_col: str = "text_id",
+        text_col: str = "text",
+        pass_through_cols: Optional[Sequence[str]] = None,
+    ) -> Iterable[Tuple[str, str, dict]]:
         """
-        Stream ``(text_id, text)`` pairs from an analysis-ready CSV.
+        Stream (text_id, text, meta) from an analysis-ready CSV.
 
         Parameters
         ----------
         path : pathlib.Path
             Path to the analysis-ready CSV file.
         id_col : str, default="text_id"
-            Name of the identifier column to read.
+            Identifier column.
         text_col : str, default="text"
-            Name of the text column to read.
+            Text column.
+        pass_through_cols : Sequence[str] or None
+            Extra columns to fetch per row and forward to the analyzer.
 
         Yields
         ------
-        tuple[str, str]
-            ``(text_id, text)`` for each row; missing text values are emitted as empty strings.
-
-        Raises
-        ------
-        ValueError
-            If the required columns are not present in the CSV header.
+        tuple[str, str, dict]
+            (text_id, text, meta_dict) where meta_dict maps each pass-through column
+            to its string value ('' if missing).
         """
-
+        wanted = list(pass_through_cols or [])
         with path.open("r", newline="", encoding=encoding) as f:
             reader = csv.DictReader(f, delimiter=delimiter)
-            if id_col not in reader.fieldnames or text_col not in reader.fieldnames:
+            fields = reader.fieldnames or []
+            if id_col not in fields or text_col not in fields:
                 raise ValueError(
-                    f"Expected columns '{id_col}' and '{text_col}' in {path}; found {reader.fieldnames}"
+                    f"Expected columns '{id_col}' and '{text_col}' in {path}; found {fields}"
                 )
+            # If id_cols were requested, enforce they exist up-front (fail fast)
+            missing = [c for c in wanted if c not in fields]
+            if missing:
+                raise ValueError(
+                    f"Requested id_cols not present in analysis-ready CSV {path}: {missing}"
+                )
+
             for row in reader:
-                yield str(row[id_col]), (row.get(text_col) or "")
+                tid = str(row.get(id_col, "") or "")
+                text = str(row.get(text_col, "") or "")
+                meta = {c: str(row.get(c, "") or "") for c in wanted}
+                yield tid, text, meta
 
     # Use multi_dict_analyzer as the middle layer (new API)
     mda.analyze_texts_to_csv(
-        items=_iter_items_from_csv(analysis_ready),
+        items=_iter_items_from_csv_with_meta(analysis_ready, pass_through_cols=id_cols or []),
         dict_files=dict_paths,
         out_csv=out_features_csv,
         relative_freq=relative_freq,
@@ -310,8 +323,10 @@ def analyze_with_dictionaries(
         retain_captures=retain_captures,
         wildcard_mem=wildcard_mem,
         id_col_name="text_id",
+        pass_through_cols=list(id_cols or []),  # <-- inject id_cols right after text_id
         encoding=encoding,
     )
+
 
     return out_features_csv
 

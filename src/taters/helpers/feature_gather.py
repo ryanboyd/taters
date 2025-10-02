@@ -221,6 +221,50 @@ def make_plan(
     )
 
 
+def _promote_inner_keys(df: pd.DataFrame, keys: Sequence[str]) -> pd.DataFrame:
+    """
+    When both a file-level key (e.g., 'source') and an inner CSV key
+    that was renamed to 'source.N' exist, promote the inner key to the
+    base name and demote/rename the file-level key to 'file_<key>'.
+
+    This is intended for per_file=False: we want to aggregate across files
+    using the *inner* keys rather than the injected file stem.
+    """
+    def _unique(col: str, existing: set[str]) -> str:
+        if col not in existing:
+            return col
+        i = 1
+        while f"{col}.{i}" in existing:
+            i += 1
+        return f"{col}.{i}"
+
+    cols = list(df.columns)
+    existing = set(cols)
+
+    for base in keys:
+        # Find numbered variants like base.1, base.2, ...
+        numbered = [c for c in cols if c == f"{base}.1" or c.startswith(f"{base}.")]
+        has_base = base in existing
+        if numbered:
+            numbered.sort()
+            inner_col = numbered[0]              # choose the first stable candidate
+            if has_base:
+                # Demote file-level base to 'file_<base>' (unique if needed)
+                demoted = _unique(f"file_{base}", existing)
+                df.rename(columns={base: demoted}, inplace=True)
+                existing.discard(base)
+                existing.add(demoted)
+            # Promote inner to base
+            df.rename(columns={inner_col: base}, inplace=True)
+            existing.discard(inner_col)
+            existing.add(base)
+            # refresh for next iteration
+            cols = list(df.columns)
+            existing = set(cols)
+
+    return df
+
+
 # -----------------------------------------------------
 # Gather features sub-functions, abstracted and unified
 # -----------------------------------------------------
@@ -666,14 +710,41 @@ def aggregate_features(
 
     df = pd.concat(frames, axis=0, ignore_index=True)
 
-    # Build group keys first
+    # If we are aggregating across files (per_file=False),
+    # promote inner keys (e.g., 'source.1' -> 'source') and demote file-level keys.
+    if not plan.per_file:
+        df = _promote_inner_keys(df, plan.group_by)
+
+
+    def _resolve_keys(base_keys, columns):
+        cols = set(columns)
+        resolved = []
+        for k in base_keys:
+            if k in cols:
+                resolved.append(k)
+                continue
+            # Look for numbered variants like 'k.1', 'k.2', ...
+            prefix = f"{k}."
+            candidates = [c for c in columns if c == f"{k}.1" or c.startswith(prefix)]
+            if candidates:
+                # pick the first stable candidate
+                resolved.append(sorted(candidates)[0])
+            else:
+                # leave unresolved; we'll error below with a helpful message
+                resolved.append(k)
+        return resolved
+
+    # Build (base) group keys from the plan
     group_keys = list(plan.group_by)
     if plan.per_file:
         if "source" not in df.columns:
             raise ValueError("source column is missing; cannot group per_file.")
         group_keys = ["source"] + group_keys
-    
-    # Then filter columns, but always keep group keys
+
+    # Resolve collisions against actual columns
+    group_keys = _resolve_keys(group_keys, df.columns)
+
+    # Now filter but ALWAYS keep group keys
     df_f = _filter_columns(
         df,
         exclude_cols=tuple(plan.exclude_cols) + ("source_path",),
@@ -681,9 +752,6 @@ def aggregate_features(
         exclude_regex=plan.exclude_regex,
         must_keep=group_keys,
     )
-
-    if plan.dropna:
-        df_f = df_f.dropna(subset=[k for k in group_keys if k in df_f.columns], how="any")
 
     missing = [k for k in group_keys if k not in df_f.columns]
     if missing:

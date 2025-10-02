@@ -239,42 +239,41 @@ def analyze_with_archetypes(
 
 
 
-    # 3) Stream (text_id, text) → middle layer → features CSV
-    def _iter_items_from_csv(path: Path, *, id_col: str = "text_id", text_col: str = "text") -> Iterable[Tuple[str, str]]:
+        # 3) Stream (text_id, text, meta) → middle layer → features CSV
+    def _iter_items_from_csv_with_meta(
+        path: Path,
+        *,
+        id_col: str = "text_id",
+        text_col: str = "text",
+        wanted: Optional[Sequence[str]] = None,
+    ) -> Iterable[Tuple[str, str, dict]]:
+        """
+        Stream (text_id, text, meta) from an analysis-ready CSV.
+
+        Enforces that all requested `wanted` columns exist (fail fast).
+        """
+        wanted = list(wanted or [])
         with path.open("r", newline="", encoding=encoding) as f:
-            """
-            Stream ``(text_id, text)`` pairs from an analysis-ready CSV.
-
-            Parameters
-            ----------
-            path : pathlib.Path
-                Path to the analysis-ready CSV containing at least ``text_id`` and ``text``.
-            id_col : str, default="text_id"
-                Name of the identifier column to read.
-            text_col : str, default="text"
-                Name of the text column to read.
-
-            Yields
-            ------
-            tuple of (str, str)
-                The ``(text_id, text)`` for each row. Missing text values are emitted as empty strings.
-
-            Raises
-            ------
-            ValueError
-                If the required columns are not present in the CSV header.
-            """
-
             reader = csv.DictReader(f, delimiter=delimiter)
-            if id_col not in reader.fieldnames or text_col not in reader.fieldnames:
+            fields = reader.fieldnames or []
+            if id_col not in fields or text_col not in fields:
                 raise ValueError(
-                    f"Expected columns '{id_col}' and '{text_col}' in {path}; found {reader.fieldnames}"
+                    f"Expected columns '{id_col}' and '{text_col}' in {path}; found {fields}"
                 )
+            missing = [c for c in wanted if c not in fields]
+            if missing:
+                raise ValueError(
+                    f"Requested id_cols not present in analysis-ready CSV {path}: {missing}"
+                )
+
             for row in reader:
-                yield str(row[id_col]), (row.get(text_col) or "")
+                tid = str(row.get(id_col, "") or "")
+                txt = str(row.get(text_col, "") or "")
+                meta = {c: str(row.get(c, "") or "") for c in wanted}
+                yield tid, txt, meta
 
     maa.analyze_texts_to_csv(
-        items=_iter_items_from_csv(analysis_ready),
+        items=_iter_items_from_csv_with_meta(analysis_ready, wanted=id_cols or []),
         archetype_csvs=archetype_csvs,
         out_csv=out_features_csv,
         model_name=model_name,
@@ -284,6 +283,7 @@ def analyze_with_archetypes(
         encoding=encoding,
         delimiter=delimiter,
         id_col_name="text_id",
+        pass_through_cols=list(id_cols or []),  # ← inject id_cols right after text_id
     )
 
     return out_features_csv

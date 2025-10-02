@@ -49,8 +49,8 @@ def _wc_weighted_mean(sentence_results: Sequence[object], names: Sequence[str], 
 # ---------------- public API ----------------
 
 def analyze_texts_to_csv(
-    items: Iterable[Tuple[str, str]],                 # (text_id, text)
-    archetype_csvs: Sequence[PathLike],               # one or more CSV files of prototypes
+    items: Iterable[Tuple[str, str]] | Iterable[Tuple[str, str, dict]],
+    archetype_csvs: Sequence[PathLike],
     out_csv: PathLike,
     *,
     # archetyper options
@@ -63,20 +63,31 @@ def analyze_texts_to_csv(
     delimiter: str = ",",
     # output options
     id_col_name: str = "text_id",
+    pass_through_cols: Sequence[str] = (),
     rounding: int = 4,
     newline: str = "",
 ) -> Path:
     """
     Write a single CSV with one row per input text.
-      Columns: [text_id, WC, <prefix>__<ArchetypeName>, ...] for each input CSV.
-      Column order is deterministic: file order × quantifier.get_list_of_archetypes() order.
+
+    Header layout:
+        [id_col_name] + [<pass_through_cols...>] + ["WC"] + [<prefix>__<ArchetypeName> ...] × each input CSV
+
+    Parameters
+    ----------
+    items
+        Either (text_id, text) or (text_id, text, meta_dict). If meta_dict is provided,
+        values are written in the same order as `pass_through_cols` (missing keys → "").
+    pass_through_cols
+        Column names to inject immediately after `id_col_name` (e.g., ["source","speaker"]).
     """
     out_csv = Path(out_csv)
     out_csv.parent.mkdir(parents=True, exist_ok=True)
 
     # 1) Build a quantifier per CSV and capture stable archetype name order
     blocks: List[Tuple[str, List[str], ArchetypeQuantifier]] = []
-    header: List[str] = [id_col_name, "WC"]
+    # Header starts with id, pass-through, then WC
+    header: List[str] = [id_col_name, *list(pass_through_cols), "WC"]
 
     for csv_path in archetype_csvs:
         pref = _prefix_from_path(csv_path)
@@ -96,15 +107,26 @@ def analyze_texts_to_csv(
 
     # 2) Stream items → analyze → aggregate → write
     with out_csv.open("w", newline=newline, encoding=encoding) as f:
-        writer = csv.writer(f)
+        writer = csv.writer(f, delimiter=delimiter)
         writer.writerow(header)
 
-        for text_id, text in items:
-            # total WC from the first block’s sentence parse (consistent across blocks)
-            total_wc_written = False
-            total_wc_val = 0
+        for it in items:
+            # Accept (text_id, text) or (text_id, text, meta)
+            if len(it) == 2:
+                text_id, text = it  # type: ignore[misc]
+                meta: Dict[str, str] = {}
+            elif len(it) == 3:
+                text_id, text, meta = it  # type: ignore[misc]
+                if not isinstance(meta, dict):
+                    raise ValueError("items third element must be a dict of pass-through values.")
+            else:
+                raise ValueError("Each item must be (text_id, text) or (text_id, text, meta_dict).")
 
             print(f"Analyzing for archetypes: {text_id}")
+
+            # WC from the first block’s sentence parse (consistent across blocks)
+            total_wc_written = False
+            total_wc_val = 0
 
             all_scores: List[float] = []
             for pref, names, q in blocks:
@@ -120,6 +142,9 @@ def analyze_texts_to_csv(
                     total_wc_written = True
                 all_scores.extend(scores)
 
-            writer.writerow([text_id, total_wc_val, *all_scores])
+            # Emit: id, pass-through values (ordered), WC, scores...
+            pt_vals = [str(meta.get(c, "")) for c in pass_through_cols]
+            writer.writerow([text_id, *pt_vals, total_wc_val, *all_scores])
 
     return out_csv
+

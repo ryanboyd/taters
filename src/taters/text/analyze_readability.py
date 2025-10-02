@@ -65,7 +65,10 @@ def analyze_readability(
     pattern: str = "*.txt",
     id_from: Literal["stem", "name", "path"] = "stem",
     include_source_path: bool = True,
-) -> Path:
+
+    # ====== NEW: passthrough control (optional) ======
+    pass_through_cols: Optional[Sequence[str]] = None
+    ) -> Path:
     """
     Compute per-row readability metrics using `textstat` and write a wide features CSV.
 
@@ -154,6 +157,18 @@ def analyze_readability(
     pathlib.Path
         Path to the written features CSV.
 
+    Output layout
+    -------------
+    The output CSV starts with:
+        text_id, <pass-through columns...>, <metrics...>
+
+    Pass-through behavior:
+    - If `pass_through_cols` is provided, those columns are included immediately
+      after `text_id` in that order.
+    - Else if `id_cols` were supplied during gathering, they are included in that order.
+    - Else (backward compatible), *all* non-`text` columns in the analysis-ready CSV
+      are copied through (e.g., `source`, `speaker`, etc.).
+
     Raises
     ------
     FileNotFoundError
@@ -209,7 +224,6 @@ def analyze_readability(
             )
 
     # 2) Decide default features path if not provided:
-    #    <cwd>/features/readability/<analysis_ready_filename>
     if out_features_csv is None:
         out_features_csv = Path.cwd() / "features" / "readability" / analysis_ready.name
     out_features_csv = Path(out_features_csv)
@@ -219,9 +233,8 @@ def analyze_readability(
         print(f"Readability output file already exists; returning existing file: {out_features_csv}")
         return out_features_csv
 
-    # 3) Stream analysis-ready CSV and compute metrics per row
+    # 3) Metrics list
     metrics = [
-        # readability indices
         "flesch_reading_ease",
         "smog_index",
         "flesch_kincaid_grade",
@@ -231,11 +244,9 @@ def analyze_readability(
         "difficult_words",
         "linsear_write_formula",
         "gunning_fog",
-        # labels / consensus
         "text_standard",
         "spache_readability",
         "readability_consensus",
-        # counts/derived
         "syllable_count",
         "lexicon_count",
         "sentence_count",
@@ -245,31 +256,44 @@ def analyze_readability(
         "avg_letter_per_word",
     ]
 
-    # open input/output
+    # 4) Stream input and write output
     with analysis_ready.open("r", newline="", encoding=encoding) as fin, \
          out_features_csv.open("w", newline="", encoding=encoding) as fout:
         reader = csv.DictReader(fin, delimiter=delimiter)
 
         if "text_id" not in reader.fieldnames or "text" not in reader.fieldnames:
             raise ValueError(
-                f"Expected columns 'text_id' and 'text' in {analysis_ready}; "
-                f"found {reader.fieldnames}"
+                f"Expected columns 'text_id' and 'text' in {analysis_ready}; found {reader.fieldnames}"
             )
 
-        # Carry through any non-text columns (e.g., id cols, source, speaker)
-        passthrough_cols = [c for c in reader.fieldnames if c != "text"]
+        # Decide pass-through columns:
+        requested_pt = list(pass_through_cols or [])
+        if not requested_pt and id_cols:
+            requested_pt = list(id_cols)
 
-        # Output header = passthrough + metrics
-        fieldnames = passthrough_cols + metrics
+        if not requested_pt:
+            # Back-compat: pass through all non-text, excluding text_id (we add it explicitly)
+            auto = [c for c in (reader.fieldnames or []) if c not in ("text", "text_id")]
+            requested_pt = auto
+
+        # Validate presence
+        fields = set(reader.fieldnames or [])
+        missing = [c for c in requested_pt if c not in fields]
+        if missing:
+            raise ValueError(
+                f"Requested pass-through columns not present in analysis-ready CSV {analysis_ready}: {missing}"
+            )
+
+        # Output header: text_id + pass-through + metrics
+        passthrough_cols = list(dict.fromkeys(requested_pt))  # preserve order, dedupe
+        fieldnames = ["text_id", *passthrough_cols, *metrics]
         writer = csv.DictWriter(fout, fieldnames=fieldnames, delimiter=delimiter)
         writer.writeheader()
 
-        # Helpers to call textstat functions safely
+        # Safe metric caller (handles version differences)
         def _call_metric(name: str, txt: str) -> Any:
-            # Guard against missing attributes across textstat versions
             fn = getattr(textstat, name, None)
             if fn is None:
-                # Fallback: approximate consensus with text_standard if available
                 if name == "readability_consensus" and hasattr(textstat, "text_standard"):
                     try:
                         return textstat.text_standard(txt)
@@ -281,10 +305,12 @@ def analyze_readability(
             except Exception:
                 return None
 
-
         for row in reader:
             txt = (row.get("text") or "").strip()
-            out_row: Dict[str, Any] = {k: row.get(k) for k in passthrough_cols}
+            out_row: Dict[str, Any] = {
+                "text_id": row.get("text_id"),
+                **{k: row.get(k, "") for k in passthrough_cols},
+            }
             for m in metrics:
                 out_row[m] = _call_metric(m, txt)
             writer.writerow(out_row)

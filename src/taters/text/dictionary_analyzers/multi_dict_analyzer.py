@@ -78,11 +78,8 @@ def build_header_for_dicts(
         raise ValueError("No dictionaries provided.")
     
     dict_names = [pref for pref, _ in coders]
-    print(
-        f"Analyzing with dictionaries: {text_id if text_id is not None else ''}\n\t"
-        + "\n\t".join(dict_names),
-        flush=True,
-    )
+    print("Analyzing with dictionaries:\n\t" + "\n\t".join(dict_names), flush=True)
+
 
     header: List[str] = [id_col_name] if include_id_col else []
 
@@ -167,7 +164,7 @@ def analyze_text_one_row(
     return header, row
 
 def analyze_texts_to_csv(
-    items: Iterable[Tuple[str, str]],
+    items: Iterable[Union[Tuple[str, str], Tuple[str, str, dict]]],
     dict_files: Sequence[PathLike],
     out_csv: PathLike,
     *,
@@ -177,12 +174,37 @@ def analyze_texts_to_csv(
     retain_captures: bool = False,
     wildcard_mem: bool = True,
     id_col_name: str = "text_id",
+    pass_through_cols: Sequence[str] = (),
     newline: str = "",
     encoding: str = "utf-8-sig",
 ) -> Path:
     """
-    Write a single CSV with one row per (text_id, text).
-    Header = [text_id] + globals-once + per-dict blocks (prefixed).
+    Write one wide CSV with per-text features.
+
+    Header layout
+    -------------
+    [id_col_name] + [<pass_through_cols...>] + [globals_once] + [per-dict blocks]
+
+    Parameters
+    ----------
+    items : Iterable[tuple]
+        Yields either (text_id, text) or (text_id, text, meta_dict) where meta_dict
+        provides values for pass_through_cols. Missing keys are emitted as empty strings.
+    dict_files : sequence of path-like
+        Paths to dictionaries (.dic/.dicx/.csv). Directories are expanded upstream.
+    out_csv : path-like
+        Output CSV path.
+    relative_freq, drop_punct, rounding, retain_captures, wildcard_mem : see caller.
+    id_col_name : str, default="text_id"
+        Name for the identifier column.
+    pass_through_cols : sequence of str, default=()
+        Additional columns to inject immediately after id_col_name.
+    newline, encoding : CSV writer options.
+
+    Notes
+    -----
+    - Streaming/constant memory: rows are computed and written one-by-one.
+    - Backward-compatible: callers that provide only (text_id, text) continue to work.
     """
     out_csv = Path(out_csv)
     out_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -190,19 +212,19 @@ def analyze_texts_to_csv(
     coders = _load_coders(dict_files)
     if not coders:
         raise ValueError("No dictionaries provided.")
-    
+
     dict_names = [pref for pref, _ in coders]
 
-    # Header + index plans
+    # ---- Build the static header plan --------------------------------------
     first_pref, first_cc = coders[0]
     h0 = list(first_cc.GetResultsHeader())
     g0, p0 = _partition_indices(h0, keep_globals=True)
 
     header: List[str] = [id_col_name]
+    header.extend(list(pass_through_cols))  # inserted up-front, in the order requested
     header.extend([h0[i] for i in g0])
     header.extend([f"{first_pref}__{h0[i]}" for i in p0])
 
-    # Plans for remaining dicts
     plans: List[Tuple[str, List[int], List[str], ContentCoder]] = []
     for pref, cc in coders[1:]:
         h = list(cc.GetResultsHeader())
@@ -210,18 +232,32 @@ def analyze_texts_to_csv(
         header.extend([f"{pref}__{h[i]}" for i in p])
         plans.append((pref, p, h, cc))
 
+    # ---- Stream rows --------------------------------------------------------
     with out_csv.open("w", newline=newline, encoding=encoding) as f:
         writer = csv.writer(f)
         writer.writerow(header)
 
-        for text_id, text in items:
-            row_out: List[Union[str, float]] = [text_id]
+        for it in items:
+            # Accept (text_id, text) or (text_id, text, meta_dict)
+            if len(it) == 2:
+                text_id, text = it  # type: ignore[misc]
+                meta = {}
+            elif len(it) == 3:
+                text_id, text, meta = it  # type: ignore[misc]
+                if not isinstance(meta, dict):
+                    raise ValueError("Third element of items must be a dict of pass-through column values.")
+            else:
+                raise ValueError("Each item must be (text_id, text) or (text_id, text, meta_dict).")
 
             print(
                 f"Analyzing with dictionaries: {text_id}\n\t" + "\n\t".join(dict_names),
                 flush=True,
             )
+
+            # Row starts with id + pass-through values in the requested order
             row_out: List[Union[str, float]] = [text_id]
+            if pass_through_cols:
+                row_out.extend([str(meta.get(c, "")) for c in pass_through_cols])
 
             # First dict (globals + per-dict)
             res0 = first_cc.Analyze(
@@ -252,3 +288,4 @@ def analyze_texts_to_csv(
             writer.writerow(row_out)
 
     return out_csv
+

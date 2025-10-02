@@ -228,8 +228,10 @@ def analyze_with_sentence_embeddings(
         If ``False`` and the output file already exists, skip processing and return it.
     pass_through_cols : Sequence[str], optional
         Column names from the analysis-ready CSV to copy into the output
-        alongside ``text_id`` (e.g., ``["source","speaker"]``). Missing
-        columns are ignored with a warning.
+        alongside ``text_id`` (e.g., ``["source","speaker"]``). **Any names
+        given in ``id_cols`` are always included automatically**, even if not
+        listed here. Missing columns are ignored with a warning.
+
 
     encoding : str, default="utf-8-sig"
         CSV I/O encoding.
@@ -368,7 +370,22 @@ def analyze_with_sentence_embeddings(
     dim = int(getattr(model, "get_sentence_embedding_dimension", lambda: 768)())
 
     # 3) header
-    pt_cols: list[str] = list(pass_through_cols or [])
+    def _merge_cols(preferred: Optional[Sequence[str]], ensure: Optional[Sequence[str]]) -> list[str]:
+        """
+        Merge two sequences while preserving order and removing duplicates.
+        'preferred' order is kept; any 'ensure' items not present are appended.
+        """
+        out: list[str] = []
+        seen: set[str] = set()
+        for seq in (preferred or []), (ensure or []):
+            for c in seq:
+                if c not in seen:
+                    out.append(c)
+                    seen.add(c)
+        return out
+
+    # Always include id_cols in pass-through set (user doesn't need to repeat them)
+    pt_cols: list[str] = _merge_cols(pass_through_cols, id_cols)
     header = ["text_id"] + pt_cols + [f"e{i}" for i in range(dim)]
 
 
@@ -388,9 +405,10 @@ def analyze_with_sentence_embeddings(
         with analysis_ready.open("r", newline="", encoding=encoding) as rf:
             reader = csv.DictReader(rf, delimiter=delimiter)
             # Light validation: warn if any requested pass-through column is missing
+                        # Light validation: warn if any requested pass-through column is missing
             missing = [c for c in pt_cols if c not in (reader.fieldnames or [])]
             if missing:
-                print(f"[sentence-embeddings] WARNING: pass_through_cols missing in source: {missing}")
+                print(f"[sentence-embeddings] WARNING: pass-through columns missing in source: {missing}")
 
             for row in reader:
                 text_id = str(row.get("text_id", ""))

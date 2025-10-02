@@ -327,6 +327,9 @@ def analyze_lexical_richness(
     vocd_within_sample: int = 100,
     vocd_iterations: int = 3,
     vocd_seed: int = 42,
+
+    # ====== NEW: passthrough control ======
+    pass_through_cols: Optional[Sequence[str]] = None,
 ) -> Path:
     """
     Compute lexical richness/diversity metrics for each text row and write a features CSV.
@@ -422,6 +425,22 @@ def analyze_lexical_richness(
     Path
         Path to the written features CSV.
 
+    Output shape
+    ------------
+    The features CSV starts with::
+
+        text_id, <pass-through columns...>, ttr, rttr, cttr, ...
+
+    Pass-through behavior:
+
+    - If ``pass_through_cols`` is provided, those columns are included in that order.
+    - Otherwise, if ``id_cols`` were used during gathering, they are included in that order.
+    - Otherwise (backward compatible), *all* non-``text`` columns from the analysis-ready CSV are passed through.
+
+    Metrics emitted per row (``None`` if the text is too short):
+    ``ttr, rttr, cttr, herdan_c, summer_s, dugast, maas, yule_k, yule_i, herdan_vm, simpson_d,
+    msttr_{msttr_window}, mattr_{mattr_window}, mtld_{mtld_threshold}, hdd_{hdd_draws}, vocd_{vocd_ntokens}``.
+
     Notes
     -----
     **Tokenization and preprocessing.**
@@ -461,12 +480,6 @@ def analyze_lexical_richness(
     curve fits closely; you can widen the search grid or add a fine local search
     if tighter agreement is desired.
 
-    **Output shape.**
-    The output CSV includes all non-text columns from the analysis-ready CSV
-    (e.g., `text_id`, plus any `id_cols`) and appends one column per metric. When
-    a group-by is specified during gathering, each output row corresponds to one
-    group (e.g., one `(source, speaker)`).
-
     Raises
     ------
     FileNotFoundError
@@ -499,8 +512,6 @@ def analyze_lexical_richness(
     See Also
     --------
     analyze_readability : Parallel analyzer producing readability indices.
-    csv_to_analysis_ready_csv : Helper for building the analysis-ready table from a CSV.
-    txt_folder_to_analysis_ready_csv : Helper for building the analysis-ready table from a folder of .txt files.
     """
     # 1) Accept or produce analysis-ready CSV
     if analysis_csv is not None:
@@ -549,21 +560,11 @@ def analyze_lexical_richness(
         print(f"Lexical richness output file already exists; returning existing file: {out_features_csv}")
         return out_features_csv
 
-    # 3) Stream analysis-ready CSV and compute metrics per row
+    # 3) Define metric names
     metrics_fixed = [
-        "ttr",
-        "rttr",
-        "cttr",
-        "herdan_c",
-        "summer_s",
-        "dugast",
-        "maas",
-        "yule_k",
-        "yule_i",
-        "herdan_vm",
-        "simpson_d",
+        "ttr", "rttr", "cttr", "herdan_c", "summer_s", "dugast", "maas",
+        "yule_k", "yule_i", "herdan_vm", "simpson_d",
     ]
-    # dynamic metric names (with params baked into column names)
     m_msttr = f"msttr_{msttr_window}"
     m_mattr = f"mattr_{mattr_window}"
     m_mtld  = f"mtld_{str(mtld_threshold).replace('.', '_')}"
@@ -571,25 +572,58 @@ def analyze_lexical_richness(
     m_vocd  = f"vocd_{vocd_ntokens}"
     metric_names = metrics_fixed + [m_msttr, m_mattr, m_mtld, m_hdd, m_vocd]
 
+    # Small helper to deduplicate while preserving order
+    def _uniq(seq: Iterable[str]) -> List[str]:
+        seen: set[str] = set()
+        out: List[str] = []
+        for s in seq:
+            if s not in seen:
+                seen.add(s)
+                out.append(s)
+        return out
+
+    # 4) Stream, compute, and write
     with analysis_ready.open("r", newline="", encoding=encoding) as fin, \
          out_features_csv.open("w", newline="", encoding=encoding) as fout:
         reader = csv.DictReader(fin, delimiter=delimiter)
 
         if "text_id" not in reader.fieldnames or "text" not in reader.fieldnames:
             raise ValueError(
-                f"Expected columns 'text_id' and 'text' in {analysis_ready}; "
-                f"found {reader.fieldnames}"
+                f"Expected columns 'text_id' and 'text' in {analysis_ready}; found {reader.fieldnames}"
             )
 
-        passthrough_cols = [c for c in reader.fieldnames if c != "text"]
-        fieldnames = passthrough_cols + metric_names
+        # Decide which columns to pass through (after text_id)
+        requested_pt = list(pass_through_cols or [])
+        # If none explicitly requested, fall back to id_cols; finally to all non-text fields
+        if not requested_pt and id_cols:
+            requested_pt = list(id_cols)
+
+        if not requested_pt:
+            # backward-compatible: pass through ALL non-text columns (including text_id is handled below)
+            auto = [c for c in (reader.fieldnames or []) if c != "text" and c != "text_id"]
+            requested_pt = auto
+
+        # Validate that all requested pass-through columns exist
+        fields = set(reader.fieldnames or [])
+        missing = [c for c in requested_pt if c not in fields]
+        if missing:
+            raise ValueError(
+                f"Requested pass-through columns not present in analysis-ready CSV {analysis_ready}: {missing}"
+            )
+
+        passthrough_cols = _uniq(requested_pt)
+        fieldnames = ["text_id", *passthrough_cols, *metric_names]
         writer = csv.DictWriter(fout, fieldnames=fieldnames, delimiter=delimiter)
         writer.writeheader()
 
         for row in reader:
             txt = (row.get("text") or "").strip()
             toks = _tokenize(txt) if txt else []
-            out_row: Dict[str, Any] = {k: row.get(k) for k in passthrough_cols}
+
+            out_row: Dict[str, Any] = {
+                "text_id": row.get("text_id"),
+                **{k: row.get(k) for k in passthrough_cols},
+            }
 
             # fixed metrics
             out_row["ttr"]        = ttr(toks)
