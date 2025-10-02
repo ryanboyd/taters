@@ -256,11 +256,11 @@ steps:
   with:
     root_dir: "{{sent_embeds}}"
     aggregate: true
-    group_by: ["source", "speaker"]   # ← these become leading columns in the output
+    group_by: ["text_id", "source", "speaker"]   # ← these become leading columns in the output
     per_file: false                   # we’re already providing "source" explicitly
     stats: ["mean"]
     add_source_path: false
-    exclude_cols: ["start_time","end_time","text", "file_source", "text_id__mean"]
+    exclude_cols: ["start_time","end_time","text", "file_source"]
     overwrite_existing: false
     out_csv: "features/sentence-embeddings_aggregated.csv"
 
