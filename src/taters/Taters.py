@@ -32,6 +32,7 @@ class Taters:
     def split_wav_by_speaker(self, **kwargs):                   return self.audio.split_wav_by_speaker(**kwargs)
     def extract_whisper_embeddings(self, **kwargs):             return self.audio.extract_whisper_embeddings(**kwargs)
     def diarize_with_thirdparty(self, **kwargs):                return self.audio.diarize_with_thirdparty(**kwargs)
+    def analyze_vocal_acoustics(self, **kwargs):               return self.audio.analyze_vocal_acoustics(**kwargs)
     
     #text
     def analyze_with_dictionaries(self, **kwargs):              return self.text.analyze_with_dictionaries(**kwargs)
@@ -73,6 +74,10 @@ class _AudioAPI:
     def diarize_with_thirdparty(self, **kwargs):
         from .audio.diarizer.whisper_diar_wrapper import run_whisper_diarization_repo
         return _forward(run_whisper_diarization_repo, kwargs)
+    
+    def analyze_vocal_acoustics(self, **kwargs):
+        from .audio.analyze_vocal_acoustics import analyze_acoustics
+        return _forward(analyze_acoustics, kwargs)
 
 
 class _TextAPI:

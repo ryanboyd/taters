@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "taters"
-version = "0.1.93"
+version = "0.1.94"
 authors = [{ name = "Ryan L. Boyd", email = "ryan@ryanboyd.io" }]
 description = "Analyze, process, and extract from many types of input data. Highly modular/customizable."
 
@@ -43,10 +43,13 @@ Issues   = "https://github.com/ryanboyd/taters/issues"
 [project.optional-dependencies]
 # Full diarization pipeline (large downloads)
 
+# All of the below, merged into one
 all = [
   "nemo-toolkit[asr]>=2.dev",
   "nvidia-cudnn-cu12",
   "textstat>=0.7,<0.8",
+  "praat-parselmouth>=0.4.6",
+  "disvoice>=0.1.10"
 ]
 
 diarization = [
@@ -61,6 +64,9 @@ readability = [
   "textstat>=0.7,<0.8",   # pin to a stable minor window 
 ]
 
+vocalacoustics = [  
+  "praat-parselmouth>=0.4.6", "disvoice>=0.1.10"
+]
 
 [tool.setuptools]
 # Map top-level packages to the 'src' directory
