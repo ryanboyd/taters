@@ -129,6 +129,51 @@ def _pydub_to_float_mono(sig: "AudioSegment") -> tuple[np.ndarray, int]:
     y = (arr.astype(np.float32) / max_int).copy()
     return y, sr
 
+def _min_required_duration_s(f0_min: float) -> float:
+    """
+    Praat intensity analysis requires ~6.4 / min_pitch seconds of audio.
+    Praat's to_intensity() defaults to a 100 Hz min pitch internally,
+    so we honor the stricter of:
+      - 6.4 / 100
+      - 6.4 / f0_min (our pitch floor)
+      - and a hard floor of 0.064 s (the 100 Hz example)
+    """
+    rule_100 = 6.4 / 100.0
+    rule_f0  = 6.4 / max(1e-6, float(f0_min))
+    return max(0.064, rule_100, rule_f0)
+
+
+def _pad_sound_to_min_duration(snd: parselmouth.Sound, min_dur_s: float) -> parselmouth.Sound:
+    """Pad a parselmouth.Sound with silence (split on both ends) to reach min_dur_s."""
+    dur = float(snd.get_total_duration())
+    if dur >= min_dur_s:
+        return snd
+    sr = int(snd.sampling_frequency)
+    needed = int(round((min_dur_s - dur) * sr))
+    left = needed // 2
+    right = needed - left
+    pad_left = parselmouth.Sound(values=np.zeros((1, left), dtype=np.float64), sampling_frequency=sr)
+    pad_right = parselmouth.Sound(values=np.zeros((1, right), dtype=np.float64), sampling_frequency=sr)
+
+    # IMPORTANT: use the class-level concatenator so the result is a brand new, longer Sound
+    try:
+        concatenated = parselmouth.Sound.concatenate([pad_left, snd, pad_right])
+    except Exception:
+        # Fallback via Praat "Concatenate"
+        concatenated = parselmouth.praat.call([pad_left, snd, pad_right], "Concatenate")
+    return concatenated
+
+
+def _pad_numpy_to_min_duration(y: np.ndarray, sr: int, min_dur_s: float) -> np.ndarray:
+    """Pad a 1D numpy signal with zeros (split on both ends) to reach min_dur_s."""
+    cur = len(y)
+    need = int(round(min_dur_s * sr))
+    if cur >= need:
+        return y
+    add = need - cur
+    left = add // 2
+    right = add - left
+    return np.pad(y, (left, right), mode="constant", constant_values=0.0)
 
 
 # -------------------------
@@ -633,8 +678,32 @@ def _analyze_clip(
     )
     snd = _ensure_mono_sound(snd)
 
-    # Framewise tracks
-    tracks = _framewise_tracks(snd, f0_min=f0_min, f0_max=f0_max)
+    # --- Ensure the signal is long enough for Praat’s pitch/intensity windows ---
+    # Praat rule-of-thumb: at least 6.4 / f0_min seconds (e.g., 64 ms at 100 Hz).
+    # --- Ensure the signal is long enough for Praat’s pitch/intensity windows ---
+    min_dur_s = _min_required_duration_s(f0_min)
+
+    if (len(y) / sr) < min_dur_s:
+        y   = _pad_numpy_to_min_duration(y, sr, min_dur_s)
+        snd = _pad_sound_to_min_duration(snd, min_dur_s)
+
+
+    # Defensive: if intensity still throws a duration error (rare edge rounding), pad and retry inside tracks
+    def _safe_framewise_tracks(snd_obj: parselmouth.Sound, **kwargs) -> FramewiseTracks:
+        try:
+            return _framewise_tracks(snd_obj, **kwargs)
+        except Exception as e:
+            # Only intercept window-length / intensity errors
+            msg = str(e)
+            if "shorter than window length" in msg or "intensity analysis not performed" in msg:
+                # Pad to the same min_dur_s (or +1 frame margin) and retry
+                extra = 0.005  # 5 ms safety
+                snd_padded = _pad_sound_to_min_duration(snd_obj, min_dur_s + extra)
+                return _framewise_tracks(snd_padded, **kwargs)
+            raise
+
+    # Use the safe wrapper instead of calling _framewise_tracks directly
+    tracks = _safe_framewise_tracks(snd, f0_min=f0_min, f0_max=f0_max)
 
     # Framewise DataFrame (optional)
     frame_df: Optional[pd.DataFrame] = None

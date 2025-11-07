@@ -83,6 +83,18 @@ vars:
   transcripts_dir: "transcripts"
   features_dir: "features"
 
+  # --- Acoustics knobs (optional) ---
+  acoustics_mode: simple
+  acoustics_voiced_ms: 100
+  acoustics_preprocess: true
+  acoustics_target_sr: 44100
+  acoustics_target_dbfs: -20.0
+  acoustics_remove_dc: true
+  acoustics_pause_top_db: 30
+  acoustics_pause_frame_length: 2048
+  acoustics_pause_hop_length: 512
+
+
 steps:
 # 1) Video → WAV
 - scope: item
@@ -117,7 +129,32 @@ steps:
     time_unit: "ms"
     overwrite_existing: "{{var:overwrite_existing}}"
 
-# 4) Whisper embeddings (segment-level, from transcript)
+# 4) Acoustic features (per-speaker, transcript-guided)
+- scope: item
+  call: potato.audio.analyze_vocal_acoustics
+  save_as: acoustics
+  with:
+    wav_path: "{{wav}}"
+    transcript_csv: "{{pick:diar.raw_files.csv}}"
+    time_unit: "ms"
+    group_by: ["speaker"]                 # → one row per speaker per file
+    extra_id_cols: ["source","speaker"]   # carry these through
+    out_dir: "{{var:features_dir}}/acoustics"
+    include_framewise: false              # set true to also write framewise CSVs
+    mode: "{{var:acoustics_mode}}"
+    summarize_on_voiced_segments_ms: "{{var:acoustics_voiced_ms}}"
+    # preprocessing
+    preprocess: "{{var:acoustics_preprocess}}"
+    target_sr: "{{var:acoustics_target_sr}}"
+    target_dbfs: "{{var:acoustics_target_dbfs}}"
+    remove_dc: "{{var:acoustics_remove_dc}}"
+    # VAD / pause tuning
+    pause_top_db: "{{var:acoustics_pause_top_db}}"
+    pause_frame_length: "{{var:acoustics_pause_frame_length}}"
+    pause_hop_length: "{{var:acoustics_pause_hop_length}}"
+    overwrite_existing: "{{var:overwrite_existing}}"
+
+# 5) Whisper embeddings (segment-level, from transcript)
 - scope: item
   call: potato.audio.extract_whisper_embeddings
   save_as: whisper_feats
@@ -129,7 +166,20 @@ steps:
     device: "{{var:device}}"
     overwrite_existing: "{{var:overwrite_existing}}"
 
-# 5) GATHER whisper embeddings into a single CSV
+# 8) GATHER acoustic summaries (already per-speaker)
+- scope: global
+  call: potato.helpers.feature_gather
+  save_as: acoustics_all
+  with:
+    root_dir: "{{var:features_dir}}/acoustics"
+    pattern: "*_summary_by_speaker.csv"
+    recursive: false
+    aggregate: false          # already aggregated by speaker in the item step
+    add_source_path: true
+    overwrite_existing: "{{var:overwrite_existing}}"
+    out_csv: "features/acoustics_summary.csv"
+
+# 9) GATHER whisper embeddings into a single CSV
 #    Aggregate within each file by 'speaker' → mean of numeric cols.
 - scope: global
   call: potato.helpers.feature_gather
@@ -144,7 +194,7 @@ steps:
     overwrite_existing: "{{var:overwrite_existing}}"
     out_csv: "features/whisper-embeddings_aggregated.csv"                   # default → ./features/whisper-embeddings.csv
 
-# 6) GATHER transcripts (CSV) into a single unified CSV (no aggregation)
+# 10) GATHER transcripts (CSV) into a single unified CSV (no aggregation)
 - scope: global
   call: potato.helpers.feature_gather
   save_as: transcripts_all
@@ -157,7 +207,7 @@ steps:
     overwrite_existing: "{{var:overwrite_existing}}"
     out_csv: "./all_transcripts.csv"   # unified transcript table
 
-# 7) DICTIONARY CODING on the unified transcript CSV
+# 11) DICTIONARY CODING on the unified transcript CSV
 #    Group by (source, speaker) to create per-speaker-per-file text.
 - scope: global
   call: potato.text.analyze_with_dictionaries
@@ -175,7 +225,7 @@ steps:
     overwrite_existing: "{{var:overwrite_existing}}"
     relative_freq: true
 
-# 8) READABILITY on the unified transcript CSV
+# 12) READABILITY on the unified transcript CSV
 #     Group by (source, speaker) so each speaker-per-file becomes one text blob.
 - scope: global
   call: potato.text.analyze_readability
@@ -192,7 +242,7 @@ steps:
     overwrite_existing: "{{var:overwrite_existing}}"
 
 
-# 9) LEXICAL RICHNESS on the unified transcript CSV
+# 13) LEXICAL RICHNESS on the unified transcript CSV
 #     Group by (source, speaker) so each speaker-per-file becomes one text blob.
 - scope: global
   call: potato.text.analyze_lexical_richness
@@ -219,7 +269,7 @@ steps:
     # vocd_seed: 42
 
 
-# 10) ARCHETYPES on the unified transcript CSV
+# 14) ARCHETYPES on the unified transcript CSV
 #    Same grouping → comparable per-speaker rows.
 - scope: global
   call: potato.text.analyze_with_archetypes
@@ -236,7 +286,7 @@ steps:
     rounding: 4
     overwrite_existing: "{{var:overwrite_existing}}"
 
-# 11) SENTENCE EMBEDDINGS (row-level, no grouping, from unified CSV)
+# 15) SENTENCE EMBEDDINGS (row-level, no grouping, from unified CSV)
 - scope: global
   call: potato.text.extract_sentence_embeddings
   save_as: sent_embeds
@@ -249,7 +299,7 @@ steps:
     pass_through_cols: ["source","speaker"]
     overwrite_existing: "{{var:overwrite_existing}}"
 
-# 12) Aggregate SENTENCE EMBEDDINGS by (source, speaker) → mean
+# 16) Aggregate SENTENCE EMBEDDINGS by (source, speaker) → mean
 - scope: global
   call: potato.helpers.feature_gather
   save_as: sent_embeds_agg
