@@ -95,7 +95,16 @@ def _run_repo_script(
         except Exception:
             pass
 
-    subprocess.run(cmd, cwd=work_dir, check=True, timeout=timeout, env=env, stdin=subprocess.DEVNULL)
+    result = subprocess.run(
+        cmd, cwd=work_dir, timeout=timeout, env=env,
+        stdin=subprocess.DEVNULL, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Diarization subprocess failed (exit {result.returncode}).\n"
+            f"STDOUT:\n{(result.stdout or '').strip()}\n\n"
+            f"STDERR:\n{(result.stderr or '').strip()}"
+        )
 
 def _guess_outputs_from_stem(work_dir: Path, stem: str) -> Dict[str, Path]:
     exts = ["srt", "txt", "csv"]

@@ -27,22 +27,21 @@ import importlib
 import json
 import re
 import sys
-from collections import ChainMap
 from dataclasses import is_dataclass, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import textwrap, yaml
 
-PRESET_DIRS = [
-    Path(__file__).parent / "presets",   # built-in
-    Path.cwd() / "pipelines",            # project-local (optional)
-]
+_BUILTIN_PRESETS_DIR = Path(__file__).parent / "presets"
+
+def _get_preset_dirs() -> List[Path]:
+    return [_BUILTIN_PRESETS_DIR, Path.cwd() / "pipelines"]
 
 # ============ List/Describe Presets ============
 
 def _iter_presets():
-    for base in PRESET_DIRS:
+    for base in _get_preset_dirs():
         if not base.is_dir():
             continue
         for p in sorted(base.glob("**/*.yaml")):
@@ -716,6 +715,28 @@ def run_global_step(
     return ("ok", out, {})
 
 
+# ============== Per-item worker (module-level so it is picklable for ProcessPoolExecutor) ==============
+
+def _run_item_step(
+    i: int,
+    p: Path,
+    step: dict,
+    potato: Any,
+    item_artifacts: Dict[str, Any],
+    globals_ctx: Dict[str, Any],
+    vars_ctx: Dict[str, Any],
+) -> Tuple[int, str, Dict[str, Any], Dict[str, Any]]:
+    status, new_artifacts, err = run_item_step_for_one_input(
+        step=step,
+        input_path=p,
+        potato=potato,
+        item_artifacts=item_artifacts,
+        globals_ctx=globals_ctx,
+        vars_ctx=vars_ctx,
+    )
+    return i, status, new_artifacts, err
+
+
 # ============== Main ==============
 
 def main():
@@ -875,28 +896,16 @@ def main():
             step_engine = step.get("engine", "thread")  # "thread" (default) or "process"
             step_workers = max(1, int(step.get("workers", args.workers)))
 
-            def _run_one(ix_and_path: Tuple[int, Path]):
-                i, p = ix_and_path
-                itm = manifest["items"][i]
-                status, new_artifacts, err = run_item_step_for_one_input(
-                    step=step,
-                    input_path=p,
-                    potato=potato,
-                    item_artifacts=itm["artifacts"],
-                    globals_ctx=globals_ctx,
-                    vars_ctx=vars_ctx,
-                )
-                return i, status, new_artifacts, err
-
-            # more robust than previous implementation. This way, even if something slips
-            # past our inner try/excepts, we still mark just that item as failed and the
-            # rest of the items keep running.
             results: List[Tuple[int, str, Dict[str, Any], Dict[str, Any]]] = []
             Executor = cf.ProcessPoolExecutor if step_engine == "process" else cf.ThreadPoolExecutor
             with Executor(max_workers=step_workers) as pool:
                 future_to_i = {}
                 for i, p in enumerate(inputs):
-                    f = pool.submit(_run_one, (i, p))
+                    f = pool.submit(
+                        _run_item_step, i, p, step, potato,
+                        manifest["items"][i]["artifacts"],
+                        globals_ctx, vars_ctx,
+                    )
                     future_to_i[f] = i
 
                 for fut in cf.as_completed(future_to_i):
@@ -904,7 +913,6 @@ def main():
                     try:
                         results.append(fut.result())
                     except Exception as e:
-                        # Last-resort catch: record a hard failure for this item and keep going
                         itm = manifest["items"][i]
                         itm["status"] = "error"
                         itm["errors"].append(f"Worker crashed in step '{call_name}': {e}")
