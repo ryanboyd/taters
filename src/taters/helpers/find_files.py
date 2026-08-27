@@ -134,7 +134,7 @@ def find_files(
     For audio/video, `ffprobe_verify=True` additionally checks that at least one
     corresponding stream is present (e.g., exclude MP4s with no audio when
     `file_type="audio"`). This is slower but robust when your dataset contains
-    “container only” files. :contentReference[oaicite:0]{index=0}
+    “container only” files.
 
     Parameters
     ----------

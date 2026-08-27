@@ -231,7 +231,7 @@ def csv_to_analysis_ready_csv(
     grouping** that does not require presorting:
       1) Hash-partition rows to on-disk “bucket” CSVs (bounded writers with LRU).
       2) Aggregate each bucket into final rows (concat or separate mode), writing
-         `group_count` to record how many pieces contributed. :contentReference[oaicite:1]{index=1}
+         `group_count` to record how many pieces contributed.
 
     Parameters
     ----------

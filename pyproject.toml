@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "taters"
-version = "0.2.0"
+version = "0.2.1"
 authors = [{ name = "Ryan L. Boyd", email = "ryan@ryanboyd.io" }]
 description = "Analyze, process, and extract from many types of input data. Highly modular/customizable."
 
@@ -116,6 +116,7 @@ packages = { find = { where = ["src"], include = ["taters*"] } }
 [project.scripts]
 # Entry points must target a callable, not __main__
 taters-embeddings = "taters.audio.extract_whisper_embeddings:main"
+taters-transcribe = "taters.audio.transcribe_with_whisper:main"
 
 
 [tool.pytest.ini_options]

@@ -1,0 +1,296 @@
+# single_speaker_media.yaml
+
+meta:
+  id: single_speaker_media
+  title: Single-speaker media → transcript + features
+  summary: >
+    Extract audio, transcribe with faster-whisper (no diarization), compute
+    Whisper embeddings, then unify transcripts and get the full battery of
+    text-based features/measures.
+  use_cases:
+    - Lectures and talks
+    - Voice memos and dictation
+    - Podcast monologues
+    - Single-participant interviews recorded on one mic
+  inputs:
+    file type: audio or video files (e.g., wav, mp3, mkv, mp4)
+  requirements:
+    cpu: true
+    gpu/cuda: optional
+    ffmpeg: true
+    extras:
+      - readability
+  variables:
+    device:
+      default: auto
+      desc: Which device you would like to use for the ASR/embedding models (cpu|cuda|auto)
+    overwrite_existing:
+      default: false
+      desc: Do not overwrite outputs unless true
+    whisper_model:
+      default: base.en
+      desc: >
+        Faster-Whisper model size. Use a non-".en" model (e.g. "base", "small")
+        for anything other than English.
+    language:
+      default: null
+      desc: Force a language code (e.g. en). Leave null to auto-detect.
+    speaker_label:
+      default: "Speaker 0"
+      desc: >
+        Value written to the speaker column. There is only one speaker here, but
+        the column is kept so downstream steps match the diarized pipeline.
+    dictionaries_path:
+      default: "./dictionaries/liwc"
+      desc: >
+        A folder or list full of LIWC-formatted dictionary files
+        (.dicx, .dic, .csv) that you want to apply to the transcripts.
+    archetypes_dict_path:
+      default: "./dictionaries/archetypes"
+      desc: >
+        A folder or list of .CSV archetype dictionaries that you want
+        to apply to the transcripts.
+    transcripts_dir:
+      default: "./transcripts/"
+      desc: The base directory where you would like your individual transcripts to be saved.
+    features_dir:
+      default: "./features/"
+      desc: The base directory where you would like your feature files to be saved.
+  tags: [audio, video, transcription, embeddings]
+  version: 1
+  authors: ["Ryan L. Boyd"]
+  notes: |
+    The lightweight counterpart to `conversation_video`. That preset clusters
+    speakers with the vendored diarizer, which needs the `diarization` extra
+    plus three git installs; this one needs only the base install, because
+    faster-whisper is already a core dependency.
+
+    Both write the same `start_time,end_time,speaker,text` CSV, so every step
+    after transcription is identical between the two.
+
+    Safe to re-run; steps short-circuit if outputs exist.
+  cli_example: >
+    python -m taters.pipelines.run_pipeline --root_dir lectures --file_type audio
+    --preset single_speaker_media --workers 4 --var device=cuda
+
+# Begin specification of pipeline
+
+vars:
+  device: "auto"
+  overwrite_existing: false
+
+  # audio stuff
+  whisper_model: "base.en"
+  language: null
+  speaker_label: "Speaker 0"
+
+  # Paths to different types of dictionary resources (folders)
+  dictionaries_path: "dictionaries/liwc"
+  archetypes_dict_path: "dictionaries/archetypes"
+
+  # Output roots (override if you want)
+  transcripts_dir: "transcripts"
+  features_dir: "features"
+
+  # --- Acoustics knobs (optional) ---
+  acoustics_mode: simple
+  acoustics_voiced_ms: 100
+  acoustics_preprocess: true
+  acoustics_target_sr: 44100
+  acoustics_target_dbfs: -20.0
+  acoustics_remove_dc: true
+  acoustics_pause_top_db: 30
+  acoustics_pause_frame_length: 2048
+  acoustics_pause_hop_length: 512
+
+
+steps:
+# 1) Media → WAV
+- scope: item
+  call: potato.audio.convert_to_wav
+  save_as: wav
+  with:
+    input_path: "{{input}}"
+    overwrite_existing: "{{var:overwrite_existing}}"
+
+# 2) Transcribe (writes the same transcript CSV/SRT/TXT the diarizer would)
+- scope: item
+  call: potato.audio.transcribe_with_whisper
+  save_as: diar
+  with:
+    audio_path: "{{wav}}"
+    out_dir: "{{var:transcripts_dir}}"
+    whisper_model: "{{var:whisper_model}}"
+    language: "{{var:language}}"
+    device: "{{var:device}}"
+    speaker_label: "{{var:speaker_label}}"
+    overwrite_existing: "{{var:overwrite_existing}}"
+  require: [audio_path]
+
+# NOTE: no per-speaker WAV split here — there is only one speaker.
+
+# 3) Acoustic features (transcript-guided, one row per file)
+- scope: item
+  call: potato.audio.analyze_vocal_acoustics
+  save_as: acoustics
+  with:
+    wav_path: "{{wav}}"
+    transcript_csv: "{{pick:diar.raw_files.csv}}"
+    time_unit: "ms"
+    group_by: ["speaker"]
+    extra_id_cols: ["source","speaker"]
+    out_dir: "{{var:features_dir}}/acoustics"
+    include_framewise: false
+    mode: "{{var:acoustics_mode}}"
+    summarize_on_voiced_segments_ms: "{{var:acoustics_voiced_ms}}"
+    preprocess: "{{var:acoustics_preprocess}}"
+    target_sr: "{{var:acoustics_target_sr}}"
+    target_dbfs: "{{var:acoustics_target_dbfs}}"
+    remove_dc: "{{var:acoustics_remove_dc}}"
+    pause_top_db: "{{var:acoustics_pause_top_db}}"
+    pause_frame_length: "{{var:acoustics_pause_frame_length}}"
+    pause_hop_length: "{{var:acoustics_pause_hop_length}}"
+    overwrite_existing: "{{var:overwrite_existing}}"
+
+# 4) Whisper embeddings (segment-level, from transcript)
+- scope: item
+  call: potato.audio.extract_whisper_embeddings
+  save_as: whisper_feats
+  with:
+    source_wav: "{{wav}}"
+    transcript_csv: "{{pick:diar.raw_files.csv}}"
+    time_unit: "ms"
+    model_name: "{{var:whisper_model}}"
+    device: "{{var:device}}"
+    overwrite_existing: "{{var:overwrite_existing}}"
+
+# 5) GATHER acoustic summaries
+- scope: global
+  call: potato.helpers.feature_gather
+  save_as: acoustics_all
+  with:
+    root_dir: "{{var:features_dir}}/acoustics"
+    pattern: "*_summary_by_speaker.csv"
+    recursive: false
+    aggregate: false
+    add_source_path: true
+    overwrite_existing: "{{var:overwrite_existing}}"
+    out_csv: "features/acoustics_summary.csv"
+
+# 6) GATHER whisper embeddings into a single CSV
+- scope: global
+  call: potato.helpers.feature_gather
+  save_as: whisper_gathered
+  with:
+    root_dir: "{{var:features_dir}}/whisper-embeddings"
+    pattern: "*.csv"
+    aggregate: true
+    group_by: ["speaker"]
+    per_file: true
+    stats: ["mean"]
+    overwrite_existing: "{{var:overwrite_existing}}"
+    out_csv: "features/whisper-embeddings_aggregated.csv"
+
+# 7) GATHER transcripts (CSV) into a single unified CSV
+- scope: global
+  call: potato.helpers.feature_gather
+  save_as: transcripts_all
+  with:
+    root_dir: "{{var:transcripts_dir}}"
+    pattern: "*.csv"
+    recursive: true
+    aggregate: false
+    add_source_path: true
+    overwrite_existing: "{{var:overwrite_existing}}"
+    out_csv: "./all_transcripts.csv"
+
+# 8) DICTIONARY CODING on the unified transcript CSV
+- scope: global
+  call: potato.text.analyze_with_dictionaries
+  save_as: dict_features
+  with:
+    csv_path: "{{transcripts_all}}"
+    out_features_csv: "features/dictionary.csv"
+    text_cols: ["text"]
+    id_cols: ["source","speaker"]
+    group_by: ["source","speaker"]
+    mode: "concat"
+    dict_paths: ["{{var:dictionaries_path}}"]
+    delimiter: ","
+    encoding: "utf-8-sig"
+    overwrite_existing: "{{var:overwrite_existing}}"
+    relative_freq: true
+
+# 9) READABILITY on the unified transcript CSV
+- scope: global
+  call: potato.text.analyze_readability
+  save_as: readability_features
+  with:
+    csv_path: "{{transcripts_all}}"
+    out_features_csv: "features/readability.csv"
+    text_cols: ["text"]
+    id_cols: ["source","speaker"]
+    group_by: ["source","speaker"]
+    mode: "concat"
+    delimiter: ","
+    encoding: "utf-8-sig"
+    overwrite_existing: "{{var:overwrite_existing}}"
+
+# 10) LEXICAL RICHNESS on the unified transcript CSV
+- scope: global
+  call: potato.text.analyze_lexical_richness
+  save_as: lexrich_features
+  with:
+    csv_path: "{{transcripts_all}}"
+    out_features_csv: "features/lexical-richness.csv"
+    text_cols: ["text"]
+    id_cols: ["source","speaker"]
+    group_by: ["source","speaker"]
+    mode: "concat"
+    delimiter: ","
+    encoding: "utf-8-sig"
+    overwrite_existing: "{{var:overwrite_existing}}"
+
+# 11) ARCHETYPES on the unified transcript CSV
+- scope: global
+  call: potato.text.analyze_with_archetypes
+  save_as: archetype_features
+  with:
+    csv_path: "{{transcripts_all}}"
+    out_features_csv: "features/archetypes.csv"
+    text_cols: ["text"]
+    id_cols: ["source","speaker"]
+    group_by: ["source","speaker"]
+    archetype_csvs: ["{{var:archetypes_dict_path}}"]
+    model_name: "sentence-transformers/all-roberta-large-v1"
+    mean_center_vectors: true
+    rounding: 4
+    overwrite_existing: "{{var:overwrite_existing}}"
+
+# 12) SENTENCE EMBEDDINGS (row-level, from unified CSV)
+- scope: global
+  call: potato.text.extract_sentence_embeddings
+  save_as: sent_embeds
+  with:
+    csv_path: "{{transcripts_all}}"
+    text_cols: ["text"]
+    mode: "concat"
+    model_name: "sentence-transformers/all-roberta-large-v1"
+    normalize_l2: true
+    pass_through_cols: ["source","speaker"]
+    overwrite_existing: "{{var:overwrite_existing}}"
+
+# 13) Aggregate SENTENCE EMBEDDINGS by (source, speaker) → mean
+- scope: global
+  call: potato.helpers.feature_gather
+  save_as: sent_embeds_agg
+  with:
+    root_dir: "{{sent_embeds}}"
+    aggregate: true
+    group_by: ["text_id", "source", "speaker"]
+    per_file: false
+    stats: ["mean"]
+    add_source_path: false
+    exclude_cols: ["start_time","end_time","text", "file_source"]
+    overwrite_existing: false
+    out_csv: "features/sentence-embeddings_aggregated.csv"

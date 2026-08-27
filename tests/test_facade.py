@@ -55,6 +55,7 @@ FACADE_METHODS = [
     ("audio", "extract_wavs_from_video"),
     ("audio", "split_wav_by_speaker"),
     ("audio", "extract_whisper_embeddings"),
+    ("audio", "transcribe_with_whisper"),
     ("audio", "diarize_with_thirdparty"),
     ("audio", "analyze_vocal_acoustics"),
     ("text", "analyze_with_dictionaries"),

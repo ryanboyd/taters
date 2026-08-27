@@ -6,7 +6,6 @@
 This utility probes the container with `ffprobe`, lists audio streams (with
 index and tags), and then maps each stream with `ffmpeg` to a separate PCM WAV.
 It is useful for multi-track recordings (e.g., Zoom, OBS, ProRes with stems).
-:contentReference[oaicite:1]{index=1}
 """
 
 

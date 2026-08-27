@@ -5,7 +5,7 @@
 
 # 🥔 **TATERS**: Takes All Things, Extracts Relevant Stuff
 
-Taters is a Python toolkit and CLI for getting from raw media to analysis-ready data. Point it at video, audio, or text and it will extract WAV from video, diarize and transcribe, compute embeddings, run dictionary and archetype analyses, and gather the results into tidy datasets you can model or visualize.
+Taters is a Python toolkit and CLI for getting from raw media to analysis-ready data. Point it at video, audio, or text and it will extract WAV from video, transcribe it (with or without diarization), compute embeddings, run dictionary and archetype analyses, and gather the results into tidy datasets you can model or visualize.
 
 * 🥔 Documentation: **[https://www.taters.wiki](https://www.taters.wiki)**
 * 🥔 Status: early but usable. APIs will probably evolve; pin a version if you need stability.
@@ -31,9 +31,10 @@ t = Taters()
 # Pull audio from video
 wavs = t.audio.extract_wavs_from_video(input_path="input.mp4")
 
-# Diarize & transcribe (CSV/SRT/TXT)
-diar = t.audio.diarize_with_thirdparty(audio_path=wavs[0], device="auto")
-transcript = diar.raw_files["csv"]   # also: diar.raw_files["srt"] / ["txt"]
+# Transcribe (CSV/SRT/TXT). Swap in diarize_with_thirdparty for multi-speaker
+# recordings — it returns the same shape, so nothing below changes.
+asr = t.audio.transcribe_with_whisper(audio_path=wavs[0], device="auto")
+transcript = asr.raw_files["csv"]    # also: asr.raw_files["srt"] / ["txt"]
 
 # Features (defaults write under ./features/<kind>/)
 t.audio.extract_whisper_embeddings(source_wav=wavs[0], transcript_csv=transcript)
@@ -44,6 +45,10 @@ t.text.analyze_with_archetypes(csv_path=transcript, archetype_csvs=["archetypes/
 ### CLI
 
 ```bash
+# Transcribe a single-speaker recording
+python -m taters.audio.transcribe_with_whisper \
+  --audio_path audio/lecture.wav --whisper_model small.en
+
 # Whisper embeddings over non-silent spans, then mean-pool
 python -m taters.audio.extract_whisper_embeddings \
   --source_wav audio/session.wav --strategy nonsilent --aggregate mean
