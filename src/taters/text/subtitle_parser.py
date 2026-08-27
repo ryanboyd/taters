@@ -533,6 +533,7 @@ def convert_subtitles(
     output: Optional[Union[str, Path]] = None,
     encoding: Optional[str] = None,
     include_name: bool = False,
+    overwrite_existing: bool = False,
 ) -> Path:
     """
     Convert an SRT/VTT file to CSV/SRT/VTT.
@@ -553,6 +554,9 @@ def convert_subtitles(
         Input encoding override; otherwise auto-detected (or UTF-8).
     include_name : bool, default=False
         When ``to='csv'``, include a ``name`` column if available.
+    overwrite_existing : bool, default=False
+        If ``False`` and the output already exists, return it untouched rather
+        than re-rendering, matching the rest of Taters.
 
     Returns
     -------
@@ -567,16 +571,27 @@ def convert_subtitles(
         If the output format is unsupported or input content is malformed.
     """
 
+    ext_for = {"csv": ".csv", "srt": ".srt", "vtt": ".vtt"}
+    if to not in ext_for:
+        # Validated up front: otherwise an unknown format with an explicit
+        # `output` path silently fell through to the VTT renderer.
+        raise ValueError(f"Unsupported output format: {to!r}. Choose from csv, srt, vtt.")
+
     in_path = Path(input).resolve()
-    segs = parse_subtitles(in_path, encoding=encoding)
+    if not in_path.exists():
+        raise FileNotFoundError(f"Subtitle file not found: {in_path}")
 
     # Default output location if not provided
     if output is not None:
         out_path = Path(output)
     else:
-        out_dir = _default_out_dir()
-        ext = {"csv": ".csv", "srt": ".srt", "vtt": ".vtt"}[to]
-        out_path = out_dir / f"{in_path.stem}{ext}"
+        out_path = _default_out_dir() / f"{in_path.stem}{ext_for[to]}"
+
+    if out_path.exists() and not overwrite_existing:
+        print(f"Subtitle output already exists; returning existing file: {out_path}")
+        return out_path
+
+    segs = parse_subtitles(in_path, encoding=encoding)
 
     # Render
     if to == "csv":
@@ -600,6 +615,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     - ``--output``: optional explicit output path
     - ``--encoding``: optional input encoding override
     - ``--include-name``: include ``name`` column when writing CSV
+    - ``--overwrite_existing``: re-render even if the output already exists
 
     Returns
     -------
@@ -616,6 +632,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--output", default=None, help="Output file path. If omitted, uses ./features/subtitles/<stem>.<ext>")
     p.add_argument("--encoding", default=None, help="Force input encoding (otherwise chardet or utf-8).")
     p.add_argument("--include-name", action="store_true", default=False, help="Include 'name' column in CSV (if available).")
+    from taters.helpers.cliargs import add_bool_argument
+    add_bool_argument(p, "--overwrite_existing", default=False,
+                      help="Re-render and replace an existing output file")
     return p
 
 def main():
@@ -639,6 +658,7 @@ def main():
         output=args.output,
         encoding=args.encoding,
         include_name=args.include_name,
+        overwrite_existing=args.overwrite_existing,
     )
     print(str(out))
 

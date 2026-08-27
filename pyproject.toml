@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "taters"
-version = "0.1.95"
+version = "0.2.0"
 authors = [{ name = "Ryan L. Boyd", email = "ryan@ryanboyd.io" }]
 description = "Analyze, process, and extract from many types of input data. Highly modular/customizable."
 
@@ -16,13 +16,22 @@ license = { text = "MIT" }
 dependencies = [
   # Core, minimal runtime for splitting, per-speaker builds, and embeddings
   "faster-whisper>=1.1.0",
-  "transformers>=4.38.0",   # for WhisperFeatureExtractor
+  "ctranslate2",            # imported directly by the embedding worker
+  "transformers>=4.38.0,<5",   # for WhisperFeatureExtractor; <5 pairs with nemo 2.x
   "librosa>=0.10.1",
   "pydub>=0.25.1",
   "contentcoder",
   "archetyper",
   "nltk",
-  "sentence-transformers",
+  # <6 keeps transformers on 4.x, which the diarization extra (nemo-toolkit 2.x)
+  # also requires. sentence-transformers 6 needs transformers>=5 and the two
+  # cannot coexist.
+  "sentence-transformers<6",
+  # Imported at module import time by helpers/feature_gather and the pipeline
+  # runner, so they belong here rather than in an extra.
+  "numpy",
+  "pandas",
+  "PyYAML",
   # NOTE TO SELF:
   # Do NOT list torch/torchaudio here;
   # users must install the right CUDA wheel themselves
@@ -45,15 +54,20 @@ Issues   = "https://github.com/ryanboyd/taters/issues"
 
 # All of the below, merged into one
 all = [
-  "nemo-toolkit[asr]>=2.dev",
+  # <3 is required: NeMo 3.0 removed nemo.collections.asr.models.msdd_models,
+  # which the vendored whisper-diarization code imports.
+  "nemo-toolkit[asr]>=2.3.0,<3.0",
   "nvidia-cudnn-cu12",
   "textstat>=0.7,<0.8",
   "praat-parselmouth>=0.4.6",
+  "soundfile",
   "disvoice>=0.1.10"
 ]
 
 diarization = [
-  "nemo-toolkit[asr]>=2.dev",
+  # <3 is required: NeMo 3.0 removed nemo.collections.asr.models.msdd_models,
+  # which the vendored whisper-diarization code imports.
+  "nemo-toolkit[asr]>=2.3.0,<3.0",
 ]
 # User-space cuDNN libs for CUDA 12 (handy on many systems)
 cuda = [
@@ -65,7 +79,14 @@ readability = [
 ]
 
 vocalacoustics = [  
-  "praat-parselmouth>=0.4.6", "disvoice>=0.1.10"
+  # soundfile is imported at module level by analyze_vocal_acoustics; without it
+  # the extra installs but the module cannot be imported.
+  "praat-parselmouth>=0.4.6", "soundfile", "disvoice>=0.1.10"
+]
+
+# Everything needed to run the test suite (pip install -e ".[dev]")
+dev = [
+  "pytest>=7.0",
 ]
 
 [tool.setuptools]
@@ -94,5 +115,24 @@ packages = { find = { where = ["src"], include = ["taters*"] } }
 
 [project.scripts]
 # Entry points must target a callable, not __main__
-# Ensure extract_whisper_embeddings.py defines a `main()` (or `cli()`) function.
-taters-embeddings = "taters.extract_whisper_embeddings:main"
+taters-embeddings = "taters.audio.extract_whisper_embeddings:main"
+
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+
+# Where the tests live, and how to import `taters` without installing it first.
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+# -ra            : summarize every non-passing test at the end
+# --strict-markers: a typo'd @pytest.mark.xyz is an error, not a silent no-op
+# -m "not slow"  : skip the heavy tests by default; `pytest -m slow` runs only those,
+#                  and `pytest -m ""` runs absolutely everything.
+addopts = "-ra --strict-markers -m 'not slow'"
+
+markers = [
+  "slow: needs real media, ML models, or minutes of runtime (deselected by default)",
+  "needs_ffmpeg: requires ffmpeg/ffprobe on PATH",
+  "needs_media: requires files in ./test_vids",
+]

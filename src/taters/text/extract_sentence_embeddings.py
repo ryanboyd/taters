@@ -19,6 +19,7 @@ try:
 except Exception as e:
     SentenceTransformer = None  # type: ignore
 
+from ..helpers.nltk_data import ensure_punkt
 from ..helpers.text_gather import (
     csv_to_analysis_ready_csv,
     txt_folder_to_analysis_ready_csv,
@@ -31,9 +32,8 @@ def _ensure_nltk_punkt(verbose: bool = True) -> bool:
     """
     Ensure the NLTK sentence tokenizer is available.
 
-    Checks for the presence of NLTK's ``punkt`` (and, for newer NLTK builds,
-    ``punkt_tab``). If missing, attempts a quiet download. Prints a short
-    status message when ``verbose`` is True.
+    Thin wrapper kept for backwards compatibility; the implementation is shared
+    with the other modules that need sentence splitting.
 
     Parameters
     ----------
@@ -45,40 +45,8 @@ def _ensure_nltk_punkt(verbose: bool = True) -> bool:
     bool
         ``True`` if NLTK's tokenizer is usable; ``False`` if a regex fallback
         should be used instead.
-
-    Notes
-    -----
-    This helper does not load heavy NLP models. It only ensures that sentence
-    segmentation can proceed.
     """
-
-    try:
-        nltk.data.find("tokenizers/punkt")
-        ok = True
-    except LookupError:
-        if verbose:
-            print("Downloading NLTK 'punkt' tokenizer ...")
-        try:
-            nltk.download("punkt", quiet=True)
-            nltk.data.find("tokenizers/punkt")
-            ok = True
-        except LookupError:
-            # Some setups expose data under 'punkt_tab'
-            try:
-                if verbose:
-                    print("Trying NLTK 'punkt_tab' ...")
-                nltk.download("punkt_tab", quiet=True)
-                nltk.data.find("tokenizers/punkt_tab")
-                ok = True
-            except LookupError:
-                ok = False
-
-    if verbose:
-        if ok:
-            print("Sentence tokenizer available: using NLTK sent_tokenize.")
-        else:
-            print("Sentence tokenizer NOT available: using regex fallback.")
-    return ok
+    return ensure_punkt(verbose=verbose)
 
 def _split_sentences(text: str) -> list[str]:
     """

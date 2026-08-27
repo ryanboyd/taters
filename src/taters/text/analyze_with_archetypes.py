@@ -4,6 +4,7 @@ import csv
 
 from .dictionary_analyzers import multi_archetype_analyzer as maa
 from ..helpers.find_files import find_files
+from ..helpers.nltk_data import ensure_punkt
 from ..helpers.text_gather import (
     csv_to_analysis_ready_csv,
     txt_folder_to_analysis_ready_csv,
@@ -154,6 +155,11 @@ def analyze_with_archetypes(
     all ``.csv`` files and deduplicated before scoring.
     """
 
+
+    # archetyper splits text with nltk.sent_tokenize, which needs data NLTK does
+    # not ship. Fetch it up front rather than failing mid-pipeline with a wall
+    # of asterisks after the expensive steps have already run.
+    ensure_punkt(verbose=True)
 
     # 1) Use analysis-ready CSV if given; otherwise gather from csv_path or txt_dir
     if analysis_csv is not None:

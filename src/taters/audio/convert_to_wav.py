@@ -104,7 +104,7 @@ def convert_audio_to_wav(
     result = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL)
     if result.returncode != 0:
         if not overwrite_existing and out_path.exists():
-            raise FileExistsError(f"Target exists (use overwrite=True): {out_path}")
+            raise FileExistsError(f"Target exists (use overwrite_existing=True): {out_path}")
         raise RuntimeError(f"ffmpeg failed: {result.stderr.strip()}")
 
     return out_path

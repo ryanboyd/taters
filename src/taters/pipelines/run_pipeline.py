@@ -231,7 +231,9 @@ def resolve_preset_path(name: str) -> Path:
     FileNotFoundError
         If no preset matches, listing the presets that *are* available.
     """
-    wanted = name[:-5] if name.lower().endswith((".yaml", ".yml")) else name
+    # Drop a .yaml/.yml suffix if the caller included one (".yml" is four
+    # characters, ".yaml" is five — hence Path.stem rather than slicing).
+    wanted = Path(name).stem if Path(name).suffix.lower() in {".yaml", ".yml"} else name
     available: List[str] = []
     for p in _iter_presets():
         meta = _load_preset_meta(p)
@@ -827,7 +829,10 @@ def main():
     --------------
     - Individual ITEM step failures do not crash the pipeline; they mark that
       item as `"error"` in the manifest and continue.
-    - GLOBAL step failures are terminal for the run (the loop breaks).
+    - GLOBAL step failures are terminal for the run (the loop breaks), and the
+      manifest is written before bailing out.
+    - The process exits with status 1 if anything failed — a global error or any
+      individual item — and 0 only when every step succeeded.
 
     Returns
     -------
@@ -927,6 +932,12 @@ def main():
     potato = Taters()
     globals_ctx: Dict[str, Any] = {}
 
+    def _persist_manifest() -> None:
+        """Write the run manifest to disk (called after every step, and on failure)."""
+        out_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        with out_manifest_path.open("w", encoding="utf-8") as f:
+            json.dump(_json_safe(manifest), f, indent=2, ensure_ascii=False)
+
     # ---------------------------
     # Execute steps
     # ---------------------------
@@ -987,6 +998,9 @@ def main():
             if status != "ok":
                 print(f"[pipeline] GLOBAL step failed: {err.get('error')}")
                 manifest["errors"].append(err.get("error", "unknown error"))
+                # Persist before bailing out: a failed run is exactly when the
+                # manifest is worth reading.
+                _persist_manifest()
                 break
             for k, v in (new_globals or {}).items():
                 globals_ctx[k] = v
@@ -996,11 +1010,33 @@ def main():
             raise ValueError(f"Invalid scope: {scope}")
 
         # Persist manifest after each step
-        out_manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        with out_manifest_path.open("w", encoding="utf-8") as f:
-            json.dump(_json_safe(manifest), f, indent=2, ensure_ascii=False)
+        _persist_manifest()
 
     print(f"[pipeline] Manifest written to: {out_manifest_path}")
+
+    # ---------------------------
+    # Summarize and set the exit code
+    # ---------------------------
+    failed_items = [itm for itm in manifest["items"] if itm.get("status") == "error"]
+    ok_items = [itm for itm in manifest["items"] if itm.get("status") == "ok"]
+    global_errors = manifest["errors"]
+
+    if manifest["items"]:
+        print(f"[pipeline] Items: {len(ok_items)} ok, {len(failed_items)} failed")
+    if failed_items:
+        for itm in failed_items[:10]:
+            first = itm["errors"][0] if itm["errors"] else "unknown error"
+            print(f"[pipeline]   FAILED {itm['input']}: {first}")
+        if len(failed_items) > 10:
+            print(f"[pipeline]   ...and {len(failed_items) - 10} more (see the manifest)")
+    for err in global_errors:
+        print(f"[pipeline] GLOBAL ERROR: {err}")
+
+    if global_errors or failed_items:
+        # Exit non-zero so scripts, schedulers and CI can tell a partial run from
+        # a clean one. The manifest has the detail.
+        sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

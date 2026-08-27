@@ -587,8 +587,12 @@ def _filter_columns(
     if exclude_regex:
         rx = re.compile(exclude_regex)
         keep = [c for c in keep if not rx.search(c)]
-    # Always preserve group keys (and drop duplicates while preserving order)
-    keep = list(dict.fromkeys(list(must_keep) + keep))
+    # Always preserve group keys (and drop duplicates while preserving order).
+    # Only keys that actually exist are re-added: selecting a missing column here
+    # would raise a bare pandas KeyError and pre-empt the caller's much clearer
+    # "Missing group-by columns in data: [...]" error.
+    present = set(df.columns)
+    keep = list(dict.fromkeys([k for k in must_keep if k in present] + keep))
     return df[keep]
 
 
@@ -614,7 +618,12 @@ def _numeric_subframe(df: pd.DataFrame) -> pd.DataFrame:
     """
 
     num_df = df.apply(pd.to_numeric, errors="coerce")
-    return num_df.select_dtypes(include=[np.number])
+    num_df = num_df.select_dtypes(include=[np.number])
+    # A column of pure text coerces to all-NaN, which is still a float column —
+    # keeping it would emit meaningless "<textcol>__mean" columns full of NaN.
+    # Columns where at least one value parsed as a number are kept as-is.
+    usable = [c for c in num_df.columns if num_df[c].notna().any()]
+    return num_df[usable]
 
 
 def aggregate_features(

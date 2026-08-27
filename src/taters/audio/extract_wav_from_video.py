@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import subprocess
+import warnings
 from pathlib import Path
 from typing import List, Optional
 
@@ -74,7 +75,9 @@ def split_audio_streams_to_wav(
     output_dir: str | os.PathLike | None = None,     # <-- now optional
     sample_rate: int = 48000,
     bit_depth: int = 16,
-    overwrite: bool = True,
+    overwrite_existing: bool = False,
+    *,
+    overwrite: bool | None = None,   # deprecated alias for overwrite_existing
 ) -> List[str]:
     """
     Extract each audio stream in a container to its own WAV file.
@@ -90,19 +93,28 @@ def split_audio_streams_to_wav(
         Target sample rate for the output WAVs (Hz).
     bit_depth : {16,24,32}, default 16
         Output PCM bit depth (little-endian).
-    overwrite : bool, default True
-        If True, overwrite existing files. If False and a target exists,
-        raises :class:`FileExistsError`.
+    overwrite_existing : bool, default False
+        If False (default) and a target WAV already exists, that stream is left
+        alone and the existing path is returned, matching the rest of Taters.
+        Set True to re-extract and replace.
+    overwrite : bool, optional
+        Deprecated alias for `overwrite_existing`. Passing it emits a
+        :class:`DeprecationWarning`. Note that this function used to default to
+        overwriting; it now preserves existing files like every other writer.
 
     Returns
     -------
     list[str]
-        Absolute paths to the created WAVs.
+        Absolute paths to the WAVs for every audio stream, whether freshly
+        written or already present.
 
     Behavior
     --------
     - Output file names are constructed from the input base name and stream
       metadata: ``<stem>_a<index>[_<lang>][_<title>].wav`` with safe slugs.
+    - Existing outputs are decided in Python rather than by handing ffmpeg
+      ``-n``: some ffmpeg builds refuse to overwrite but still exit 0, which
+      would report a stale file as freshly written.
     - Uses ``-map 0:a:<N>`` to select the N-th audio stream in the container.
     - Runs FFmpeg with ``-nostdin`` and quiet loglevel to avoid TTY lockups.
 
@@ -111,6 +123,16 @@ def split_audio_streams_to_wav(
     >>> split_audio_streams_to_wav("session.mp4")
     ['.../audio/session_a0_eng.wav', '.../audio/session_a1_eng.wav']
     """
+
+    if overwrite is not None:
+        warnings.warn(
+            "split_audio_streams_to_wav(overwrite=...) is deprecated; use "
+            "overwrite_existing=... instead. Note the default also changed: "
+            "existing WAVs are now kept rather than overwritten.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        overwrite_existing = bool(overwrite)
 
     _check_binaries()
 
@@ -154,12 +176,20 @@ def split_audio_streams_to_wav(
         out_name = _build_wav_name(base, idx, lang, title)
         out_path = out_dir / out_name
 
+        # Decide about existing files ourselves rather than relying on ffmpeg's
+        # "-n": some ffmpeg builds refuse to overwrite but still exit 0, so a
+        # stale file would be reported as freshly written.
+        if out_path.exists() and not overwrite_existing:
+            print(f"WAV already exists; returning existing file: {out_path}")
+            created_files.append(str(out_path))
+            continue
+
         ffmpeg_cmd = [
             "ffmpeg",
             "-nostdin",
             "-hide_banner",
             "-loglevel", "error",
-            "-y" if overwrite else "-n",
+            "-y",
             "-i", str(in_path),
             "-map", f"0:a:{streams.index(s)}",  # Nth audio stream
             "-acodec", pcm_codec,
@@ -169,9 +199,14 @@ def split_audio_streams_to_wav(
 
         result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL)
         if result.returncode != 0:
-            if not overwrite and out_path.exists():
-                raise FileExistsError(f"Target exists (use overwrite=True): {out_path}")
             raise RuntimeError(f"ffmpeg failed for stream {idx}: {result.stderr.strip()}")
+        if not out_path.is_file():
+            # ffmpeg can report success without producing a file; never hand back
+            # a path that is not there.
+            raise RuntimeError(
+                f"ffmpeg reported success but no file was written for stream {idx}: "
+                f"{out_path}\n{result.stderr.strip()}"
+            )
 
         created_files.append(str(out_path))
 
@@ -188,7 +223,9 @@ if __name__ == "__main__":
     parser.add_argument("output_dir", nargs="?", default=None, help="Directory for WAVs (default: ./audio/<stem>/)")
     parser.add_argument("--sr", type=int, default=48000, help="Output sample rate (default: 48000)")
     parser.add_argument("--bit-depth", type=int, default=16, choices=[16, 24, 32], help="PCM bit depth (default: 16)")
-    parser.add_argument("--overwrite", action="store_true", help="Overwrite existing files")
+    from taters.helpers.cliargs import add_bool_argument
+    add_bool_argument(parser, "--overwrite_existing", "--overwrite",
+                      default=False, help="Re-extract and replace existing WAVs")
     args = parser.parse_args()
 
     paths = split_audio_streams_to_wav(
@@ -196,6 +233,6 @@ if __name__ == "__main__":
         args.output_dir,     # may be None → uses default path
         sample_rate=args.sr,
         bit_depth=args.bit_depth,
-        overwrite=args.overwrite,
+        overwrite_existing=args.overwrite_existing,
     )
     print("\n".join(paths))

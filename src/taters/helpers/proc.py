@@ -10,7 +10,7 @@ exception message if the child fails.
 from __future__ import annotations
 
 import subprocess
-import sys
+import threading
 from collections import deque
 from pathlib import Path
 from typing import Mapping, Optional, Sequence, Tuple
@@ -73,24 +73,37 @@ def run_and_stream(
         errors="replace",
     )
 
-    try:
+    def _pump() -> None:
+        """Drain the child's output on a background thread."""
         assert proc.stdout is not None
-        for line in proc.stdout:
-            line = line.rstrip("\n")
+        for raw in proc.stdout:
+            line = raw.rstrip("\n")
             tail.append(line)
             if stream:
                 print(f"{prefix}{line}", flush=True)
+
+    # The reader has to run off the main thread: iterating the pipe blocks until
+    # the child closes it, so waiting for output and enforcing `timeout` cannot
+    # happen on the same thread. (select() would be POSIX-only; this works on
+    # Windows too.)
+    reader = threading.Thread(target=_pump, name="taters-proc-reader", daemon=True)
+    reader.start()
+
+    try:
         proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-        raise
     except BaseException:
+        # Covers TimeoutExpired and KeyboardInterrupt alike: never leave an
+        # orphaned ffmpeg/whisper process behind.
         proc.kill()
         proc.wait()
+        reader.join(timeout=5)
         raise
     finally:
+        reader.join(timeout=5)
         if proc.stdout is not None:
-            proc.stdout.close()
+            try:
+                proc.stdout.close()
+            except Exception:
+                pass
 
     return proc.returncode, "\n".join(tail)
