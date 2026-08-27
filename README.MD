@@ -5,10 +5,10 @@
 
 # 🥔 **TATERS**: Takes All Things, Extracts Relevant Stuff
 
-Taters is a Python toolkit (and CLI) for getting from raw media to analysis-ready artifacts — fast, repeatable, and with predictable outputs. Point it at video, audio, or text and it helps you build end-to-end workflows: extract WAV from video, diarize and transcribe, compute embeddings, run dictionary/archetype analyses, then gather everything into tidy datasets you can model or visualize.
+Taters is a Python toolkit and CLI for getting from raw media to analysis-ready data. Point it at video, audio, or text and it will extract WAV from video, diarize and transcribe, compute embeddings, run dictionary and archetype analyses, and gather the results into tidy datasets you can model or visualize.
 
 * 🥔 Documentation: **[https://www.taters.wiki](https://www.taters.wiki)**
-* 🥔 Status: early but usable; APIs will probably evolve. Pin versions if you need stability.
+* 🥔 Status: early but usable. APIs will probably evolve; pin a version if you need stability.
 
 ---
 
@@ -20,7 +20,7 @@ Taters is a Python toolkit (and CLI) for getting from raw media to analysis-read
 
 ---
 
-## A tiny taste of Taters
+## A short example
 
 ### Python
 
@@ -49,20 +49,21 @@ python -m taters.audio.extract_whisper_embeddings \
   --source_wav audio/session.wav --strategy nonsilent --aggregate mean
 ```
 
-For more examples (including per-speaker splits, sentence embeddings, and end-to-end pipelines), see the **Guides** in the docs.
+For more examples, including per-speaker splits, sentence embeddings, and end-to-end pipelines, see the Guides in the documentation.
 
 ---
 
 ## Installation
 
-Use a fresh virtual environment. Then follow the step-by-step install guide (CPU or CUDA, FFmpeg, optional diarization extras):
-👉 **[https://www.taters.wiki/install-guide](https://www.taters.wiki/install-guide)**
+Install into a fresh virtual environment. The install guide covers CPU and CUDA setups, FFmpeg, and the optional diarization extras:
+
+**[https://www.taters.wiki/install-guide](https://www.taters.wiki/install-guide)**
 
 ---
 
 ## Pipelines
 
-When you are ready to batch a whole dataset, use the YAML runner to chain steps and control concurrency:
+To batch a whole dataset, use the YAML runner to chain steps and control concurrency:
 
 ```bash
 python -m taters.pipelines.run_pipeline \
@@ -72,13 +73,14 @@ python -m taters.pipelines.run_pipeline \
 ```
 
 Details, presets, and how to write your own:
-👉 **[https://www.taters.wiki/guides/pipelines/](https://www.taters.wiki/guides/pipelines/)**
+
+**[https://www.taters.wiki/guides/pipelines/](https://www.taters.wiki/guides/pipelines/)**
 
 ---
 
 ## Contributing
 
-Bug reports and pull requests are welcome. If you are using Taters on real projects, feedback on rough edges and missing presets is especially valuable.
+Bug reports and pull requests are welcome. If you are using Taters on real projects, feedback on rough edges and missing presets is especially useful.
 
 ---
 
