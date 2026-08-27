@@ -113,6 +113,7 @@ def convert_audio_to_wav(
 # --- CLI --------------------------------------------------------------------
 def _build_arg_parser():
     import argparse
+    from ..helpers.cliargs import add_bool_argument
     p = argparse.ArgumentParser(description="Convert any audio (or A/V) file to PCM WAV via ffmpeg.")
     p.add_argument("input", help="Input file (audio or video container)")
     p.add_argument("--out", dest="output_path", default=None,
@@ -122,7 +123,7 @@ def _build_arg_parser():
     p.add_argument("--sr", dest="sample_rate", type=int, default=16000, help="Sample rate (Hz)")
     p.add_argument("--bit-depth", type=int, choices=[16, 24, 32], default=16, help="PCM bit depth")
     p.add_argument("--channels", type=int, choices=[1, 2], default=1, help="1=mono, 2=stereo")
-    p.add_argument("--overwrite_existing", type=bool, default=False, help="Overwrite existing output")
+    add_bool_argument(p, "--overwrite_existing", default=False, help="Overwrite existing output")
     return p
 
 def main():

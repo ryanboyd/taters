@@ -182,7 +182,7 @@ def make_plan(
     exclude_cols: Sequence[str] = (),
     include_regex: Optional[str] = None,
     exclude_regex: Optional[str] = None,
-    dropna: bool = True,
+    dropna: bool = False,
 ) -> AggregationPlan:
     """
     Create an :class:`AggregationPlan` from simple arguments.
@@ -201,8 +201,9 @@ def make_plan(
         Regex to include feature columns by name.
     exclude_regex : str or None, default=None
         Regex to exclude feature columns by name.
-    dropna : bool, default=True
-        Drop rows with NA in any group key.
+    dropna : bool, default=False
+        Drop rows with NA in any group key. Off by default so rows with a
+        missing key are still reported rather than silently discarded.
 
     Returns
     -------
@@ -287,7 +288,7 @@ def feature_gather(
     exclude_cols: Sequence[str] = (),
     include_regex: Optional[str] = None,
     exclude_regex: Optional[str] = None,
-    dropna: bool = True,
+    dropna: bool = False,
     # output
     out_csv: Optional[PathLike] = None,
     overwrite_existing: bool = False,
@@ -331,8 +332,9 @@ def feature_gather(
         Quick-plan regex to include feature columns by name.
     exclude_regex : str or None, default=None
         Quick-plan regex to exclude feature columns by name.
-    dropna : bool, default=True
-        Quick-plan NA handling for group keys.
+    dropna : bool, default=False
+        Quick-plan NA handling for group keys. When True, rows whose group key
+        is missing are dropped before aggregating.
     out_csv : PathLike or None, default=None
         Output CSV path. If None, defaults to
         ``<root_dir_parent>/<root_dir_name>.csv``.
@@ -526,8 +528,10 @@ class AggregationPlan:
     exclude_regex : str or None, default=None
         Optional regex; if provided, columns matching this pattern are removed
         (after applying `include_regex`, if any).
-    dropna : bool, default=True
+    dropna : bool, default=False
         Whether to drop rows with NA in any of the group-by keys before grouping.
+        The default keeps them, so rows with a missing key land in their own
+        clearly-labeled group instead of vanishing from the output.
 
     Notes
     -----
@@ -542,7 +546,7 @@ class AggregationPlan:
     exclude_cols: Sequence[str] = ()
     include_regex: Optional[str] = None
     exclude_regex: Optional[str] = None
-    dropna: bool = True
+    dropna: bool = False
 
 
 def _filter_columns(
@@ -768,7 +772,7 @@ def aggregate_features(
                      numeric_df.reset_index(drop=True)], axis=1)
 
     agg_ops = {c: list(plan.stats) for c in numeric_df.columns}
-    grouped = gdf.groupby(group_keys, dropna=False).agg(agg_ops)
+    grouped = gdf.groupby(group_keys, dropna=plan.dropna).agg(agg_ops)
 
     # Flatten MultiIndex columns and order 'source' first
     grouped.columns = [f"{c}__{stat}" for (c, stat) in grouped.columns]
@@ -819,7 +823,8 @@ def _build_parser():
     g.add_argument("--encoding", default="utf-8-sig")
     g.add_argument("--add-source-path", action="store_true")
     g.add_argument("--out-csv", default=None)
-    g.add_argument("--overwrite-existing", action="store_true", default=False)
+    g.add_argument("--overwrite-existing", "--overwrite_existing", dest="overwrite_existing",
+                   action="store_true", default=False)
 
     # existing: aggregate
     a = sub.add_parser("aggregate", help="Aggregate numeric columns by keys.")
@@ -836,7 +841,8 @@ def _build_parser():
     a.add_argument("--include-regex", default=None)
     a.add_argument("--exclude-regex", default=None)
     a.add_argument("--out-csv", default=None)
-    a.add_argument("--overwrite-existing", action="store_true", default=False)
+    a.add_argument("--overwrite-existing", "--overwrite_existing", dest="overwrite_existing",
+                   action="store_true", default=False)
 
     # new: run (single entry; toggle aggregation with a flag)
     r = sub.add_parser("run", help="Single entry: concat or aggregate depending on --aggregate.")
@@ -854,7 +860,8 @@ def _build_parser():
     r.add_argument("--include-regex", default=None)
     r.add_argument("--exclude-regex", default=None)
     r.add_argument("--out-csv", default=None)
-    r.add_argument("--overwrite-existing", action="store_true", default=False)
+    r.add_argument("--overwrite-existing", "--overwrite_existing", dest="overwrite_existing",
+                   action="store_true", default=False)
 
     return p
 

@@ -81,6 +81,8 @@ def analyze_with_dictionaries(
         ``./features/dictionary/<analysis_ready_filename>``.
     overwrite_existing : bool, default=False
         If ``False`` and the output file already exists, skip processing and return the path.
+        This also controls the intermediate analysis-ready CSV: when ``True``, it is rebuilt
+        from the current source instead of reusing a stale copy from an earlier run.
     dict_paths : Sequence[str or pathlib.Path]
         One or more dictionary inputs (files or directories). Supported extensions:
         ``.dic``, ``.dicx``, ``.csv``. Directories are expanded recursively.
@@ -180,6 +182,7 @@ def analyze_with_dictionaries(
                     num_buckets=num_buckets,
                     max_open_bucket_files=max_open_bucket_files,
                     tmp_root=tmp_root,
+                    overwrite_existing=overwrite_existing,
                 )
             )
         else:
@@ -191,6 +194,7 @@ def analyze_with_dictionaries(
                     encoding=encoding,
                     id_from=id_from,
                     include_source_path=include_source_path,
+                    overwrite_existing=overwrite_existing,
                 )
             )
 
@@ -349,6 +353,7 @@ def _build_arg_parser():
     """
 
     import argparse
+    from ..helpers.cliargs import add_bool_argument
     p = argparse.ArgumentParser(
         description="ContentCoder: multi-dictionary coding into one CSV (globals once + per-dict blocks)."
     )
@@ -363,8 +368,8 @@ def _build_arg_parser():
     # Output
     p.add_argument("--out", dest="out_features_csv", default=None,
                    help="Output CSV (default: ./features/dictionary/<gathered_name>)")
-    p.add_argument("--overwrite_existing", type=bool, default=False,
-                   help="Do you want to overwrite the output file if it already exists?")
+    add_bool_argument(p, "--overwrite_existing", default=False,
+                      help="Do you want to overwrite the output file if it already exists?")
 
     # Dictionaries (repeatable)
     p.add_argument("--dict", dest="dict_paths", action="append", required=True,

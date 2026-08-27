@@ -364,7 +364,9 @@ def analyze_lexical_richness(
         `./features/lexical-richness/<analysis_ready_filename>`.
     overwrite_existing : bool, default False
         If `False` and `out_features_csv` exists, the function short-circuits and
-        returns the existing path without recomputation.
+        returns the existing path without recomputation. This also controls the
+        intermediate analysis-ready CSV: when `True`, it is rebuilt from the current
+        source instead of reusing a stale copy from an earlier run.
     encoding : str, default "utf-8-sig"
         Encoding for reading/writing CSVs.
     text_cols : sequence of str, default ("text",)
@@ -536,6 +538,7 @@ def analyze_lexical_richness(
                     num_buckets=num_buckets,
                     max_open_bucket_files=max_open_bucket_files,
                     tmp_root=tmp_root,
+                    overwrite_existing=overwrite_existing,
                 )
             )
         else:
@@ -547,6 +550,7 @@ def analyze_lexical_richness(
                     encoding=encoding,
                     id_from=id_from,
                     include_source_path=include_source_path,
+                    overwrite_existing=overwrite_existing,
                 )
             )
 

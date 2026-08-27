@@ -545,6 +545,7 @@ def txt_folder_to_analysis_ready_csv(
 
 if __name__ == "__main__":
     import argparse
+    from taters.helpers.cliargs import add_bool_argument
     import sys
     from pathlib import Path
 
@@ -570,8 +571,8 @@ if __name__ == "__main__":
     # Common parsing options
     parser.add_argument("--encoding", default="utf-8-sig", help="Input text/CSV encoding. Default: utf-8-sig")
 
-    parser.add_argument("--overwrite_existing", type=bool, default=False,
-                        help="Do you want to overwrite the output file if it already exists?")
+    add_bool_argument(parser, "--overwrite_existing", default=False,
+                      help="Do you want to overwrite the output file if it already exists?")
 
     # CSV mode options
     parser.add_argument("--text-col", action="append", dest="text_cols",

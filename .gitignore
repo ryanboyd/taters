@@ -190,6 +190,7 @@ install-instructions.txt
 
 # custom test script
 runme.py
+test_vids/
 
 # other stuff to omit
 taters.png

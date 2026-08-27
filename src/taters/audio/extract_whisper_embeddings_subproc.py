@@ -593,6 +593,7 @@ def export_audio_embeddings_csv(
 # ----------------------------
 if __name__ == "__main__":
     import argparse
+    from taters.helpers.cliargs import add_bool_argument
     p = argparse.ArgumentParser(description="Export Whisper encoder embeddings.")
     # Modes: (A) per-transcript segments, (B) general audio
     p.add_argument("--transcript_csv", default=None, help="If provided, export per transcript segment.")
@@ -614,7 +615,7 @@ if __name__ == "__main__":
     p.add_argument("--min_seg_s", type=float, default=1.0)
     p.add_argument("--top_db", type=float, default=30.0)
     p.add_argument("--aggregate", default="none", choices=("none", "mean"))
-    p.add_argument("--apply_l2_normalization", type=bool, default=False)
+    add_bool_argument(p, "--apply_l2_normalization", default=False)
 
     args = p.parse_args()
 

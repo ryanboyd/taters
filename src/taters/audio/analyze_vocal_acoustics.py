@@ -1206,19 +1206,11 @@ def analyze_acoustics(
 # CLI
 # -------------------------
 
-def _parse_bool(x: str) -> bool:
-    return str(x).lower() in {"1","true","yes","y","on"}
-
 def main():
     import argparse
+    from ..helpers.cliargs import add_bool_argument
 
-    # For Python 3.9 compatibility: fallback if BooleanOptionalAction is missing
-    try:
-        BoolOpt = argparse.BooleanOptionalAction  # 3.9+ has this in many envs; fully supported in 3.10+
-    except AttributeError:
-        class BoolOpt(argparse.Action):
-            def __call__(self, parser, namespace, values, option_string=None):
-                setattr(namespace, self.dest, option_string.startswith("--framewise"))
+    BoolOpt = argparse.BooleanOptionalAction
 
     ap = argparse.ArgumentParser(
         description="Extract PRAAT/Parselmouth acoustic features (simple / tremor / advanced)"
@@ -1237,21 +1229,23 @@ def main():
                     help="Optional explicit path for framewise CSV (defaults to <stem>_framewise.csv)")
     ap.add_argument("--out-summary-csv", default=None,
                     help="Optional explicit path for summary CSV (defaults to <stem>_summary[...].csv)")
-    ap.add_argument("--overwrite_existing", action="store_true", default=False)
+    add_bool_argument(ap, "--overwrite_existing", default=False,
+                      help="Recompute and overwrite outputs that already exist")
 
     ap.add_argument("--mode", choices=["simple","tremor","advanced"], default="simple")
-    ap.add_argument("--voiced-segments", default="true",
-                    help="Summaries on voiced segments ≥100ms (true/false)")
+    add_bool_argument(ap, "--voiced-segments", dest="voiced_segments", default=True,
+                      help="Summaries on voiced segments ≥100ms (true/false)")
     ap.add_argument("--f0_min", type=float, default=75.0)
     ap.add_argument("--f0_max", type=float, default=500.0)
     ap.add_argument("--n_mfcc", type=int, default=14)
     ap.add_argument("--tremor_script", default=None,
                     help="Path to Praat tremor script (for 'tremor'/'advanced')")
-    ap.add_argument("--preprocess", default="true",
-                help="OpenWillis-style preprocessing (resample/DC/normalize). true/false (default: true)")
+    add_bool_argument(ap, "--preprocess", default=True,
+                      help="OpenWillis-style preprocessing (resample/DC/normalize). true/false (default: true)")
     ap.add_argument("--target_sr", type=int, default=44100)
     ap.add_argument("--target_dbfs", type=float, default=-20.0)
-    ap.add_argument("--remove_dc", default="true")
+    add_bool_argument(ap, "--remove_dc", default=True,
+                      help="Remove DC offset during preprocessing (default: true)")
     ap.add_argument("--pause_top_db", type=int, default=30,
                 help="VAD non-silence threshold (dB below peak). Default: 30")
     ap.add_argument("--pause_frame_length", type=int, default=2048,
@@ -1271,13 +1265,9 @@ def main():
 
     args = ap.parse_args()
 
-    def _parse_bool(x: str) -> bool:
-        return str(x).lower() in {"1","true","yes","y","on"}
-
-    summarize_ms = 100 if _parse_bool(args.voiced_segments) else None
-
-    preproc = str(args.preprocess).lower() in {"1","true","yes","y","on"}
-    remdc   = str(args.remove_dc).lower() in {"1","true","yes","y","on"}
+    summarize_ms = 100 if args.voiced_segments else None
+    preproc = args.preprocess
+    remdc = args.remove_dc
 
     res = analyze_acoustics(
         wav_path=args.wav_path,

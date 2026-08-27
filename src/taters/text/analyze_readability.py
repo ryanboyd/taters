@@ -121,6 +121,8 @@ def analyze_readability(
         ``./features/readability/<analysis_ready_filename>``.
     overwrite_existing : bool, default=False
         If ``False`` and the output file already exists, skip processing and return the path.
+        This also controls the intermediate analysis-ready CSV: when ``True``, it is rebuilt
+        from the current source instead of reusing a stale copy from an earlier run.
     encoding : str, default="utf-8-sig"
         Text encoding used for reading/writing CSV files.
     text_cols : Sequence[str], default=("text",)
@@ -209,6 +211,7 @@ def analyze_readability(
                     num_buckets=num_buckets,
                     max_open_bucket_files=max_open_bucket_files,
                     tmp_root=tmp_root,
+                    overwrite_existing=overwrite_existing,
                 )
             )
         else:
@@ -220,6 +223,7 @@ def analyze_readability(
                     encoding=encoding,
                     id_from=id_from,
                     include_source_path=include_source_path,
+                    overwrite_existing=overwrite_existing,
                 )
             )
 

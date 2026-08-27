@@ -33,11 +33,12 @@ wavs = t.audio.extract_wavs_from_video(input_path="input.mp4")
 
 # Diarize & transcribe (CSV/SRT/TXT)
 diar = t.audio.diarize_with_thirdparty(audio_path=wavs[0], device="auto")
+transcript = diar.raw_files["csv"]   # also: diar.raw_files["srt"] / ["txt"]
 
 # Features (defaults write under ./features/<kind>/)
-t.audio.extract_whisper_embeddings(source_wav=wavs[0], transcript_csv=diar["csv"])
-t.text.analyze_with_dictionaries(csv_path=diar["csv"], dict_paths=["dictionaries/liwc"])
-t.text.analyze_with_archetypes(csv_path=diar["csv"], archetype_csvs=["archetypes/Resilience.csv"])
+t.audio.extract_whisper_embeddings(source_wav=wavs[0], transcript_csv=transcript)
+t.text.analyze_with_dictionaries(csv_path=transcript, dict_paths=["dictionaries/liwc"])
+t.text.analyze_with_archetypes(csv_path=transcript, archetype_csvs=["archetypes/Resilience.csv"])
 ```
 
 ### CLI

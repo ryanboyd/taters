@@ -226,6 +226,8 @@ def analyze_with_sentence_embeddings(
         analysis-ready filename under ``./features/sentence-embeddings/``.
     overwrite_existing : bool, default=False
         If ``False`` and the output file already exists, skip processing and return it.
+        This also controls the intermediate analysis-ready CSV: when ``True``, it is rebuilt
+        from the current source instead of reusing a stale copy from an earlier run.
     pass_through_cols : Sequence[str], optional
         Column names from the analysis-ready CSV to copy into the output
         alongside ``text_id`` (e.g., ``["source","speaker"]``). **Any names
@@ -336,6 +338,7 @@ def analyze_with_sentence_embeddings(
                     num_buckets=num_buckets,
                     max_open_bucket_files=max_open_bucket_files,
                     tmp_root=tmp_root,
+                    overwrite_existing=overwrite_existing,
                 )
             )
         else:
@@ -347,6 +350,7 @@ def analyze_with_sentence_embeddings(
                     encoding=encoding,
                     id_from=id_from,
                     include_source_path=include_source_path,
+                    overwrite_existing=overwrite_existing,
                 )
             )
 
@@ -390,12 +394,6 @@ def analyze_with_sentence_embeddings(
 
 
     # 4) stream rows → split → encode → average → (optional) L2 normalize → write
-    def _norm(v: np.ndarray) -> np.ndarray:
-        if not normalize_l2:
-            return v
-        n = float(np.linalg.norm(v))
-        return v if n < 1e-12 else (v / n)
-
     print("Extracting embeddings...")
     with out_features_csv.open("w", newline="", encoding=encoding) as f:
         writer = csv.writer(f)
@@ -405,7 +403,6 @@ def analyze_with_sentence_embeddings(
         with analysis_ready.open("r", newline="", encoding=encoding) as rf:
             reader = csv.DictReader(rf, delimiter=delimiter)
             # Light validation: warn if any requested pass-through column is missing
-                        # Light validation: warn if any requested pass-through column is missing
             missing = [c for c in pt_cols if c not in (reader.fieldnames or [])]
             if missing:
                 print(f"[sentence-embeddings] WARNING: pass-through columns missing in source: {missing}")
@@ -462,6 +459,7 @@ def _build_arg_parser():
     """
 
     import argparse
+    from ..helpers.cliargs import add_bool_argument
     p = argparse.ArgumentParser(
         description="Average sentence embeddings per row (Sentence-Transformers)."
     )
@@ -474,8 +472,8 @@ def _build_arg_parser():
 
     p.add_argument("--out", dest="out_features_csv", default=None,
                    help="Output CSV (default: ./features/sentence-embeddings/<gathered_name>)")
-    p.add_argument("--overwrite_existing", type=bool, default=False,
-                    help="Do you want to overwrite the output file if it already exists?")
+    add_bool_argument(p, "--overwrite_existing", default=False,
+                      help="Do you want to overwrite the output file if it already exists?")
 
     # I/O
     p.add_argument("--encoding", default="utf-8-sig")

@@ -235,7 +235,7 @@ def _build_arg_parser():
 
     g = p.add_mutually_exclusive_group()
     g.add_argument("--file_type", choices=GROUPS.keys(), default="video",
-                   help="Built-in media kind (default: audio)")
+                   help="Built-in media kind (default: video)")
     g.add_argument("--ext", dest="extensions", action="append",
                    help="Explicit extension to include (repeatable), e.g., --ext .wav --ext .flac")
 

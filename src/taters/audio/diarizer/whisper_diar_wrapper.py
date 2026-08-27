@@ -1,13 +1,14 @@
 from __future__ import annotations
 import os
 import shutil
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional
 from importlib.resources import files, as_file
 from contextlib import ExitStack
+
+from ...helpers.proc import run_and_stream
 
 def _resolve_vendored_repo_dir() -> Path:
     # This returns a Traversable pointing at the directory inside your wheel.
@@ -51,6 +52,7 @@ def _run_repo_script(
     use_custom: bool,
     csv_out: Optional[Path],
     num_speakers: Optional[int],
+    verbose: bool = True,
 ) -> None:
 
     script = (
@@ -95,15 +97,20 @@ def _run_repo_script(
         except Exception:
             pass
 
-    result = subprocess.run(
-        cmd, cwd=work_dir, timeout=timeout, env=env,
-        stdin=subprocess.DEVNULL, capture_output=True, text=True,
+    # Stream the child's output live (prefixed so concurrent items stay readable)
+    # while keeping the tail around for the error message if it fails.
+    returncode, tail = run_and_stream(
+        cmd,
+        cwd=work_dir,
+        env=env,
+        timeout=timeout,
+        prefix=f"[diarize:{audio_path.stem}] ",
+        stream=verbose,
     )
-    if result.returncode != 0:
+    if returncode != 0:
         raise RuntimeError(
-            f"Diarization subprocess failed (exit {result.returncode}).\n"
-            f"STDOUT:\n{(result.stdout or '').strip()}\n\n"
-            f"STDERR:\n{(result.stderr or '').strip()}"
+            f"Diarization subprocess failed (exit {returncode}).\n"
+            f"Last output:\n{tail.strip()}"
         )
 
 def _guess_outputs_from_stem(work_dir: Path, stem: str) -> Dict[str, Path]:
@@ -142,6 +149,7 @@ def run_whisper_diarization_repo(
     use_custom: bool = True,
     keep_temp: bool = False,
     num_speakers: Optional[int] = None,
+    verbose: bool = True,
 ) -> DiarizationOutputFiles:
     """
     Run the vendored Whisper diarization scripts and normalize their outputs.
@@ -178,6 +186,10 @@ def run_whisper_diarization_repo(
         If False (default), temporary folders created by demucs/whisper are removed.
     num_speakers : int | None
         Force a fixed number of speakers, if the downstream diarizer supports it.
+    verbose : bool, default True
+        Echo the diarization subprocess's output as it runs, prefixed with
+        ``[diarize:<stem>]``. Set False for quiet runs; failures still report
+        the tail of the child's output either way.
 
     Returns
     -------
@@ -257,6 +269,7 @@ def run_whisper_diarization_repo(
             use_custom=use_custom,
             csv_out=csv_path,
             num_speakers=num_speakers,
+            verbose=verbose,
         )
 
     # Tidy temp dirs
@@ -278,6 +291,7 @@ def run_whisper_diarization_repo(
 
 def _build_arg_parser():
     import argparse
+    from ...helpers.cliargs import add_bool_argument
     p = argparse.ArgumentParser(
         description="Taters wrapper for MahmoudAshraf97/whisper-diarization"
     )
@@ -286,8 +300,8 @@ def _build_arg_parser():
     p.add_argument("--out_dir", default=None, help="Directory to write outputs (work_dir/<stem>/...) "
                                                    "Default: ./transcripts under current working dir")
 
-    p.add_argument("--overwrite_existing", type=bool, default=False,
-                    help="Do you want to overwrite the output file if it already exists?")
+    add_bool_argument(p, "--overwrite_existing", default=False,
+                      help="Do you want to overwrite the output file if it already exists?")
 
     # optional repo dir (omit to use vendored copy)
     p.add_argument("--repo_dir", default=None, help="Path to whisper-diarization repo; omit to use vendored")
@@ -311,6 +325,8 @@ def _build_arg_parser():
 
     p.add_argument("--keep_temp", action="store_true", help="Keep temp_outputs* folders")
     p.add_argument("--num_speakers", type=int, default=None, help="Optional speaker count hint")
+    p.add_argument("--quiet", dest="verbose", action="store_false", default=True,
+                   help="Do not echo the diarization subprocess output while it runs")
 
     return p
 
@@ -335,6 +351,7 @@ def main():
         use_custom=args.use_custom,
         keep_temp=args.keep_temp,
         num_speakers=args.num_speakers,
+        verbose=args.verbose,
     )
 
     print(f"Work dir: {outs.work_dir}")

@@ -18,9 +18,11 @@ Two modes are supported:
 """
 
 from __future__ import annotations
-import os, sys, shlex, subprocess
+import os, sys, shlex
 from pathlib import Path
 from typing import Optional, Literal, Union
+
+from ..helpers.proc import run_and_stream
 
 def extract_whisper_embeddings(
     *,
@@ -158,7 +160,7 @@ def extract_whisper_embeddings(
 
     if not run_in_subprocess:
         # ---- In-process path (only when you’re sure no Torch/CUDA conflicts) ----
-        from ..audio.extract_whisper_embeddings import (  # type: ignore
+        from .extract_whisper_embeddings_subproc import (  # type: ignore
             export_segment_embeddings_csv,
             export_audio_embeddings_csv,
             EmbedConfig,
@@ -237,17 +239,19 @@ def extract_whisper_embeddings(
         print("Launching embedding subprocess:")
         print(" ", shlex.join(cmd))
 
-    try:
-        res = subprocess.run(cmd, check=True, env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL)
-        if verbose and res.stdout:
-            print(res.stdout.strip())
-    except subprocess.CalledProcessError as e:
+    # Stream as it runs so long extractions are not silent; keep the tail for errors.
+    returncode, tail = run_and_stream(
+        cmd,
+        env=env,
+        prefix=f"[whisper-embed:{source_wav.stem}] ",
+        stream=verbose,
+    )
+    if returncode != 0:
         raise RuntimeError(
-            f"Embedding subprocess failed with code {e.returncode}\n"
+            f"Embedding subprocess failed with code {returncode}\n"
             f"CMD: {shlex.join(cmd)}\n"
-            f"STDOUT:\n{(e.stdout or '').strip()}\n\n"
-            f"STDERR:\n{(e.stderr or '').strip()}"
-        ) from e
+            f"Last output:\n{tail.strip()}"
+        )
 
     if not output_csv.exists():
         raise FileNotFoundError(f"Expected embeddings CSV not found: {output_csv}")
@@ -261,6 +265,7 @@ def extract_whisper_embeddings(
 # --- CLI support: run this module directly -----------------------------------
 def _build_arg_parser():
     import argparse
+    from ..helpers.cliargs import add_bool_argument
     p = argparse.ArgumentParser(
         description="Taters: export Whisper encoder embeddings (env-safe wrapper)."
     )
@@ -283,8 +288,8 @@ def _build_arg_parser():
     p.add_argument("--output_dir", default=None, 
                    help="Output directory for the CSV (default: ./features/whisper-embeddings)",
     )
-    p.add_argument("--overwrite_existing", type=bool, default=False,
-                    help="Do you want to overwrite the output file if it already exists?")
+    add_bool_argument(p, "--overwrite_existing", default=False,
+                      help="Do you want to overwrite the output file if it already exists?")
 
     # model/runtime
     p.add_argument("--model_name", default="base")

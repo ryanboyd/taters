@@ -33,6 +33,9 @@ from typing import Any, Dict, List, Tuple
 
 import textwrap, yaml
 
+# Cheap import: the facade only pulls in heavy dependencies when a method is called.
+from taters import Taters
+
 _BUILTIN_PRESETS_DIR = Path(__file__).parent / "presets"
 
 def _get_preset_dirs() -> List[Path]:
@@ -41,11 +44,16 @@ def _get_preset_dirs() -> List[Path]:
 # ============ List/Describe Presets ============
 
 def _iter_presets():
+    seen: set[Path] = set()
     for base in _get_preset_dirs():
         if not base.is_dir():
             continue
-        for p in sorted(base.glob("**/*.yaml")):
-            yield p
+        for pattern in ("**/*.yaml", "**/*.yml"):
+            for p in sorted(base.glob(pattern)):
+                rp = p.resolve()
+                if rp not in seen:
+                    seen.add(rp)
+                    yield p
 
 def _load_preset_meta(path: Path) -> dict:
     try:
@@ -198,14 +206,56 @@ def discover_inputs(root_dir: Path, kind: str) -> List[Path]:
 
 # ============== Preset loading / vars ==============
 
-def load_preset_by_name(name: str) -> dict:
+def resolve_preset_path(name: str) -> Path:
     """
-    Load a named pipeline preset from `taters/pipelines/presets/<name>.yaml`.
+    Find a preset file by its `meta.id` or filename stem.
+
+    Searches every directory returned by `_get_preset_dirs()` — the built-in
+    `taters/pipelines/presets/` folder first, then `./pipelines` relative to the
+    current working directory — so anything shown by `--list-presets` can also
+    be loaded with `--preset`.
 
     Parameters
     ----------
     name : str
-        Basename of a YAML preset in the `presets/` directory.
+        Preset `meta.id` or filename stem (with or without a `.yaml`/`.yml`
+        extension).
+
+    Returns
+    -------
+    Path
+        Path to the matching preset file.
+
+    Raises
+    ------
+    FileNotFoundError
+        If no preset matches, listing the presets that *are* available.
+    """
+    wanted = name[:-5] if name.lower().endswith((".yaml", ".yml")) else name
+    available: List[str] = []
+    for p in _iter_presets():
+        meta = _load_preset_meta(p)
+        available.append(meta["id"])
+        if wanted in {meta["id"], p.stem}:
+            return p
+    searched = ", ".join(str(d) for d in _get_preset_dirs())
+    known = ", ".join(sorted(set(available))) or "(none)"
+    raise FileNotFoundError(
+        f"Preset not found: {name}\nSearched: {searched}\nAvailable presets: {known}"
+    )
+
+
+def load_preset_by_name(name: str) -> dict:
+    """
+    Load a named pipeline preset by `meta.id` or filename stem.
+
+    Presets are resolved with :func:`resolve_preset_path`, which searches the
+    built-in `presets/` folder as well as a project-local `./pipelines` folder.
+
+    Parameters
+    ----------
+    name : str
+        Preset `meta.id` or filename stem.
 
     Returns
     -------
@@ -215,12 +265,10 @@ def load_preset_by_name(name: str) -> dict:
     Raises
     ------
     FileNotFoundError
-        If the preset file does not exist.
+        If no preset with that name exists in any search directory.
     """
-    here = Path(__file__).parent
-    path = here / "presets" / f"{name}.yaml"
-    if not path.exists():
-        raise FileNotFoundError(f"Preset not found: {path}")
+    path = resolve_preset_path(name)
+    print(f"[pipeline] Using preset: {path}")
     with path.open("r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
@@ -875,8 +923,7 @@ def main():
     }
     out_manifest_path = Path(args.out_manifest or (Path.cwd() / "run_manifest.json"))
 
-    # Create a single Taters instance for the whole run (correct class import)
-    from taters.Taters import Taters  # ← IMPORTANT: import the class, not the module
+    # Create a single Taters instance for the whole run
     potato = Taters()
     globals_ctx: Dict[str, Any] = {}
 
