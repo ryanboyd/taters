@@ -684,10 +684,17 @@ def test_the_acoustics_mode_description_offers_only_real_modes():
 
 def _skip_if_target_needs_something_missing(recipe):
     """
-    Some targets import an optional package at module scope -- acoustics needs
-    parselmouth -- so loading them to read their parameters fails where that
-    package is not installed. That is a fact about the environment, not about
-    the recipe, so the test steps aside rather than failing.
+    Some targets import a package at module scope that this machine does not
+    have -- acoustics needs parselmouth, and split_by_speaker needs pydub,
+    which is broken on 3.13 without `audioop-lts`. Loading them to read their
+    parameters then fails for a reason that is about the environment rather
+    than about the recipe, so the test steps aside.
+
+    Two checks, because the two cases look different. A declared `extra` gets
+    a message naming the pip command, which is the useful thing to print. An
+    undeclared one -- pydub is a *base* dependency, so it has no extra to
+    name -- only shows up when the import is actually tried, which is what
+    every sibling test in this file already does.
     """
     from taters.ui.wizard import EXTRA_PROBES
 
@@ -695,6 +702,10 @@ def _skip_if_target_needs_something_missing(recipe):
         if extra in recipe.extras and any(
                 importlib.util.find_spec(m) is None for m in probes):
             pytest.skip(f"{recipe.id} needs pip install \"taters[{extra}]\"")
+    try:
+        load_target(recipe.target)
+    except ImportError as exc:
+        pytest.skip(f"{recipe.id} needs an optional dependency: {exc}")
 
 
 def test_every_offered_setting_explains_itself(recipe):

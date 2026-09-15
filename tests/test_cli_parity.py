@@ -33,12 +33,28 @@ MODULES = [
 ]
 
 
+def _import_or_skip(module):
+    """
+    The module, or a skip naming what is missing.
+
+    A module that cannot be imported here says nothing about its command
+    line. `split_wav_by_speaker` imports pydub, which on 3.13 needs
+    `audioop-lts` because the standard library dropped `audioop` -- an
+    environment fact, and one every other test that loads these modules
+    already steps around.
+    """
+    try:
+        return importlib.import_module(module)
+    except ImportError as exc:
+        pytest.skip(f"{module} needs an optional dependency: {exc}")
+
+
 @pytest.mark.parametrize("module", MODULES)
 def test_help_renders_for_every_module_and_subcommand(module):
     """`--help` is the one thing every user runs first. A `%` in a docstring
     ("at least 5% of texts") made argparse's formatter raise, so the topic
     model's command line crashed on `--help` while its parser built fine."""
-    mod = importlib.import_module(module)
+    mod = _import_or_skip(module)
     for parser in mod.CLI.parsers_for_test().values():
         assert parser.format_help()
     assert mod.CLI.parser().format_help()
@@ -46,7 +62,7 @@ def test_help_renders_for_every_module_and_subcommand(module):
 
 @pytest.mark.parametrize("module", MODULES)
 def test_every_parameter_has_a_flag_and_every_flag_is_dashed(module):
-    mod = importlib.import_module(module)
+    mod = _import_or_skip(module)
     cli = mod.CLI
     for command, parser in cli.parsers_for_test().items():
         fn = cli.targets[command]

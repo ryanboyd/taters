@@ -20,6 +20,14 @@ dependencies = [
   "transformers>=4.38.0,<5",   # for WhisperFeatureExtractor; <5 pairs with nemo 2.x
   "librosa>=0.10.1",
   "pydub>=0.25.1",
+  # Python 3.13 deleted `audioop` from the standard library (PEP 594), and
+  # pydub imports it at module scope -- so on 3.13 `pydub` raises
+  # ModuleNotFoundError and every audio step that touches it is dead on
+  # arrival. `audioop-lts` is the maintained port of exactly that module; it
+  # ships abi3 wheels for Windows, macOS and Linux plus an sdist, and it is
+  # itself `requires-python >=3.13`, hence the marker. Found by CI on the 3.13
+  # leg, which is the only Python here old enough to have lost it.
+  "audioop-lts; python_version >= '3.13'",
   "contentcoder",
   "archetyper",
   "nltk",
