@@ -711,13 +711,22 @@ def test_the_banner_has_a_potato_in_it():
     code, and the first screen sets whether it feels approachable or like
     something that will blame them for holding it wrong.
     """
-    from taters.ui.hub import banner
+    import re
 
-    drawn = banner()
-    # rounded ends and at least one eye. we don't pin the exact glyphs (anyone
-    # should be free to redraw the potato) but it does have to still be a potato.
-    assert "▗▄" in drawn and "▀▘" in drawn, "the body lost its rounded ends"
-    assert "•" in drawn, "the potato has no eyes"
+    from taters.ui.hub import _ART_WIDTH, _art, banner
+
+    # we don't pin the exact glyphs -- anyone should be free to redraw the
+    # potato, and the plain build has to redraw it anyway because the quadrant
+    # blocks that round the ends are missing from every stock Windows font. what
+    # has to survive is the silhouette: the body runs the full width and the
+    # ends are inset, and that difference is the whole reason it reads as an
+    # oval rather than as a brick.
+    for fancy in (True, False):
+        top, body, bottom = (re.sub(r"\[/?[^\]]*\]", "", row) for row in _art(fancy))
+        assert len(body.strip()) == _ART_WIDTH, "the body should run the full width"
+        assert len(top.strip()) < len(body.strip()), "the top is not inset"
+        assert len(bottom.strip()) < len(body.strip()), "the bottom is not inset"
+    assert "•" in banner(), "the potato has no eyes"
 
 
 def test_the_art_sits_beside_the_text_rather_than_above_it():
@@ -776,11 +785,15 @@ def test_the_banner_is_colored():
 
 
 def test_the_border_is_not_a_compliance_report():
-    """A light rounded frame. The heavy double rule was the wrong register."""
+    """A light frame. The heavy double rule was the wrong register."""
+    from taters.ui import glyphs
     from taters.ui.hub import banner
 
     drawn = banner()
-    assert "╭" in drawn and "╰" in drawn
+    # the corners come from glyphs rather than being spelled out: the arcs are
+    # missing from Courier New and Lucida Console, so the plain build squares
+    # them off. light either way is the point.
+    assert glyphs.ARC_TL in drawn and glyphs.ARC_BL in drawn
     assert "╔" not in drawn and "═" not in drawn
 
 
@@ -1133,6 +1146,7 @@ def test_the_plain_renderers_banner_survives_the_note_wrap(monkeypatch):
 
     from rich.console import Console
 
+    from taters.ui import glyphs
     from taters.ui.prompts import QuestionaryPrompter
 
     p = QuestionaryPrompter()
@@ -1148,7 +1162,8 @@ def test_the_plain_renderers_banner_survives_the_note_wrap(monkeypatch):
     drawn = _re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", buf.getvalue())
     lines = [ln for ln in drawn.splitlines() if "─" in ln or "│" in ln]
     assert lines, "no banner border was drawn at all"
-    assert all(ln.rstrip().endswith(("╮", "╯", "│")) for ln in lines), (
+    ends = (glyphs.ARC_TR, glyphs.ARC_BR, "│")
+    assert all(ln.rstrip().endswith(ends) for ln in lines), (
         "a border line was folded mid-markup"
     )
 

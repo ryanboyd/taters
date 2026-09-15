@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .. import glyphs
 from ..prompts import Choice, GoBack
 from . import Task, TaskContext
 
@@ -48,7 +49,7 @@ def _run(ctx: TaskContext):
             rows.append(Choice(_DEFAULT, "Go back to the default",
                                "Forget the folder chosen here and follow the "
                                "environment, or the usual place under your home."))
-        rows.append(Choice(_BACK, "↩ Back", tone="nav"))
+        rows.append(Choice(_BACK, f"{glyphs.BACK} Back", tone="nav"))
         try:
             picked = str(prompter.select("Model folder:", rows))
         except GoBack:
@@ -84,7 +85,7 @@ def _run(ctx: TaskContext):
             continue
         save_setting(MODEL_CACHE_KEY, str(chosen))
         applied = apply_model_cache()
-        prompter.note(f"  ✓ Saved. Models download to {applied or chosen} from now on"
+        prompter.note(f"  {glyphs.TICK} Saved. Models download to {applied or chosen} from now on"
                       f"{'' if applied else ' (from the next start of Taters)'}.",
                       style="green")
 

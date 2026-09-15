@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from ...helpers.doc_text import DOCUMENT_PATTERN
+from .. import glyphs
 from ..columns import looks_numeric, peek_csv
 from ..prompts import Cancelled, Choice, GoBack, ask_at_least_one
 from . import Task, TaskContext
@@ -263,7 +264,7 @@ def _run(ctx: TaskContext) -> Optional[bool]:
     # progress bar), but the summary actually wants the number, so we give it
     # one.
     rows = max(0, count_rows(out, on_progress=lambda *a, **k: None))
-    prompter.note(f"\n  ✓ Wrangled {rows:,} row(s) into:\n    {out}",
+    prompter.note(f"\n  {glyphs.TICK} Wrangled {rows:,} row(s) into:\n    {out}",
                   style="green", wrap=False)
     with out.open("r", newline="", encoding="utf-8-sig") as f:
         has_text = "text" in (next(csv.reader(f), []))

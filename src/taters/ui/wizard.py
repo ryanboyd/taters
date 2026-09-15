@@ -40,6 +40,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import yaml
 
+from . import glyphs
 from . import recipes as _recipes
 from . import preflight as _checks
 from .columns import (column_kind, constant_within, distinct_values,
@@ -2578,7 +2579,9 @@ def _spec_for(recipe: _recipes.Recipe, prompter: Optional[Prompter] = None
 
 #: What a dependent setting's row starts with, so it reads as belonging to
 #: the row above it: "  ↳ pca components — 0" under "pca — all".
-INDENT = "  ↳ "
+# resolved at import for the same reason as live.py's markers: the glyph set
+# is settled once per process, and this is a hot string.
+INDENT = f"  {glyphs.INDENT} "
 
 
 def _setting_choice(recipe: _recipes.Recipe, param: ParamSpec, var_specs: Dict[str, dict],
@@ -2887,7 +2890,7 @@ def tune_shared(
     while True:
         rows = shared_rows(shared, var_specs, overrides, var_values, prompter)
         choices = [choice for _var, _recipe, _param, choice in rows]
-        choices.insert(0, Choice(_DONE, "✓ Done with shared settings",
+        choices.insert(0, Choice(_DONE, f"{glyphs.TICK} Done with shared settings",
                                  tone="good"))
 
         prompter.note("")
@@ -2955,7 +2958,7 @@ def tune_one_step(
         # `step_rows`.
         choices = step_rows(recipe, spec, var_specs, overrides, var_values,
                             shared)
-        choices.insert(0, Choice(_DONE, f"✓ Done with {recipe.label}",
+        choices.insert(0, Choice(_DONE, f"{glyphs.TICK} Done with {recipe.label}",
                                  tone="good"))
         if recipe.text_input:
             # we say that the input plumbing exists and where it went, rather
@@ -3085,8 +3088,8 @@ def ask_tuning(
         total = sum(len(v) for v in overrides.values()) + len(var_values)
         choices: List[Choice] = [Choice(
             _DONE,
-            "✓ Done — save and continue" if not total
-            else f"✓ Done — save {_plural(total, 'change')} and continue",
+            f"{glyphs.TICK} Done — save and continue" if not total
+            else f"{glyphs.TICK} Done — save {_plural(total, 'change')} and continue",
             tone="good",
         )]
         if shared:
@@ -3487,10 +3490,10 @@ def finish_screen(prompter: Prompter, *, ok: bool, manifest: dict,
     failed = [i for i in items if i.get("status") == "error"]
 
     if ok:
-        prompter.note("\n  ✓ Finished. Everything succeeded.", style="green")
+        prompter.note(f"\n  {glyphs.TICK} Finished. Everything succeeded.", style="green")
     else:
         detail = f"{len(failed)} file(s) failed" if failed else "a step failed"
-        prompter.note(f"\n  ✗ Finished with problems: {detail}.",
+        prompter.note(f"\n  {glyphs.CROSS} Finished with problems: {detail}.",
                       style="bold red")
 
     # per-file failures first, then step-level ones. the step-level list is

@@ -997,6 +997,8 @@ def test_an_unknown_gate_fails_open():
 
 
 def test_pca_settings_appear_only_when_pca_is_on():
+    from taters.ui import wizard as w
+
     steps, var_specs = _stats_setup()
     for recipe in steps:
         off = [c.value for c in _rows(recipe, var_specs)]
@@ -1005,7 +1007,7 @@ def test_pca_settings_appear_only_when_pca_is_on():
         on = _rows(recipe, var_specs, var_values={"stats_pca": "all"})
         values = [c.value for c in on]
         assert values.index("pca_components") == values.index("pca") + 1
-        assert on[values.index("pca_components")].label.startswith("  ↳ ")
+        assert on[values.index("pca_components")].label.startswith(w.INDENT)
         if "pca_max_missing" in recipe.param_when:
             assert "pca_max_missing" in values and "pca_max_missing" not in off
 

@@ -344,6 +344,55 @@ and `HF_HOME` are honored as they always were when neither is set. Models
 already downloaded elsewhere are not moved. "Check my setup" shows the
 folder, how it was chosen, and how much is in it.
 
+### How this looks in your terminal
+
+Two settings for the two things a terminal will not tell us the truth about.
+
+**Colors.** When you connect over SSH, your client announces what kind of
+terminal it is — and PuTTY, MobaXterm, Git Bash and plain `ssh` all announce a
+bare `xterm`, which by convention means "16 colors". They are all perfectly
+capable of far more; it is just what the label says. Taken at face value, the
+potato in the banner collapses from four shades to two, the eyes and the frame
+land on a gray so dark it reads as black, and the frame's slow color drift stops
+moving entirely. So Taters prefers 256 colors on anything that looks like a real
+terminal, which is the same thing the menus have always done. The exceptions are
+deliberate: a Linux text console (`TERM=linux`) really does stop at 16 and keeps
+16, and output that is not going to a terminal at all — a redirected log, a
+pipe — gets no color codes whatever. Set it by hand here if you need to, or with
+`TATERS_COLOR=truecolor` in the environment.
+
+**Characters.** The wizard marks things with arrows and ticks. Windows consoles
+quietly borrow a glyph from another font when the one you chose hasn't got it,
+so those characters look fine there — but `↩`, `✓` and `⚠` are genuinely absent
+from every monospace font Windows ships, and a terminal that does not do that
+borrowing draws an empty box instead. There is no way to ask a terminal what its
+font can draw, so Taters defaults to characters that every one of those fonts
+has. If yours can do better, switch to fancy here or set
+`TATERS_FANCY_GLYPHS=1`.
+
+Both take effect the next time Taters starts.
+
+### Check for new versions
+
+When a version newer than yours is on PyPI, a single dim line appears under the
+menu — `newer version available: v0.7.3` — and that is the whole feature. It is
+a statement of fact, not a nag: nothing to dismiss, nothing that blocks a run,
+and no complaint when you carry on using the version you have.
+
+The check asks PyPI for the current version number at most once a day, in the
+background, and writes the answer to `settings.json` in the Taters home. The
+menu is drawn from that saved answer, never from a live request, so a slow
+network, a proxy, or no connection at all cannot delay the opening screen. One
+consequence worth knowing: a brand-new install shows nothing the first time,
+because the first check's answer arrives after the menu is already on screen.
+
+Nothing about you, your data, or your runs is sent — the request is for a
+public version number and carries no identifying information. If you would
+rather it made no outbound request at all, turn it off on this screen, or set
+`TATERS_NO_UPDATE_CHECK=1` in the environment, which wins over the setting and
+is the one to use when you are locking down a shared machine for everybody on
+it.
+
 ## If something is missing
 
 Some measures need optional extras. When you pick one you do not have installed,

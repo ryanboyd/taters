@@ -92,10 +92,11 @@ def test_managing_pipelines_moved_under_settings(tmp_path):
     from taters.ui.tasks import manage_data
 
     assert "manage" not in {t.id for t in all_tasks()}
-    # one level further down than it used to be: Settings keeps three rows,
-    # and everything Taters stores shares the middle one
+    # one level further down than it used to be: everything Taters stores
+    # shares one row, second from the top
     assert "manage" in {t.id for t in manage_data.entries()}
     assert [t.id for t in settings.entries()] == ["gpu", "manage_data",
+                                                  "terminal", "update_check",
                                                   "hashbrowns"]
 
 

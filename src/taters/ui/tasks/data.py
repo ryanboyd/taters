@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from .. import glyphs
 from ..prompts import Cancelled, Choice, GoBack
 from . import Task, TaskContext
 
@@ -43,7 +44,7 @@ def _run(ctx: TaskContext) -> Optional[bool]:
             Choice(task.id, task.label, task.help, disabled=task.blocked(ctx))
             for task in items
         ]
-        choices.append(Choice("back", "↩ Back", "Return to the main menu",
+        choices.append(Choice("back", f"{glyphs.BACK} Back", "Return to the main menu",
                               tone="nav"))
 
         try:

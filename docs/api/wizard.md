@@ -114,3 +114,22 @@ question is open, drawn inline so the terminal's scrollback survives the run.
       members_order: source
       show_source: true
       show_root_heading: true
+
+## Terminal capability
+
+What the terminal can draw, as opposed to what it says it can. A client
+connecting over SSH announces a terminal type that understates its colors and
+says nothing at all about its font, so these two modules hold the defaults that
+make the screen look right anyway.
+
+::: taters.ui.console
+    options:
+      members_order: source
+      show_source: true
+      show_root_heading: true
+
+::: taters.ui.glyphs
+    options:
+      members_order: source
+      show_source: true
+      show_root_heading: true

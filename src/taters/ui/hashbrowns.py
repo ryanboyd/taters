@@ -1528,7 +1528,7 @@ def _sc_spud(g, t: float):
     _solid_potato(canvas, g, t)
     # the outline needs a pixel either side, so the long caption only goes up
     # when there is room for it.
-    _caption(canvas, g, "110 CALORIES" if g["w"] >= 92 else "TATERS", t)
+    _caption(canvas, g, "110 CALORIES" if g["w"] >= 92 else "110 KCAL", t)
     return canvas
 
 

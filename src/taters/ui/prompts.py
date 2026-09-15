@@ -264,7 +264,10 @@ class QuestionaryPrompter:
     def __init__(self) -> None:
         try:
             import questionary
-            from rich.console import Console
+            # imported for the check, not for use -- `make_console` does the
+            # building. it stays inside the try so that a missing rich gets the
+            # message below rather than a traceback from three frames deeper.
+            import rich.console  # noqa: F401
         except ImportError as e:  # pragma: no cover - both are base dependencies
             raise ImportError(
                 "The setup wizard needs `questionary` and `rich`, which ship "
@@ -278,7 +281,13 @@ class QuestionaryPrompter:
         # noise, and in the banner it was a visible bug: `v0.2.1` came out with
         # `v0.` dim and `2.1` in cyan, like the version got cut in half. if
         # something's styled here, it's because we styled it.
-        self._console = Console(highlight=False)
+        # through `make_console` rather than straight to rich: over SSH the
+        # client announces a bare `xterm`, rich reads no color suffix off it
+        # and drops to 16 colors, and the banner comes out gray. see
+        # `ui/console.py` for why 256 is the right floor and which two
+        # terminals are exempt from it.
+        from .console import make_console
+        self._console = make_console(highlight=False)
         # questionary renders its own colors; keeping rich to plain output for
         # notes stops the two from fighting over the same line.
         # one accent color (teal) for whatever the user is acting on, one for

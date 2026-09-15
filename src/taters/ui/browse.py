@@ -23,6 +23,7 @@ import itertools
 from pathlib import Path
 from typing import Tuple, List, Optional, Sequence
 
+from . import glyphs
 from .prompts import Choice, Prompter
 
 __all__ = ["browse_for_folder", "browse_for_file", "browse_and_tick", "short_path", "human_size"]
@@ -176,8 +177,8 @@ def _listing(box: dict, *, want_files, count_suffixes,
         # more folder.
         here_hint = _count_hint(here, count_suffixes)
         choices.append(Choice(_CHOOSE,
-                              row("✓ Use this folder") if here_hint
-                              else "✓ Use this folder",
+                              row(f"{glyphs.TICK} Use this folder") if here_hint
+                              else f"{glyphs.TICK} Use this folder",
                               annotation=here_hint, tone="good"))
     for folder in folders:
         hint = _count_hint(folder, count_suffixes)
@@ -198,7 +199,7 @@ def _listing(box: dict, *, want_files, count_suffixes,
         else:
             label = row(file.name) if size else file.name
         choices.append(Choice(str(file), label, annotation=size))
-    choices.append(Choice(_TYPE, "⌨ Type a path instead"))
+    choices.append(Choice(_TYPE, f"{glyphs.KEYBOARD} Type a path instead"))
 
     # this goes on the breadcrumb rather than printed as a note, because notes
     # under a transient prompt forced a repaint, and the message belongs to the

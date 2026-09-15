@@ -27,6 +27,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from rich.progress import ProgressColumn
 from rich.markup import escape
+from . import glyphs
 
 __all__ = ["RunDisplay", "reporter_for"]
 
@@ -121,9 +122,10 @@ class RunDisplay:
     """
 
     def __init__(self, console: Any = None) -> None:
-        from rich.console import Console
+        from .console import make_console
 
-        self._console = console or Console()
+        # same color-depth reasoning as the wizard's console; see ui/console.py.
+        self._console = console or make_console()
         self._progress = None
         self._overall = None
         self._step = None
@@ -256,7 +258,7 @@ class RunDisplay:
 
         hidden = len(self._inflight) - len(self._slots)
         if hidden > 0:
-            label = f"  ↳ …and {hidden} more file{'' if hidden == 1 else 's'}"
+            label = f"  {glyphs.INDENT} …and {hidden} more file{'' if hidden == 1 else 's'}"
             if self._overflow is None:
                 self._overflow = self._progress.add_task(label, total=None)
             else:
@@ -280,8 +282,8 @@ class RunDisplay:
             from rich.cells import cell_len
 
             suffix = f" · {message}"
-            return f"  ↳ {_fit(name, max(8, budget - cell_len(suffix)))}{suffix}"
-        return f"  ↳ {_fit(name, budget)}"
+            return f"  {glyphs.INDENT} {_fit(name, max(8, budget - cell_len(suffix)))}{suffix}"
+        return f"  {glyphs.INDENT} {_fit(name, budget)}"
 
     #: How many in-flight sub-bars to draw before folding the rest into one
     #: "…and N more" row. The set is bounded by 2x the worker count, but on a
@@ -315,9 +317,9 @@ class RunDisplay:
                 key = f"f:{name}"
                 if key not in self._slots:
                     self._slots[key] = self._progress.add_task(
-                        f"  ↳ {_fit(name, budget)}", total=None)
+                        f"  {glyphs.INDENT} {_fit(name, budget)}", total=None)
             if extra > 0:
-                label = f"  ↳ …and {extra} more"
+                label = f"  {glyphs.INDENT} …and {extra} more"
                 if "f:+" not in self._slots:
                     self._slots["f:+"] = self._progress.add_task(label, total=None)
                 else:

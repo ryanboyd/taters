@@ -443,6 +443,13 @@ def _hermetic_library(request, tmp_path_factory, monkeypatch):
                       if kind.id in ("dictionaries", "archetypes")
                       else _SHIPPED_DIR(kind)))
 
+    # and the hub's "newer version available" check is off for the whole
+    # suite. it is a background thread that talks to pypi.org: a test run has
+    # no business making that request, it would be thousands of them, and on a
+    # machine with no network it would be thousands of five-second timeouts
+    # piling up in threads. the tests that are *about* the check unset this.
+    monkeypatch.setenv("TATERS_NO_UPDATE_CHECK", "1")
+
 
 @pytest.fixture
 def shipped_library(monkeypatch):

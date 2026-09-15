@@ -22,6 +22,7 @@ import re
 from pathlib import Path
 from typing import Callable, List, Optional
 
+from . import glyphs
 from .prompts import Cancelled, Choice, GoBack, Prompter
 
 __all__ = ["run_train", "TRAINABLE", "encoder_stem"]
@@ -269,7 +270,7 @@ def _import_vectors(prompter: Prompter, *, cwd: Path) -> Optional[bool]:
     from ..helpers.model_spec import describe
 
     info = describe(model)
-    prompter.note(f"  ✓ Saved {info.display()} ({info.n_outputs} dimensions) to "
+    prompter.note(f"  {glyphs.TICK} Saved {info.display()} ({info.n_outputs} dimensions) to "
                   f"{model}", style="green")
     prompter.note("    Its report and nearest neighbors are beside it.", style="dim")
     offer_library_import(prompter, [(model, info.display())])

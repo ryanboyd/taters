@@ -22,6 +22,7 @@ from typing import Optional, List
 import yaml
 
 from ...helpers.atomic import atomic_write
+from .. import glyphs
 from ..compose import slugify
 from ..prompts import Cancelled, Choice, Prompter, GoBack
 from . import Task, TaskContext
@@ -251,7 +252,7 @@ def _delete(ctx: TaskContext, paths: List[Path]) -> None:
                     "The folder and every result in it stay put."),
              Choice("folder", "The whole folder — pipeline, results, everything",
                     "Nothing in it survives.", tone="danger"),
-             Choice("back", "↩ Never mind", tone="nav")],
+             Choice("back", f"{glyphs.BACK} Never mind", tone="nav")],
         ))
         if what == "back":
             return
@@ -263,7 +264,7 @@ def _delete(ctx: TaskContext, paths: List[Path]) -> None:
         extras = sorted(
             child.name for child in path.parent.iterdir() if child != path
         )
-        prompter.note(f"  ⚠ WARNING — this deletes the folder {path.parent} "
+        prompter.note(f"  {glyphs.WARNING} WARNING — this deletes the folder {path.parent} "
                       "and EVERYTHING in it.", style="bold red")
         if extras:
             prompter.note(f"  That includes: {', '.join(extras)}", style="red")
@@ -279,7 +280,7 @@ def _delete(ctx: TaskContext, paths: List[Path]) -> None:
         # someone standing next to a delete button needs to hear.
         from rich.markup import escape
 
-        prompter.note("  ✗ That is not this pipeline's name. "
+        prompter.note(f"  {glyphs.CROSS} That is not this pipeline's name. "
                       "Nothing was deleted.", style="bold red")
         prompter.note(f"  You typed '{escape(typed)}' — the pipeline is called "
                       f"'{escape(title)}'.", style="red")
@@ -320,7 +321,7 @@ def _run(ctx: TaskContext) -> None:
             )
             for action_id, label, help_text, _ in _ACTIONS
         ]
-        choices.append(Choice("done", "↩ Back", "Return to the main menu",
+        choices.append(Choice("done", f"{glyphs.BACK} Back", "Return to the main menu",
                               tone="nav"))
 
         picked = str(ctx.prompter.select("What would you like to do with them?", choices))

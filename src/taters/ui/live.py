@@ -34,6 +34,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any, List, Optional, Sequence
 
+from . import glyphs
 from .prompts import (MEASURE, PAUSE_MESSAGE, _REASON_MARK, _REASON_STYLE,
                       Cancelled, Choice, GoBack, QuestionaryPrompter,
                       Stage, _MIN_VISIBLE_ROWS, description_rows,
@@ -46,9 +47,13 @@ __all__ = ["LivePrompter"]
 # marker and color for each stage status. we picked these to survive a
 # monochrome terminal: the glyphs differ, so the rail still reads with the
 # color stripped out.
+#
+# resolved at import rather than per paint, which is deliberate: which glyph set
+# to use is a once-per-process decision (the settings screen says it takes
+# effect at the next start), and this dict is read on every repaint of the rail.
 _MARKERS = {
-    "done": ("✓ ", "fg:#00af5f"),
-    "active": ("▸ ", "fg:#00afaf bold"),
+    "done": (f"{glyphs.TICK} ", "fg:#00af5f"),
+    "active": (f"{glyphs.ACTIVE} ", "fg:#00afaf bold"),
     "todo": ("○ ", "fg:#585858"),
 }
 
@@ -67,7 +72,7 @@ _KEY_HINTS = {
     "tick": "[↑↓] move · [space] tick · [enter] picks the highlighted row · [esc] back",
     # the one multi-select dialect (see `checkbox`): boxes tick, and the Done
     # row is the only way forward
-    "checkbox": "[space] ticks a box · [enter] on ✓ Done continues · [esc] back",
+    "checkbox": f"[space] ticks a box · [enter] on {glyphs.TICK} Done continues · [esc] back",
     "confirm": "[y]/[n] answer · [enter] picks the highlighted row · [esc] back",
 }
 _DEFAULT_HINT = "[enter] accept · [esc] back · [ctrl-c] quit"
@@ -895,7 +900,7 @@ class LivePrompter(QuestionaryPrompter):
         """
         ticked = {c.value for c in choices if c.checked}
         order = [c.value for c in choices]
-        rows = [Choice(self._TICKS_DONE, "✓ Done — use the ticked items",
+        rows = [Choice(self._TICKS_DONE, f"{glyphs.TICK} Done — use the ticked items",
                        help="Tick boxes with [space]; this row's [enter] "
                             "confirms them. It waits until something is "
                             "ticked.",

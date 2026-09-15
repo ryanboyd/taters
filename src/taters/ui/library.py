@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import List, Optional, Sequence
 
 from ..helpers import library as lib
+from . import glyphs
 from .browse import browse_and_tick, browse_for_folder, human_size
 from .prompts import Cancelled, Choice, GoBack, Prompter
 
@@ -90,33 +91,33 @@ def manage_library(prompter: Prompter, kind: lib.LibraryKind) -> None:
         # the menu, so rows that appear/disappear (or carry counts) would be
         # lying the moment a tick happened. the counts live in the
         # confirmations instead, which always see the current selection.
-        choices = [Choice(_BACK, "↩ Back", tone="nav")]
+        choices = [Choice(_BACK, f"{glyphs.BACK} Back", tone="nav")]
         # import is the forward act on this screen -- bringing dictionaries in
         # is the whole reason the library exists -- so it gets the green.
         # export is just an ordinary action, and painting it green because it
         # moves files turned the color language into noise.
-        choices.append(Choice(_IMPORT, "＋ Import files…", kind.help,
+        choices.append(Choice(_IMPORT, f"{glyphs.IMPORT} Import files…", kind.help,
                               tone="good"))
         if kind.id == "models":
             # the other way a model gets here: somebody else trained it and put
             # it on the hub, and it's probably already in this machine's cache
             choices.append(Choice(
-                _IMPORT_HF, "＋ Import a classifier from Hugging Face…",
+                _IMPORT_HF, f"{glyphs.IMPORT} Import a classifier from Hugging Face…",
                 "A sentiment, emotion or other text classifier (or a regression "
                 "head) from the Hugging Face hub: one already in this computer's "
                 "cache, a checkpoint folder, or a name to download.",
                 tone="good"))
         if entries:
-            choices.append(Choice(_EXPORT, "⇩ Export the ticked files…",
+            choices.append(Choice(_EXPORT, f"{glyphs.EXPORT} Export the ticked files…",
                                   "Copy them out to a folder of your choosing."))
-            choices.append(Choice(_RENAME, "✎ Rename the ticked file",
+            choices.append(Choice(_RENAME, f"{glyphs.PENCIL} Rename the ticked file",
                                   "Tick exactly one first."))
-            choices.append(Choice(_DELETE, "✕ Delete the ticked files",
+            choices.append(Choice(_DELETE, f"{glyphs.DELETE} Delete the ticked files",
                                   "Removes them from the library.",
                                   tone="danger"))
             if kind.id == "models":
                 choices.append(Choice(
-                    _APPLY, "⚙ Change how the ticked model is applied",
+                    _APPLY, f"{glyphs.GEAR} Change how the ticked model is applied",
                     "Its name, its output columns, what each predicted class "
                     "is called, and the settings it scores with. Tick exactly "
                     "one first."))
@@ -271,7 +272,7 @@ def edit_model_settings(prompter: Prompter, path: Path) -> None:
             prompter.note(f"  {escape(str(e))}", style="yellow")
             return
         spec = BY_ID[info.type_id]
-        rows = [Choice(_APPLY_DONE, "↩ Done", tone="nav"),
+        rows = [Choice(_APPLY_DONE, f"{glyphs.BACK} Done", tone="nav"),
                 Choice("name", f"Name: {info.name}", "What every menu calls it.")]
         if spec.write_outputs is not None:
             shown = (f"{info.n_outputs} columns, {info.outputs[0]}…" if info.bulk_outputs
@@ -828,7 +829,7 @@ def pick_from_library(prompter: Prompter, kind: lib.LibraryKind,
                                   "Import, export, rename or delete entries."))
                 return out
             if not in_place:
-                out.insert(0, Choice(_USE_TICKED, "✓ Use the ticked ones",
+                out.insert(0, Choice(_USE_TICKED, f"{glyphs.TICK} Use the ticked ones",
                                      "Approves exactly the entries marked [x].",
                                      tone="good"))
             # "Use all of them" approves outright. its old shape ("Select
@@ -836,7 +837,7 @@ def pick_from_library(prompter: Prompter, kind: lib.LibraryKind,
             # did nothing -- with everything ticked by default it changed no
             # visible state, and the reloop's repaint looked like a broken
             # blink back to the same screen.
-            out.append(Choice(_ALL, "✓ Use all of them",
+            out.append(Choice(_ALL, f"{glyphs.TICK} Use all of them",
                               "Approves the full library for this step.",
                               tone="good"))
             out.append(Choice(_NONE, "Untick everything",
@@ -928,7 +929,7 @@ def offer_library_import(prompter: Prompter, produced: Sequence[tuple]) -> List[
         except ValueError as e:
             prompter.note(f"  Not added: {e}", style="yellow")
             continue
-        prompter.note(f"  ✓ Added to your {kind.label.lower()}: {dest.stem}",
+        prompter.note(f"  {glyphs.TICK} Added to your {kind.label.lower()}: {dest.stem}",
                       style="green")
         if kind.id == "models":
             _name_a_model(prompter, dest)

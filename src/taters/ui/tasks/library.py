@@ -10,6 +10,7 @@ one kind, so their entry opens the manager directly.
 
 from __future__ import annotations
 
+from .. import glyphs
 from ..prompts import Choice, GoBack
 from . import Task, TaskContext
 
@@ -33,7 +34,7 @@ def _run_dictionaries(ctx: TaskContext) -> None:
                    f"{len(entries(kind))} imported · {kind.help}")
             for kind in kinds
         ]
-        choices.append(Choice(":back", "↩ Back", tone="nav"))
+        choices.append(Choice(":back", f"{glyphs.BACK} Back", tone="nav"))
 
         try:
             picked = str(prompter.select("Which library?", choices))

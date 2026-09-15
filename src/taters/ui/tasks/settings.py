@@ -12,6 +12,7 @@ everything else lives one level down.
 
 from __future__ import annotations
 
+from .. import glyphs
 from ..prompts import Cancelled, Choice, GoBack
 from . import Task, TaskContext
 
@@ -20,14 +21,15 @@ __all__ = ["TASK", "entries"]
 
 def entries():
     """The submenu, in order. Lazy for the same reason the registry is."""
-    from . import gpu, hashbrowns, manage_data
+    from . import gpu, hashbrowns, manage_data, terminal, update_check
 
     # the question people actually arrive with is "is my GPU working?", so it
     # opens the list. everything Taters keeps on disk shares the row beneath
     # it rather than spreading five near-identical "Manage ..." rows across
     # this screen. and the hashbrowns sit last, where nobody trips over them
     # on the way to work.
-    return [gpu.TASK, manage_data.TASK, hashbrowns.TASK]
+    return [gpu.TASK, manage_data.TASK, terminal.TASK, update_check.TASK,
+            hashbrowns.TASK]
 
 
 def _run(ctx: TaskContext) -> None:
@@ -39,7 +41,7 @@ def _run(ctx: TaskContext) -> None:
             Choice(task.id, task.label, task.help, disabled=task.blocked(ctx))
             for task in items
         ]
-        choices.append(Choice("back", "↩ Back", "Return to the main menu",
+        choices.append(Choice("back", f"{glyphs.BACK} Back", "Return to the main menu",
                               tone="nav"))
 
         try:

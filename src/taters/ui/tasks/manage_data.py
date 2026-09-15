@@ -15,6 +15,7 @@ downloaded model cache that quietly grows until somebody looks at it.
 
 from __future__ import annotations
 
+from .. import glyphs
 from ..prompts import Cancelled, Choice, GoBack
 from . import Task, TaskContext
 
@@ -41,7 +42,7 @@ def _run(ctx: TaskContext) -> None:
             Choice(task.id, task.label, task.help, disabled=task.blocked(ctx))
             for task in items
         ]
-        choices.append(Choice("back", "↩ Back", "Return to settings",
+        choices.append(Choice("back", f"{glyphs.BACK} Back", "Return to settings",
                               tone="nav"))
 
         try:

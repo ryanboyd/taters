@@ -35,3 +35,9 @@
       members_order: alphabetical
       show_source: true
       show_root_heading: true
+
+::: taters.helpers.update_check
+    options:
+      members_order: alphabetical
+      show_source: true
+      show_root_heading: true

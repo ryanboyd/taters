@@ -23,6 +23,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+from . import glyphs
 from .prompts import MEASURE, Cancelled, Choice, GoBack, Prompter, QuitRequested
 from .tasks import TaskContext, all_tasks
 
@@ -159,11 +160,30 @@ def border_style(at: Optional[float] = None) -> str:
 # three rows the same width (to fit a `>_` terminal screen into the body like
 # the project's logo has) and it came out as a rounded rectangle. the screen
 # needs a bigger potato than three rows can give it.
-_SPUD_ART = (
-    f" [{_SPUD_LIT}]▗▄▄[/][{_SPUD}]▄[/][{_SPUD_DIM}]▄▄▖[/] ",
-    f"[{_SPUD_LIT}]▐█[/][{_SKIN}]•[/][{_SPUD}]███[/][{_SKIN}]•[/][{_SPUD_DIM}]█▌[/]",
-    f" [{_SPUD}]▝▀▀[/][{_SPUD_DIM}]▀▀▀▘[/] ",
-)
+#
+# the quadrant blocks are the catch. `▗ ▖ ▝ ▘` are in none of the monospace
+# fonts Windows ships -- see ui/glyphs.py -- so on PuTTY the potato's four
+# corners come out as missing-glyph boxes. the plain build therefore insets the
+# caps by two columns instead of one and lets the silhouette do the work the
+# corners used to: squarer ends, but a stronger bulge, and it reads as a potato
+# rather than as a row of question marks.
+def _art(fancy: bool):
+    """The three rows, styled. Split out so both silhouettes sit side by side
+    rather than one being a diff away from the other."""
+    body = (f"[{_SPUD_LIT}]▐█[/][{_SKIN}]•[/][{_SPUD}]███[/]"
+            f"[{_SKIN}]•[/][{_SPUD_DIM}]█▌[/]")
+    if fancy:
+        return (f" [{_SPUD_LIT}]▗▄▄[/][{_SPUD}]▄[/][{_SPUD_DIM}]▄▄▖[/] ",
+                body,
+                f" [{_SPUD}]▝▀▀[/][{_SPUD_DIM}]▀▀▀▘[/] ")
+    return (f"  [{_SPUD_LIT}]▄▄[/][{_SPUD}]▄[/][{_SPUD_DIM}]▄▄[/]  ",
+            body,
+            f"  [{_SPUD}]▀▀▀[/][{_SPUD_DIM}]▀▀[/]  ")
+
+
+# resolved at import for the same reason as live.py's markers: the glyph set is
+# settled once per process, and the banner repaints on every screen.
+_SPUD_ART = _art(glyphs.fancy())
 _ART_WIDTH = 9         # the widest row, in columns
 
 
@@ -213,8 +233,8 @@ def banner(width: int = MEASURE - 2) -> str:
         pad = " " * (inner - len(_visible(body)))
         return f"  [{frame}]│[/]  {body}{pad}  [{frame}]│[/]"
 
-    top = f"  [{frame}]╭" + "─" * (inner + 4) + "╮[/]"
-    bottom = f"  [{frame}]╰" + "─" * (inner + 4) + "╯[/]"
+    top = f"  [{frame}]{glyphs.ARC_TL}" + "─" * (inner + 4) + f"{glyphs.ARC_TR}[/]"
+    bottom = f"  [{frame}]{glyphs.ARC_BL}" + "─" * (inner + 4) + f"{glyphs.ARC_BR}[/]"
     return "\n".join(
         ["", top, *(row(a, t) for a, t in zip(_SPUD_ART, text_rows)), bottom, ""]
     )
@@ -282,6 +302,16 @@ def run_hub(prompter: Prompter, *, cwd: Optional[Path] = None) -> bool:
         # wrap counts the markup characters as text -- it folds the border
         # mid-tag and the plain renderer spits out garbage.
         prompter.note(banner(), wrap=False)
+    # cached answer only -- `note` never touches the network, so a dead proxy
+    # or no connection at all cannot delay the opening screen. the refresh runs
+    # in a daemon thread and its answer is for *next* launch, which is why the
+    # very first run of a new install shows nothing here.
+    from ..helpers import update_check
+    newer = update_check.note()
+    if newer:
+        prompter.note(f"  {newer}", style="dim")
+    update_check.refresh_in_background()
+
     prompter.note("  Ctrl-C backs out at any point. Nothing is written until you say so.\n",
                   style="dim")
 

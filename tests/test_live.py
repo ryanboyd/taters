@@ -29,6 +29,7 @@ from prompt_toolkit.data_structures import Size  # noqa: E402
 from prompt_toolkit.input import create_pipe_input  # noqa: E402
 from prompt_toolkit.output.vt100 import Vt100_Output  # noqa: E402
 
+from taters.ui import glyphs  # noqa: E402
 from taters.ui.live import LivePrompter  # noqa: E402
 from taters.ui.prompts import Choice  # noqa: E402
 
@@ -84,12 +85,12 @@ def test_the_markers_differ_by_status_not_only_by_color():
     p.stage("c", "Todo", status="todo")
 
     text = "".join(chunk for _, chunk in p._rail_lines())
-    assert "✓ Done" in text
-    assert "▸ Active" in text
+    assert f"{glyphs.TICK} Done" in text
+    assert f"{glyphs.ACTIVE} Active" in text
     assert "○ Todo" in text
     # three distinct glyphs, so nothing hinges on the color.
-    assert len({"✓", "▸", "○"} & set(text)) == 3
-    assert "✓ Todo" not in text and "▸ Todo" not in text
+    assert len({glyphs.TICK, glyphs.ACTIVE, "○"} & set(text)) == 3
+    assert f"{glyphs.TICK} Todo" not in text and f"{glyphs.ACTIVE} Todo" not in text
 
 
 def test_an_unknown_status_falls_back_rather_than_raising():
@@ -112,12 +113,12 @@ def test_the_rail_is_drawn_above_the_question(staged):
         "Which features do you want to extract?",
         [Choice("a", "Dictionaries"), Choice("b", "Readability")],
     ))
-    for probe in ("✓ Source", "▸ Features", "○ Options"):
+    for probe in (f"{glyphs.TICK} Source", f"{glyphs.ACTIVE} Features", "○ Options"):
         assert probe in drawn, f"{probe!r} missing from the rendered frame"
     # one line, so it carries position and nothing else. the detail it used to
     # print alongside each stage now lives only on the screen that owns it.
     assert "./essays" not in drawn
-    rail = [ln for ln in drawn.split("\n") if "✓ Source" in ln]
+    rail = [ln for ln in drawn.split("\n") if f"{glyphs.TICK} Source" in ln]
     assert len(rail) == 1 and "○ Options" in rail[0], rail
 
 
@@ -149,7 +150,7 @@ def test_the_rail_is_gone_from_the_final_frame(staged):
     final = "? Which features do you want to extract?" + drawn.rsplit("? Which features do you want to extract?", 1)[-1]
 
     assert "Dictionaries" in final
-    assert "✓ Source" not in final
+    assert f"{glyphs.TICK} Source" not in final
     assert "[enter]" not in final
 
 
@@ -1105,7 +1106,7 @@ def test_a_stage_detail_no_longer_takes_room_on_the_rail():
                    "scores, Lexical richness, Dictionaries")
 
     text = "".join(chunk for _, chunk in p._rail_lines())
-    assert "✓ Features" in text
+    assert f"{glyphs.TICK} Features" in text
     assert "Readability" not in text
 
 
@@ -1126,7 +1127,7 @@ def test_the_reason_sits_between_the_rail_and_the_question(staged):
         [Choice("t", "One speaker"), Choice("d", "Several speakers")]))
 
     lines = [ln for ln in drawn.split("\n")]
-    rail = next(i for i, ln in enumerate(lines) if "✓ Source" in ln)
+    rail = next(i for i, ln in enumerate(lines) if f"{glyphs.TICK} Source" in ln)
     reason = next(i for i, ln in enumerate(lines) if "needs a transcript" in ln)
     question = next(i for i, ln in enumerate(lines)
                     if "How should Taters produce" in ln)
@@ -1189,8 +1190,8 @@ def test_going_back_a_stage_demotes_the_ones_after_it():
     p.stage("features", "Features", status="active")     # we backed up a step
 
     text = "".join(chunk for _, chunk in p._rail_lines())
-    assert text.count("▸") == 1, text
-    assert "▸ Features" in text and "○ Options" in text
+    assert text.count(glyphs.ACTIVE) == 1, text
+    assert f"{glyphs.ACTIVE} Features" in text and "○ Options" in text
 
 
 def test_a_later_stage_loses_its_detail_when_you_back_up_past_it():
@@ -1277,7 +1278,7 @@ def test_annotations_and_tones_reach_the_terminal_in_color(staged):
     buf = io.StringIO()
     out = Vt100_Output(buf, lambda: Size(rows=24, columns=90),
                        term="xterm-256color")
-    choices = [Choice("use", "✓ Use this folder", tone="good"),
+    choices = [Choice("use", f"{glyphs.TICK} Use this folder", tone="good"),
                Choice("f", "interviews/", annotation="4 files"),
                Choice("g", "notes/")]
     with create_pipe_input() as pipe:
@@ -1503,7 +1504,7 @@ def test_prechecked_rows_arrive_ticked_and_confirm_at_once():
     assert "[x] a" in screen and "[ ] b" in screen, (
         "the boxes are the visual language that says this is a tick screen"
     )
-    assert "✓ Done" in screen
+    assert f"{glyphs.TICK} Done" in screen
 
 
 def test_the_confirm_default_says_so_in_words():
