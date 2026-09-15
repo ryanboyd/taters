@@ -1,0 +1,109 @@
+# The union view: every category in one incidence.
+#
+# Format: one word or phrase per line; a TAB plus a Penn tag (TAG or
+# TAG|TAG) restricts an ambiguous single word to that use.
+# Provenance -- entries are grouped by where the item appears:
+#   [H&H]  Halliday & Hasan (1976), Cohesion in English, ch. 5.
+#   [PDTB] Prasad et al. (2008), PDTB 2.0 explicit connectives.
+#   [taters] curated here for the construct; in neither inventory.
+# The CATEGORY definitions follow Halliday & Hasan (1976) and the
+# Coh-Metrix taxonomy (Graesser, McNamara, Louwerse & Cai, 2004).
+# Written for taters; nothing here is copied from TAACO.
+
+# -- In Halliday & Hasan (1976, ch. 5):
+and
+but
+or
+nor
+so	IN|CC
+though
+however
+therefore
+hence
+consequently
+furthermore
+besides
+likewise
+similarly
+instead
+otherwise
+nevertheless
+meanwhile
+finally
+next	RB|IN
+then	RB
+first
+still	RB
+yet	CC
+in addition
+for instance
+in other words
+that is
+as a result
+on the other hand
+on the contrary
+at last
+at the same time
+in fact
+previously
+by contrast
+in the end
+
+# -- In the PDTB 2.0 explicit-connective inventory:
+because
+if
+although
+whereas
+unless
+until
+while	IN
+when	WRB
+after	IN
+before	IN
+since	IN
+once	IN
+thus
+accordingly
+moreover
+additionally
+also
+nonetheless
+afterwards
+afterward
+conversely
+as well
+for example
+so that
+in contrast
+as soon as
+earlier
+later
+thereafter
+indeed
+by comparison
+regardless
+in turn
+thereby
+plus
+now that
+simultaneously
+
+# -- taters curation (in neither inventory):
+whenever
+second
+third
+now	RB
+suddenly
+eventually
+despite
+again
+too	RB
+namely
+due to
+in order to
+rather than
+even though
+even if
+in the meantime
+first of all
+to begin with

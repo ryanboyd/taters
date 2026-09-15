@@ -14,19 +14,14 @@ changes between model versions and a test that pins transcript text would fail
 for no good reason.
 """
 
-import csv
 from pathlib import Path
 
 import pytest
 
 from taters import Taters
+from csvhelpers import read_rows
 
 pytestmark = [pytest.mark.slow, pytest.mark.needs_ffmpeg, pytest.mark.needs_media]
-
-
-def read_rows(path) -> list[dict]:
-    with Path(path).open(newline="", encoding="utf-8-sig") as f:
-        return list(csv.DictReader(f))
 
 
 @pytest.fixture(scope="module")
@@ -37,8 +32,9 @@ def diarization(real_audio_clip, tmp_path_factory):
     `scope="module"` matters here: diarization is the expensive step, and
     several tests want to look at its output.
     """
-    # Check the heavy dependencies up front so a machine without them reports a
-    # clean skip instead of a subprocess failure buried in a stack trace.
+    # first thing's first: check for the heavy dependencies, so that a machine
+    # without them gets a clean skip instead of a subprocess failure buried in a
+    # stack trace
     pytest.importorskip("faster_whisper", reason="diarization needs the whisper stack")
     pytest.importorskip("nemo", reason="install the extras: pip install 'taters[diarization]'")
 
@@ -46,7 +42,7 @@ def diarization(real_audio_clip, tmp_path_factory):
     return Taters().audio.diarize_with_thirdparty(
         audio_path=real_audio_clip,
         out_dir=out_dir,
-        whisper_model="tiny.en",     # smallest model that still produces sane turns
+        whisper_model="tiny.en",     # smallest model that still gives us sane turns
         language="en",
         device="auto",
         overwrite_existing=True,
@@ -75,7 +71,8 @@ def test_transcript_times_are_ordered_and_within_the_clip(diarization):
 
     assert starts == sorted(starts), "utterances are not in chronological order"
     assert all(e > s for s, e in zip(starts, ends)), "an utterance ends before it starts"
-    # Times are milliseconds; the clip is 30 s, allow a little slack at the tail.
+    # times are in milliseconds. the clip is 30 s, so we allow a little slack at
+    # the tail
     assert max(ends) <= 31_000
 
 
@@ -135,7 +132,7 @@ def test_whisper_embeddings_align_with_the_transcript(real_audio_clip, diarizati
     dims = [c for c in header if c.startswith("e") and c[1:].isdigit()]
     assert len(dims) >= 128, f"suspiciously small embedding: {len(dims)} dims"
 
-    # One row per transcript segment, and every vector fully populated.
+    # we want one row per transcript segment, and no holes in any vector
     assert len(rows) == len(read_rows(diarization.raw_files["csv"]))
     assert all(rows[0][d] not in ("", None) for d in dims)
 

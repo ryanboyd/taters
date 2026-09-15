@@ -4,8 +4,33 @@
 
 ```bash
 pip install -e ".[dev]"     # once: installs taters + pytest
-pytest                      # the whole fast suite, a few seconds
+pytest                      # the whole fast suite, about 3-4 minutes
 ```
+
+About 3,000 tests, of which all but a few dozen run by default. Most take milliseconds; the
+time goes on a handful of unavoidable imports (`torch` takes 13 seconds to
+import, `textstat` 7, `nltk` 6) and on the tests that run a whole pipeline end
+to end. Those imports are paid **once per process**, which is why running the
+files one at a time adds up to more than running them together.
+
+Anything that needs a real neural model — a Stanza pipeline, a Whisper
+transcription, a sentence-transformer — is marked `slow` and runs only when
+you ask for it. That is the whole reason the default suite is minutes rather
+than hours, and it is a real division rather than a way of hiding failures:
+`pytest -m slow` runs exactly those tests and nothing else.
+
+**If it takes much longer than ten minutes, something else on your machine is
+competing for the CPU.** The suite is almost entirely CPU-bound, so a build,
+another test run, or a video export happening at the same time can easily
+double or triple it. Check with `pgrep -af pytest` before concluding the suite
+itself got slower.
+
+A single test that runs for more than five minutes is treated as a hang, not as
+slowness: pytest prints the stack of every thread -- so you can see *which*
+test stopped and where -- and then aborts the run. That is deliberate, and it is
+there because a stalled run once sat silent for over an hour. The heavy tests
+can legitimately exceed it, so `pytest -m slow` runs should turn it off with
+`-o faulthandler_timeout=0`.
 
 If you want the `slow` tests too, install torch **before** Taters so
 sentence-transformers does not pull a CPU-only build over your CUDA one:
@@ -34,7 +59,8 @@ Useful variations:
 | `pytest -k speaker` | only tests whose name contains "speaker" |
 | `pytest tests/test_find_files.py` | one file |
 | `pytest tests/test_find_files.py::test_video_group_matches_only_video_extensions` | one test |
-| `pytest -m slow` | **only** the heavy tests (real media + models) |
+| `pytest -m slow -o faulthandler_timeout=0` | **only** the heavy tests (real media + models) |
+| `pytest --durations=20` | which twenty tests took longest |
 | `pytest -m ""` | absolutely everything |
 
 A dot is a pass, `F` is a failure, `s` is a skip, `E` is an error while setting
@@ -96,6 +122,11 @@ Fixtures available everywhere (defined in `conftest.py`):
 | `tiny_video_two_audio_streams` | a 2-second video with two tagged audio tracks |
 | `transcript_csv` | a diarization-shaped `start_time,end_time,speaker,text` CSV |
 | `analysis_ready_csv` | a `text_id,text` CSV |
+| `study_csv` | a study spreadsheet: `pid,condition,openness,text` (the wizard's analysis stage) |
+| `survey_csv` | a two-row spreadsheet with a `response` text column and a `condition` |
+| `essays` | a folder of three `.txt` documents |
+| `media` | a folder with one tiny video, for a wizard run over media (needs ffmpeg) |
+| `stanza_ready` | the Stanza English model, downloaded once per session (slow tests) |
 | `real_audio_clip` | 30 seconds of real audio from `./test_vids` (slow tests) |
 
 Mark anything heavy so it stays out of the default run:
@@ -109,6 +140,25 @@ def test_the_expensive_thing(real_audio_clip):
 
 Markers must be registered in `pyproject.toml` — `--strict-markers` turns a
 typo into an error rather than a silently ignored decoration.
+
+## Shared helpers
+
+Plain modules next to the tests, imported by name (the tests folder is on
+`sys.path`):
+
+| module | what it holds |
+|---|---|
+| `csvhelpers.py` | `read_rows`, `write_rows`, `write_table` — the CSV round trip every results test needs. The old names `_read`, `_write`, `_write_table` are aliases. |
+| `wizard_helpers.py` | `browse_to`, `run`, `EscapingPrompter`, the tuning drivers and the `clean_machine` fixture that makes the wizard's question count independent of what is installed. Import `clean_machine` into a wizard test module to activate it. |
+| `preset_checks.py` | static checks over a composed pipeline; `assert_valid_preset(preset)` fails naming every problem. |
+| `mutcheck.py` | not a test: `python tests/mutcheck.py <src> <tests> <old> <new>` breaks the code the way named and reports whether the tests notice. Every behavior change ships with a test this has said CATCHES IT about. |
+| `e2e_wizard.py` | not a test: `python tests/e2e_wizard.py [--media clip.mkv] [--flows A F] [--keep]` answers the wizard the way a person would, runs what it composed with the real analyzers, re-runs it from the command line, and scores a second study with the model it fitted. Minutes, not seconds; run it before a release. It found five gaps the unit tests had missed. |
+
+The wizard tests are split by stage: `test_wizard_flow.py` (start to finish,
+preflight, saving, running), `test_wizard_sources.py` (folders, spreadsheets,
+the level question), `test_wizard_options.py` (the options screen and Esc
+inside it) and `test_wizard_analysis.py` (the analysis stage, the two
+extraction flows, and Esc meaning the previous question everywhere).
 
 ## About `./test_vids`
 

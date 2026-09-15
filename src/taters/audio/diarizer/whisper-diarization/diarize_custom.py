@@ -10,15 +10,12 @@ Custom diarization runner:
 
 import argparse
 import csv
-import json
 import logging
 import os
 import re
-import shutil
-import subprocess
 import inspect
 from pathlib import Path
-from typing import Dict, List, Iterable
+from typing import Dict, Iterable
 
 import faster_whisper
 import torch

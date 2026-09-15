@@ -1,0 +1,44 @@
+# Subordinating conjunctions introducing a dependent clause. Without a
+# dependency parse, prepositional homographs (after/before/until/since)
+# count whenever tagged IN -- a documented approximation.
+#
+# Format: one word or phrase per line; a TAB plus a Penn tag (TAG or
+# TAG|TAG) restricts an ambiguous single word to that use.
+# Provenance -- entries are grouped by where the item appears:
+#   [H&H]  Halliday & Hasan (1976), Cohesion in English, ch. 5.
+#   [PDTB] Prasad et al. (2008), PDTB 2.0 explicit connectives.
+#   [taters] curated here for the construct; in neither inventory.
+# The CATEGORY definitions follow Halliday & Hasan (1976) and the
+# Coh-Metrix taxonomy (Graesser, McNamara, Louwerse & Cai, 2004).
+# Written for taters; nothing here is copied from TAACO.
+
+# -- In Halliday & Hasan (1976, ch. 5):
+though
+
+# -- In the PDTB 2.0 explicit-connective inventory:
+although
+because
+if
+once	IN
+since	IN
+unless
+until
+whereas
+while	IN
+after	IN
+before	IN
+when	WRB
+so that
+as long as
+as soon as
+now that
+insofar as
+lest
+
+# -- taters curation (in neither inventory):
+whenever
+wherever
+provided that
+even though
+even if
+in case

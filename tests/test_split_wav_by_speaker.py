@@ -88,14 +88,14 @@ def test_durations_match_the_transcript_spans(tiny_wav, tmp_path):
         source_wav=tiny_wav, transcript_csv_path=transcript,
         output_dir=tmp_path / "split", silence_ms=0,
     )
-    assert seconds(out["A"]) == pytest.approx(2.0, abs=0.05)   # two 1s turns
+    assert seconds(out["A"]) == pytest.approx(2.0, abs=0.05)   # two 1 s turns
     assert seconds(out["B"]) == pytest.approx(1.0, abs=0.05)
 
 
 def test_speaker_with_no_usable_segments_produces_no_file(tiny_wav, tmp_path):
     transcript = write_transcript(tmp_path / "t.csv", [
         (0, 1000, "A"),
-        (500, 500, "B"),        # zero-length: skipped entirely
+        (500, 500, "B"),        # zero-length, so we skip it entirely
     ])
     out = make_speaker_wavs_from_csv(
         source_wav=tiny_wav, transcript_csv_path=transcript,
@@ -131,7 +131,7 @@ def test_merging_can_be_turned_off(tiny_wav, tmp_path):
         source_wav=tiny_wav, transcript_csv_path=transcript,
         output_dir=tmp_path / "split", silence_ms=0, merge_consecutive=False,
     )
-    # Only the two spoken seconds, with the silent gap dropped.
+    # just the two spoken seconds, the silent gap in between gets dropped
     assert seconds(out["A"]) == pytest.approx(2.0, abs=0.05)
 
 
@@ -145,7 +145,7 @@ def test_turns_interrupted_by_another_speaker_are_not_merged(tiny_wav, tmp_path)
         source_wav=tiny_wav, transcript_csv_path=transcript,
         output_dir=tmp_path / "split", silence_ms=0,
     )
-    assert seconds(out["A"]) == pytest.approx(2.0, abs=0.05)   # not 3.0
+    assert seconds(out["A"]) == pytest.approx(2.0, abs=0.05)   # not 3.0!
 
 
 # --- padding ----------------------------------------------------------------
@@ -160,7 +160,7 @@ def test_silence_ms_pads_both_sides_of_every_clip(tiny_wav, tmp_path):
         source_wav=tiny_wav, transcript_csv_path=transcript,
         output_dir=tmp_path / "split", silence_ms=500,
     )
-    # A has two clips, each padded with 0.5 s before and after: 2 + 4*0.5
+    # A has two clips, each padded by 0.5 s on both sides, so 2 + 4*0.5
     assert seconds(out["A"]) == pytest.approx(4.0, abs=0.05)
 
 
@@ -206,7 +206,7 @@ def test_times_past_the_end_of_the_audio_are_clamped(tiny_wav, tmp_path):
 
 def test_backwards_intervals_are_skipped(tiny_wav, tmp_path):
     transcript = write_transcript(tmp_path / "t.csv", [
-        (2000, 1000, "A"),      # end before start
+        (2000, 1000, "A"),      # ends before it starts
         (0, 1000, "B"),
     ])
     out = make_speaker_wavs_from_csv(
@@ -232,7 +232,7 @@ def test_unparseable_rows_are_skipped_not_fatal(tiny_wav, tmp_path):
 
 def test_min_dur_ms_drops_very_short_segments(tiny_wav, tmp_path):
     transcript = write_transcript(tmp_path / "t.csv", [
-        (0, 30, "A"),           # 30 ms, below the threshold
+        (0, 30, "A"),           # 30 ms, under the threshold
         (1000, 2000, "B"),
     ])
     out = make_speaker_wavs_from_csv(

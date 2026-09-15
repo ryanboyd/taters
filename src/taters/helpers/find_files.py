@@ -1,6 +1,7 @@
 # taters/helpers/find_files.py
 from __future__ import annotations
-import os, subprocess
+import os
+import subprocess
 from pathlib import Path
 from typing import Iterable, Sequence, List, Optional, Set
 
@@ -68,7 +69,7 @@ def _iter_files(
         for dirpath, dirnames, filenames in os.walk(root, followlinks=follow_symlinks):
             dpath = Path(dirpath)
             if not include_hidden:
-                # prune hidden directories
+                # prune the hidden directories so we don't wander into them
                 dirnames[:] = [d for d in dirnames if not d.startswith(".")]
             for fn in filenames:
                 if not include_hidden and fn.startswith("."):
@@ -79,7 +80,7 @@ def _glob_filter(paths: Iterable[Path], includes: Sequence[str], excludes: Seque
     if not includes and not excludes:
         yield from paths
         return
-    # include first (logical OR), then exclude
+    # includes first (any one matching is enough), then we apply the excludes
     for p in paths:
         inc_ok = True if not includes else any(p.match(gl) for gl in includes)
         if not inc_ok:

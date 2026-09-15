@@ -53,7 +53,7 @@ def render(value, *, item=None, globals_=None, vars_=None, input_path="/in/file.
         ("num_speakers=None", {"num_speakers": None}),
         ("workers=8", {"workers": 8}),
         ("threshold=0.72", {"threshold": 0.72}),
-        ("model=base.en", {"model": "base.en"}),      # dotted string, not a float
+        ("model=base.en", {"model": "base.en"}),      # a dotted string, not a float
         ("path=C:/data/x", {"path": "C:/data/x"}),
         ("empty=", {"empty": ""}),
     ],
@@ -110,7 +110,7 @@ def test_json_safe_leaves_primitives_alone():
 
 
 # ---------------------------------------------------------------------------
-# Templating
+# templating
 # ---------------------------------------------------------------------------
 
 def test_input_and_cwd_literals():
@@ -203,7 +203,7 @@ def test_non_string_scalars_pass_through_untouched():
 
 
 # ---------------------------------------------------------------------------
-# Input discovery
+# input discovery
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
@@ -239,7 +239,7 @@ def test_discover_inputs_missing_root_raises(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Call resolution
+# call resolution
 # ---------------------------------------------------------------------------
 
 def test_resolve_call_finds_a_facade_method():
@@ -269,7 +269,7 @@ def test_resolve_call_rejects_a_non_callable_target():
 
 
 # ---------------------------------------------------------------------------
-# Preset resolution
+# preset resolution
 # ---------------------------------------------------------------------------
 
 def test_builtin_preset_is_found_by_name():
@@ -305,7 +305,7 @@ def test_unknown_preset_error_lists_what_is_available():
         resolve_preset_path("not_a_real_preset")
     message = str(excinfo.value)
     assert "not_a_real_preset" in message
-    assert "conversation_video" in message      # tells you what you could use
+    assert "conversation_video" in message      # tells you what you could've used
 
 
 def test_preset_meta_defaults_are_filled_in(sandbox):
@@ -316,7 +316,7 @@ def test_preset_meta_defaults_are_filled_in(sandbox):
 
 
 # ---------------------------------------------------------------------------
-# Step execution and error isolation
+# step execution and error isolation
 # ---------------------------------------------------------------------------
 
 def test_item_step_runs_and_saves_its_artifact(tmp_path):
@@ -402,5 +402,6 @@ def test_global_step_cannot_see_item_artifacts(tmp_path):
         step=step, potato=Taters(), globals_ctx={}, vars_ctx={},
         manifest_path=tmp_path / "manifest.json",
     )
-    # Unresolved names stay verbatim rather than leaking another item's value.
+    # names we can't resolve stay exactly as written, rather than leaking some
+    # other item's value
     assert status == "ok"

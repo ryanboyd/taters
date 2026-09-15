@@ -10,59 +10,21 @@ preset that still passes the old name fails here immediately.
 """
 
 import inspect
-import re
 from pathlib import Path
 
 import pytest
 import yaml
 
-from taters import Taters
-from taters.pipelines.run_pipeline import _get_preset_dirs, resolve_call
+# the actual checks live over in `preset_checks.py`, so that `test_compose.py`
+# can run the very same validation over the presets the wizard builds
+from preset_checks import check_artifact_references, underlying
 
 BUILTIN_PRESETS = sorted((Path(__file__).parent.parent / "src" / "taters" /
                           "pipelines" / "presets").glob("*.yaml"))
 
-# Expressions the runner resolves without any artifact existing.
-SPECIAL_NAMES = {"input", "cwd", "run_manifest"}
-TEMPLATE_RE = re.compile(r"\{\{([^}]+)\}\}")
-
 
 def load(path: Path) -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-
-
-def underlying(call: str):
-    """
-    The real function a `call:` points at.
-
-    `potato.*` targets go through the facade, which forwards with **kwargs — so
-    to check parameter names we have to look at what it forwards *to*.
-    """
-    import importlib
-    if not call.startswith("potato."):
-        return resolve_call(call, Taters())
-    namespace, method = call.split(".")[1:3]
-    src = inspect.getsource(getattr(type(getattr(Taters(), namespace)), method))
-    rel, name = re.search(r"from (\S+) import (\w+)", src).groups()
-    try:
-        module = importlib.import_module("taters" + rel)
-    except ImportError as exc:
-        pytest.skip(f"{call} needs an optional dependency: {exc}")
-    return getattr(module, name)
-
-
-def templates_in(value) -> list[str]:
-    """Every {{expression}} appearing anywhere inside a nested structure."""
-    found: list[str] = []
-    if isinstance(value, dict):
-        for v in value.values():
-            found += templates_in(v)
-    elif isinstance(value, (list, tuple)):
-        for v in value:
-            found += templates_in(v)
-    elif isinstance(value, str):
-        found += [m.strip() for m in TEMPLATE_RE.findall(value)]
-    return found
 
 
 def pytest_generate_tests(metafunc):
@@ -121,36 +83,7 @@ def test_every_artifact_reference_resolves(preset_path):
     `{{pick:diar.csv}}` when the artifact is really `diar.raw_files.csv`, and
     global steps reaching for item-scoped artifacts (which they cannot see).
     """
-    data = load(preset_path)
-    known_vars = set(data.get("vars", {}) or {})
-    item_artifacts: set[str] = set()
-    global_artifacts: set[str] = set()
-
-    problems: list[str] = []
-    for i, step in enumerate(data.get("steps", []) or [], start=1):
-        scope = step.get("scope", "item")
-        visible = (item_artifacts | global_artifacts) if scope == "item" else set(global_artifacts)
-
-        for expr in templates_in(step.get("with", {})):
-            if expr in SPECIAL_NAMES:
-                continue
-            if expr.startswith("var:"):
-                name = expr.split(":", 1)[1]
-                if name not in known_vars:
-                    problems.append(f"step {i}: undefined variable {{{{var:{name}}}}}")
-                continue
-            if expr.startswith("global."):
-                continue
-            name = expr.split(":", 1)[1].split(".")[0] if expr.startswith("pick:") else expr.split(".")[0]
-            if name not in visible:
-                problems.append(
-                    f"step {i} ({scope}): references '{name}', which is not a "
-                    f"{'prior' if scope == 'item' else 'prior global'} artifact"
-                )
-
-        if "save_as" in step:
-            (item_artifacts if scope == "item" else global_artifacts).add(step["save_as"])
-
+    problems = check_artifact_references(load(preset_path))
     assert not problems, "\n".join(problems)
 
 
@@ -184,3 +117,59 @@ def test_required_parameters_are_actually_supplied(preset_path, step_number, ste
 
 def test_step_engine_is_recognized(preset_path, step_number, step):
     assert step.get("engine", "thread") in {"thread", "process"}
+
+
+# ---------------------------------------------------------------------------
+# aggregations that can't actually aggregate
+# ---------------------------------------------------------------------------
+
+def test_no_preset_aggregates_by_a_key_that_is_unique_per_row(preset_path):
+    """
+    Both shipped presets used to group row-level sentence embeddings by
+    ``["text_id", "source", "speaker"]``. `text_id` is unique per utterance, so
+    every group had one member and the step emitted a copy of its input. The
+    failure is invisible in the output -- right columns, real numbers -- which
+    is what makes a static check worth having.
+    """
+    from preset_checks import check_aggregations
+
+    problems = check_aggregations(load(preset_path))
+    assert not problems, "\n".join(problems)
+
+
+# ---------------------------------------------------------------------------
+# concurrency limits on GPU steps
+# ---------------------------------------------------------------------------
+
+def test_a_gpu_step_carries_a_ceiling(preset_path):
+    """
+    A per-file step that hands `device` to a model must say how many copies of
+    that model the GPU can be asked to hold. Without a ceiling, `--workers 8`
+    means eight -- which is fine on `tiny` and an out-of-memory error on
+    `large-v3`, halfway through a batch.
+
+    The runner guesses 1 for an undeclared step, so this is not a correctness
+    hole. But a shipped preset should not be relying on the guess: the guess
+    exists for presets written by hand.
+    """
+    data = load(preset_path)
+    for i, step in enumerate(data.get("steps") or [], 1):
+        if step.get("scope", "item") != "item":
+            continue
+        params = step.get("with") or {}
+        if not any(isinstance(v, str) and "{{var:device}}" in v
+                   for v in params.values()):
+            continue
+        assert "max_workers" in step or "workers" in step, (
+            f"step {i} ({step['call']}) puts a model on the GPU for every file "
+            f"but names no worker limit"
+        )
+
+
+def test_no_preset_names_an_impossible_worker_count(preset_path):
+    from preset_checks import check_step
+
+    for i, step in enumerate(load(preset_path).get("steps") or [], 1):
+        problems = [p for p in check_step(step, i)
+                    if "workers" in p or "max_workers" in p]
+        assert not problems, "\n".join(problems)

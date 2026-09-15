@@ -1,6 +1,6 @@
 """Tests for taters.helpers.feature_gather.
 
-This is the last step of most pipelines — it decides what your modelling table
+This is the last step of most pipelines — it decides what your modeling table
 actually contains — so the interesting cases are the ones where data could go
 missing without anyone noticing: column-name collisions, non-numeric columns,
 grouping keys that exist in both the filename and the file.
@@ -20,6 +20,7 @@ from taters.helpers.feature_gather import (  # noqa: E402
     gather_csvs_to_one,
     make_plan,
 )
+from csvhelpers import read_rows  # noqa: E402
 
 
 def write_csv(path: Path, rows: list[dict]) -> Path:
@@ -47,11 +48,6 @@ def features_dir(tmp_path) -> Path:
     return root
 
 
-def read_rows(path) -> list[dict]:
-    with Path(path).open(newline="", encoding="utf-8-sig") as f:
-        return list(csv.DictReader(f))
-
-
 # ---------------------------------------------------------------------------
 # gather_csvs_to_one — plain concatenation
 # ---------------------------------------------------------------------------
@@ -61,7 +57,7 @@ def test_gather_stacks_every_row_and_labels_its_origin(features_dir, tmp_path):
     rows = read_rows(out)
 
     assert len(rows) == 5
-    assert list(rows[0])[0] == "source"            # origin column leads
+    assert list(rows[0])[0] == "source"            # the origin column comes first
     assert {r["source"] for r in rows} == {"session_a", "session_b"}
     assert sum(1 for r in rows if r["source"] == "session_a") == 3
 
@@ -86,8 +82,8 @@ def test_gather_does_not_clobber_an_existing_source_column(tmp_path):
     out = gather_csvs_to_one(root_dir=root, out_csv=tmp_path / "all.csv")
     row = read_rows(out)[0]
 
-    assert row["source"] == "file_one"            # injected file stem
-    assert row["source.1"] == "original_value"    # original data preserved
+    assert row["source"] == "file_one"            # the file stem we injected
+    assert row["source.1"] == "original_value"    # and the original data survives
 
 
 def test_gather_accepts_a_single_file_as_root(features_dir, tmp_path):
@@ -150,7 +146,7 @@ def test_aggregate_per_file_groups_within_each_source(features_dir, tmp_path):
     out = aggregate_features(root_dir=features_dir, plan=plan, out_csv=tmp_path / "agg.csv")
     rows = read_rows(out)
 
-    # 2 files x 2 speakers
+    # 2 files x 2 speakers = 4 rows
     assert len(rows) == 4
     assert list(rows[0])[:2] == ["source", "speaker"]
 
@@ -317,3 +313,23 @@ def test_make_plan_defaults():
     assert plan.per_file is True
     assert plan.stats == ("mean", "std")
     assert plan.dropna is False
+
+
+def test_the_gather_reports_a_tick_per_table_and_writes_atomically(features_dir, tmp_path):
+    """
+    The gathers were the one family member without `on_progress` (a large
+    embeddings folder took a minute under a bare spinner) and without
+    `atomic_write` -- their outputs are skip-if-exists, so a Ctrl-C mid-write
+    left a truncated table the next run returned as finished.
+    """
+    from taters.helpers.atomic import SCRATCH_SUFFIX
+    from taters.helpers.feature_gather import gather_csvs_to_one
+
+    seen = []
+    out = gather_csvs_to_one(root_dir=features_dir, out_csv=tmp_path / "all.csv",
+                             verbose=False, on_progress=lambda *a: seen.append(a))
+    n_files = len(list(Path(features_dir).rglob("*.csv")))
+    ticks = [a for a in seen if a[2] == "reading feature tables" and a[0]]
+    assert ticks and ticks[-1][0] == n_files == ticks[-1][1]
+    assert not list(tmp_path.glob(f"*{SCRATCH_SUFFIX}*"))
+    assert Path(out).is_file()

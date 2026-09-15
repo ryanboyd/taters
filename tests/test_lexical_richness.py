@@ -39,7 +39,7 @@ from taters.text.analyze_lexical_richness import (
     yule_k,
 )
 
-# 3 tokens, 2 types: the smallest input where most formulas are defined.
+# 3 tokens, 2 types: about the smallest input where most of the formulas are defined.
 ABA = ["a", "b", "a"]
 
 ALL_METRICS = [ttr, rttr, cttr, herdan_c, summer_s, dugast, maas,
@@ -49,8 +49,9 @@ ALL_METRICS = [ttr, rttr, cttr, herdan_c, summer_s, dugast, maas,
 # --- tokenization -----------------------------------------------------------
 
 def test_preprocess_lowercases_and_replaces_digits_and_punctuation():
-    # Punctuation becomes whitespace rather than vanishing, so "cat,dog" splits
-    # into two tokens instead of fusing into "catdog". Digits are deleted.
+    # punctuation turns into whitespace rather than vanishing, so "cat,dog"
+    # splits into two tokens instead of fusing into "catdog". digits just get
+    # deleted.
     assert _preprocess("Hello, World! 42 times.") == "hello  world   times "
     assert _tokenize("cat,dog") == ["cat", "dog"]
 
@@ -134,11 +135,11 @@ def test_metrics_return_none_for_empty_input(metric):
 
 @pytest.mark.parametrize("metric", ALL_METRICS, ids=lambda f: f.__name__)
 def test_metrics_never_raise_on_a_single_token(metric):
-    metric(["a"])       # may return None; must not raise
+    metric(["a"])       # None is fine here; raising is not
 
 
 def test_dugast_is_undefined_when_every_token_is_unique():
-    # W == T means a division by zero in the formula, so it must bail out.
+    # W == T means a division by zero in the formula, so it has to bail out.
     assert dugast(["a", "b", "c"]) is None
 
 
@@ -219,7 +220,8 @@ def test_hdd_requires_at_least_as_many_tokens_as_draws():
 
 
 def test_hdd_hand_computed_for_all_unique_tokens():
-    # Every type appears once, so P(missing a given type in n draws) = C(N-1,n)/C(N,n).
+    # every type shows up once, so
+    # P(missing a given type in n draws) = C(N-1,n)/C(N,n).
     tokens = [f"w{i}" for i in range(10)]
     n, N = 5, 10
     expected = 10 * (1 - comb(N - 1, n) / comb(N, n)) / n

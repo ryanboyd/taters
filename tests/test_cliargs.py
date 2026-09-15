@@ -17,8 +17,8 @@ import pytest
 from taters.helpers.cliargs import add_bool_argument, str2bool
 
 
-# `parametrize` runs the same test body once per case, and reports each one
-# separately — so a failure tells you *which* input broke rather than just
+# `parametrize` runs the same test body once per case and reports each one
+# separately, so a failure tells us *which* input broke rather than just
 # "the loop failed somewhere".
 @pytest.mark.parametrize(
     "text",
@@ -47,8 +47,8 @@ def test_str2bool_tolerates_surrounding_whitespace():
 
 @pytest.mark.parametrize("text", ["maybe", "", "2", "yeah", "none", "file.mp4"])
 def test_str2bool_rejects_anything_ambiguous(text):
-    # The point of this function is to fail loudly. Silently reading "maybe"
-    # as False is how someone loses an overnight run.
+    # the whole point of this function is to fail loudly. silently reading
+    # "maybe" as False is how somebody loses an overnight run.
     with pytest.raises(argparse.ArgumentTypeError):
         str2bool(text)
 
@@ -90,7 +90,7 @@ class TestAddBoolArgument:
         assert ns.sr == 48000
 
     def test_junk_value_exits_with_an_error(self):
-        # argparse calls sys.exit() on a bad argument, which raises SystemExit.
+        # argparse calls sys.exit() on a bad argument, so we catch SystemExit.
         with pytest.raises(SystemExit):
             self._parser().parse_args(["--overwrite_existing", "banana"])
 

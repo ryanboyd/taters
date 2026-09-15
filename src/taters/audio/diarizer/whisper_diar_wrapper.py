@@ -8,26 +8,27 @@ from typing import Dict, Optional
 from importlib.resources import files, as_file
 from contextlib import ExitStack
 
+from ...helpers.gpu import resolve_device
 from ...helpers.proc import run_and_stream
+from ...helpers.cliargs import CliSpec
 
 def _resolve_vendored_repo_dir() -> Path:
-    # This returns a Traversable pointing at the directory inside your wheel.
+    # this gives us a Traversable pointing at the directory inside the wheel
     return files("taters.audio.diarizer").joinpath("whisper-diarization")
 
 def _resolve_device(device: Optional[str]) -> str:
     """
-    Resolve device selection:
-      - "auto" or None -> "cuda" if torch.cuda.is_available() else "cpu"
-      - "cuda"/"cpu"   -> returned as-is
-    We import torch only here to avoid importing it unnecessarily elsewhere.
+    Resolve device selection through the shared rules.
+
+    ``backend="torch"`` because that is what the vendored diarizer runs on --
+    NeMo, Demucs and the aligner are all torch. This is the one place where
+    asking torch rather than CTranslate2 is correct, and getting it wrong in
+    either direction is how a run comes to believe in a GPU it cannot use.
+
+    No probe: the work happens in a subprocess, so there is nothing here to run
+    one inference on, and a failure surfaces as that subprocess's exit.
     """
-    if device is None or str(device).lower() in {"", "auto"}:
-        try:
-            import torch  # noqa
-            return "cuda" if torch.cuda.is_available() else "cpu"
-        except Exception:
-            return "cpu"
-    return str(device).lower()
+    return resolve_device(device, backend="torch")[0]
 
 
 
@@ -85,20 +86,23 @@ def _run_repo_script(
 
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    # Prepare environment (ensure CPU really hides GPUs; on CUDA add pip cuDNN path)
+    # set up the child's environment: on CPU we make sure the GPUs are really
+    # hidden; on CUDA we add the pip cuDNN path
     env = os.environ.copy()
     if (device or "").lower() == "cpu":
         env.update({"CUDA_VISIBLE_DEVICES": "", "USE_CUDA": "0", "FORCE_CPU": "1"})
     else:
         try:
-            import nvidia.cudnn, pathlib
+            import pathlib
+
+            import nvidia.cudnn
             cudnn_lib = str(pathlib.Path(nvidia.cudnn.__file__).with_name("lib"))
             env["LD_LIBRARY_PATH"] = cudnn_lib + ":" + env.get("LD_LIBRARY_PATH", "")
         except Exception:
             pass
 
-    # Stream the child's output live (prefixed so concurrent items stay readable)
-    # while keeping the tail around for the error message if it fails.
+    # we stream the child's output live (prefixed, so concurrent items stay
+    # readable) and hang onto the tail for the error message if it fails.
     returncode, tail = run_and_stream(
         cmd,
         cwd=work_dir,
@@ -125,7 +129,7 @@ def _guess_outputs_from_stem(work_dir: Path, stem: str) -> Dict[str, Path]:
 def _cleanup_temps(work_dir: Path, keep_temp: bool) -> None:
     if keep_temp:
         return
-    # diarize.py & demucs write under CWD (we run with cwd=work_dir)
+    # diarize.py & demucs write under the CWD (and we run with cwd=work_dir)
     for d in work_dir.glob("temp_outputs*"):
         try:
             shutil.rmtree(d, ignore_errors=True)
@@ -164,7 +168,7 @@ def run_whisper_diarization_repo(
     repo_dir : str | Path | None
         Optional explicit location of the diarization repo. If None, the
         vendored copy is used.
-    whisper_model : str, default "medium.en"
+    whisper_model : str, default "base.en"
         Whisper ASR model to use (e.g., "small", "base", "large-v3").
     language : str | None
         Language hint for Whisper (e.g., "en"); if None, autodetection is used.
@@ -191,6 +195,9 @@ def run_whisper_diarization_repo(
         ``[diarize:<stem>]``. Set False for quiet runs; failures still report
         the tail of the child's output either way.
 
+    overwrite_existing : bool, default=False
+        If ``False`` and the output already exists, skip the work and return
+        the existing path.
     Returns
     -------
     DiarizationOutputFiles
@@ -211,22 +218,23 @@ def run_whisper_diarization_repo(
     """
 
 
-    # Decide device if user passed "auto" (or None)
+    # first thing's first: pick a device if the user said "auto" (or nothing)
     resolved_device = _resolve_device(device)
-    print(f"Resolved device for whisper extraction: {resolved_device}")
+    if verbose:
+        print(f"Resolved device for whisper extraction: {resolved_device}")
 
     audio_path = Path(audio_path).resolve()
-    # default transcripts folder next to current working dir
+    # default transcripts folder lives under the current working dir
     out_dir = Path(out_dir).resolve() if out_dir is not None else (Path.cwd() / "transcripts")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Isolated working folder
+    # each file gets its own working folder so runs don't step on each other
     work_dir = out_dir / f"{audio_path.stem}"
     work_dir.mkdir(parents=True, exist_ok=True)
 
     local_audio = work_dir / audio_path.name
     
-    # CSV default: <work_dir>/<stem>.csv
+    # the CSV lands at <work_dir>/<stem>.csv by default
     csv_path = work_dir / f"{local_audio.stem}.csv"
     if not overwrite_existing and Path(csv_path).is_file():
         print("Diarized transcript output file already exists; returning existing file.")
@@ -234,26 +242,27 @@ def run_whisper_diarization_repo(
         return DiarizationOutputFiles(work_dir=work_dir, raw_files=raw, speaker_wavs={})
 
     
-    # Copy input audio next to outputs so the CLI can use simple relative paths
+    # copy the input audio in next to the outputs so the CLI can get by with
+    # simple relative paths
     if not local_audio.exists():
         shutil.copy2(audio_path, local_audio)
 
-    # Resolve path to vendored repo (or use user-supplied path)
+    # find the vendored repo (unless the user pointed us at their own)
     with ExitStack() as stack:
         if repo_dir is None:
             repo_trav = _resolve_vendored_repo_dir()
-            repo_dir_path = stack.enter_context(as_file(repo_trav))  # real FS path
+            repo_dir_path = stack.enter_context(as_file(repo_trav))  # a real FS path
         else:
             repo_dir_path = Path(repo_dir).resolve()
 
-        # Validate the script exists inside the repo
+        # make sure the script we want is actually in there
         script_name = ("diarize_custom.py" if (use_custom and (repo_dir_path / "diarize_custom.py").exists())
                        else ("diarize_parallel.py" if parallel else "diarize.py"))
         script_path = (repo_dir_path / script_name)
         if not script_path.exists():
             raise FileNotFoundError(f"Expected script not found: {script_path}")
 
-        # Run the repo script (cwd = work_dir so temp_outputs land there)
+        # now we run the repo script (cwd = work_dir so temp_outputs land there)
         _run_repo_script(
             repo_dir=repo_dir_path,
             audio_path=local_audio,
@@ -272,13 +281,13 @@ def run_whisper_diarization_repo(
             verbose=verbose,
         )
 
-    # Tidy temp dirs
+    # tidy up the temp dirs
     _cleanup_temps(work_dir, keep_temp)
 
-    # Collect outputs (.txt/.srt/.csv)
+    # round up the outputs (.txt/.srt/.csv)
     raw = _guess_outputs_from_stem(work_dir, local_audio.stem)
 
-    # Remove the copied WAV now that we're done
+    # lastly, get rid of our copy of the WAV now that we're done with it
     try:
         if local_audio.exists():
             local_audio.unlink()
@@ -289,81 +298,27 @@ def run_whisper_diarization_repo(
 
 # ---------------- CLI: allow `python -m taters.audio.diarizer.whisper_diar_wrapper` -----
 
-def _build_arg_parser():
-    import argparse
-    from ...helpers.cliargs import add_bool_argument
-    p = argparse.ArgumentParser(
-        description="Taters wrapper for MahmoudAshraf97/whisper-diarization"
-    )
-    # required I/O
-    p.add_argument("--audio_path", required=True, help="Path to input audio (e.g., WAV)")
-    p.add_argument("--out_dir", default=None, help="Directory to write outputs (work_dir/<stem>/...) "
-                                                   "Default: ./transcripts under current working dir")
 
-    add_bool_argument(p, "--overwrite_existing", default=False,
-                      help="Do you want to overwrite the output file if it already exists?")
+# ---------------------------------------------------------------------------
+# Command line -- derived from the function(s) above; see helpers.cliargs.CliSpec.
+# The aliases and legacy flags are the spellings the hand-written parser used,
+# kept so every documented invocation still works.
+# ---------------------------------------------------------------------------
 
-    # optional repo dir (omit to use vendored copy)
-    p.add_argument("--repo_dir", default=None, help="Path to whisper-diarization repo; omit to use vendored")
-
-    # diarization controls
-    p.add_argument("--whisper_model", default="medium.en", help="Faster-Whisper model name (e.g., base, medium.en)")
-    p.add_argument("--language", default=None, help="Force language (e.g., en). Leave empty to auto-detect")
-    p.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"],
-                   help='Device: "auto" (default) picks CUDA if available else CPU')
-    p.add_argument("--batch_size", type=int, default=0, help="Whisper batch size (0 = non-batched)")
-
-    p.add_argument("--no_stem", action="store_true", help="Disable source separation (no Demucs stem)")
-    p.add_argument("--suppress_numerals", action="store_true", help="Suppress numerals in transcript")
-    p.add_argument("--parallel", action="store_true", help="Use diarize_parallel.py if available")
-    p.add_argument("--timeout", type=int, default=None, help="Kill run after N seconds")
-
-    p.add_argument("--use_custom", action="store_true", default=True,
-                   help="Use diarize_custom.py if present (default ON)")
-    p.add_argument("--no-custom", dest="use_custom", action="store_false",
-                   help="Force upstream script (diarize.py/diarize_parallel.py)")
-
-    p.add_argument("--keep_temp", action="store_true", help="Keep temp_outputs* folders")
-    p.add_argument("--num_speakers", type=int, default=None, help="Optional speaker count hint")
-    p.add_argument("--quiet", dest="verbose", action="store_false", default=True,
-                   help="Do not echo the diarization subprocess output while it runs")
-
-    return p
+CLI = CliSpec(
+    run_whisper_diarization_repo,
+    description='Speaker diarization through the vendored whisper-diarization scripts.',
+    aliases={},
+    legacy={
+        '--no-custom': ['--use-custom', 'false'],
+        '--quiet': ['--verbose', 'false'],
+    },
+)
 
 
-def main():
-    import sys
-    args = _build_arg_parser().parse_args()
-
-    outs = run_whisper_diarization_repo(
-        audio_path=args.audio_path,
-        out_dir=args.out_dir,
-        overwrite_existing=args.overwrite_existing,
-        repo_dir=args.repo_dir,
-        whisper_model=args.whisper_model,
-        language=args.language,
-        device=args.device,
-        batch_size=args.batch_size,
-        no_stem=args.no_stem,
-        suppress_numerals=args.suppress_numerals,
-        parallel=args.parallel,
-        timeout=args.timeout,
-        use_custom=args.use_custom,
-        keep_temp=args.keep_temp,
-        num_speakers=args.num_speakers,
-        verbose=args.verbose,
-    )
-
-    print(f"Work dir: {outs.work_dir}")
-    if outs.raw_files:
-        for k, v in outs.raw_files.items():
-            print(f"{k.upper()}: {v}")
-    else:
-        print("No output files detected.")
-
-    # return code 0 for success
-    sys.exit(0)
+def main(argv=None) -> int:
+    return CLI.run(argv)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

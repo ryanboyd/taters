@@ -64,7 +64,7 @@ def test_output_names_follow_the_documented_pattern(tiny_video_two_audio_streams
     outs = split_audio_streams_to_wav(tiny_video_two_audio_streams, output_dir=tmp_path / "out")
     names = sorted(Path(p).name for p in outs)
     stem = tiny_video_two_audio_streams.stem
-    # Language tags were set on the fixture, so they should appear in the names.
+    # we set language tags on the fixture, so they ought to show up in the names.
     assert names[0].startswith(f"{stem}_a") and names[0].endswith("_eng.wav")
     assert names[1].endswith("_spa.wav")
 
@@ -179,7 +179,7 @@ def test_a_partially_extracted_folder_is_completed(tiny_video_two_audio_streams,
     outs = sorted(split_audio_streams_to_wav(
         tiny_video_two_audio_streams, output_dir=out_dir
     ))
-    Path(outs[1]).unlink()          # pretend the second stream never finished
+    Path(outs[1]).unlink()          # let's pretend the second stream never finished
 
     again = sorted(split_audio_streams_to_wav(
         tiny_video_two_audio_streams, output_dir=out_dir

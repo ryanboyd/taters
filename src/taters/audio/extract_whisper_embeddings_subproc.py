@@ -18,7 +18,7 @@ to produce encoder features, then pool the encoder outputs into fixed-length vec
 
 from __future__ import annotations
 
-# Keep Transformers from touching torch/TF/Flax in this module
+# keep Transformers from going anywhere near torch/TF/Flax in this module
 import os as _os
 _os.environ.setdefault("TRANSFORMERS_NO_TORCH", "1")
 _os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
@@ -35,6 +35,7 @@ from ctranslate2 import StorageView
 import ctranslate2
 from faster_whisper import WhisperModel
 from transformers.models.whisper.feature_extraction_whisper import WhisperFeatureExtractor
+from ..helpers.gpu import add_device_argument, resolve_device
 
 
 # ----------------------------
@@ -117,11 +118,12 @@ def _encode_features_any_layout(ct2_model, feats: np.ndarray) -> Optional[np.nda
         except Exception:
             continue
 
-        arr = _sv_to_numpy_cpu(sv)  # this now returns a real ndarray
+        arr = _sv_to_numpy_cpu(sv)  # this now gives us an actual ndarray
         if arr is None:
             continue
 
-        # Pool to [D] by averaging all axes except the last (assumed hidden size)
+        # pool down to [D] by averaging every axis but the last (which we assume
+        # is the hidden size)
         if arr.ndim == 1:
             vec = arr
         else:
@@ -166,14 +168,14 @@ def _guess_time_unit(max_end: float, dur_s: float, n_samples: int) -> str:
       - 'ms' if values look like milliseconds
       - 'samples' if values look like raw sample indices
     """
-    # Allow 10% slack
+    # we give each guess 10% slack
     if max_end <= dur_s * 1.1:
         return "s"
     if max_end <= (dur_s * 1000.0) * 1.1:
         return "ms"
     if max_end <= n_samples * 1.1:
         return "samples"
-    # Fallback: assume seconds if not wildly off
+    # if nothing fits, we just assume seconds and hope it's not wildly off
     return "s"
 
 def l2_normalize(v, eps=1e-12):
@@ -188,6 +190,55 @@ class EmbedConfig:
     device: str = "auto"            # "cuda", "cpu", or "auto"
     compute_type: str = "float16"   # "float16" (GPU), "int8" (CPU), etc.
     time_unit: str = "auto"         # "auto" | "ms" | "s" | "samples"
+
+
+def _load_whisper(config: "EmbedConfig"):
+    """
+    Load the encoder on a device that has been shown to work.
+
+    The same trap as in `transcribe_with_whisper`, one process further out:
+    CTranslate2 reports a usable CUDA device from the driver alone and loads
+    cuBLAS only at the first encode, so a broken GPU install builds this model
+    without complaint and fails minutes later. Here that failure took a whole
+    subprocess with it, which the parent could only report as a dead child.
+
+    Returns
+    -------
+    tuple
+        ``(model, device, compute_type)`` -- the last two being what was
+        actually used, which is not always what was asked for.
+    """
+    import numpy as _np
+
+    asked = (config.device or "auto").strip().lower()
+
+    def build(device: str, compute_type: str):
+        model = WhisperModel(config.model_name, device=device, compute_type=compute_type)
+        # one 30-second window of silence: a single encode, which drags in every
+        # library the real work is going to need. milliseconds, against a run
+        # that takes minutes.
+        model.encode(_np.zeros((80, 3000), dtype=_np.float32))
+        return model
+
+    if asked == "cuda":
+        # the user named cuda explicitly, so we treat it as an instruction: a
+        # failure here is an error, not a quiet demotion to something slower.
+        return build("cuda", config.compute_type), "cuda", config.compute_type
+
+    if asked != "cpu":
+        device, reason = resolve_device(asked, backend="ctranslate2")
+        if device == "cuda":
+            try:
+                return build("cuda", config.compute_type), "cuda", config.compute_type
+            except Exception as e:
+                reason = f"the GPU is visible but CTranslate2 cannot use it: {e}"
+        print(f"[whisper-embeddings] {reason}", flush=True)
+        print("[whisper-embeddings] Falling back to the CPU.", flush=True)
+
+    # int8 rather than the caller's float16: CPU CTranslate2 doesn't support
+    # float16 and quietly downgrades it to float32 after a warning.
+    compute = config.compute_type if config.compute_type not in ("", "float16") else "int8"
+    return build("cpu", compute), "cpu", compute
 
 
 # ----------------------------
@@ -250,22 +301,22 @@ def export_segment_embeddings_csv(
     transcript_csv = Path(transcript_csv)
     source_wav = Path(source_wav)
 
-    # Decide output directory
+    # figure out where the output goes (next to the WAV unless told otherwise)
     if output_dir is None:
         output_dir = source_wav.parent
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Final output path
+    # and the final output path
     output_csv = output_dir / f"{source_wav.stem}_embeddings.csv"
 
-    # 1) Load audio (mono, sr)
+    # 1) load the audio (mono, at sr)
     audio, in_sr = librosa.load(str(source_wav), sr=sr, mono=True)
     n_samples = len(audio)
     dur_s = n_samples / float(sr)
 
-    # 2) Load faster-whisper and ct2 model
-    fw = WhisperModel(config.model_name, device=config.device, compute_type=config.compute_type)
+    # 2) load faster-whisper and the ct2 model
+    fw, resolved_device, resolved_compute = _load_whisper(config)
     try:
         ct2_model: ctranslate2.models.Whisper = fw.model  # type: ignore[attr-defined]
     except AttributeError:
@@ -275,25 +326,26 @@ def export_segment_embeddings_csv(
                 "Could not access the underlying CTranslate2 model from faster-whisper. "
                 "Consider passing a local CTranslate2 model directory as model_name."
             )
-        ct2_model = ctranslate2.models.Whisper(str(model_dir), device=config.device, compute_type=config.compute_type)
+        ct2_model = ctranslate2.models.Whisper(str(model_dir), device=resolved_device,
+                                              compute_type=resolved_compute)
 
-    # 3) Feature extractor
+    # 3) the feature extractor
     fe = WhisperFeatureExtractor.from_pretrained(_hf_repo_for(config.model_name))
 
-    # 4) Read transcript and decide time unit
+    # 4) read the transcript and work out what time unit it's in
     if not transcript_csv.exists():
         raise FileNotFoundError(f"Transcript CSV not found: {transcript_csv}")
 
     rows_out: list[list[Any]] = []
     embed_dim: Optional[int] = None
 
-    # First pass: inspect header and a few rows to guess units if needed
+    # first pass: peek at the header and a few rows so we can guess the units
     with transcript_csv.open("r", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
         fields = reader.fieldnames or []
         sc, ec, pc = _resolve_columns(fields, start_col, end_col, speaker_col)
 
-        # Peek up to 100 rows to find a reasonable max end time
+        # up to 100 rows is plenty to find a reasonable max end time
         sample_vals: List[float] = []
         for i, row in enumerate(reader):
             try:
@@ -303,8 +355,8 @@ def export_segment_embeddings_csv(
             if i >= 99:
                 break
 
-        # Re-open for the real pass
-    # Decide unit
+        # we'll re-open the file for the real pass
+    # now we settle on a unit
     if config.time_unit not in {"auto", "ms", "s", "samples"}:
         raise ValueError("config.time_unit must be 'auto', 'ms', 's', or 'samples'")
 
@@ -322,7 +374,7 @@ def export_segment_embeddings_csv(
             print(f"[emb] time unit guessed -> {guessed_unit}")
         print(f"[emb] time unit in use -> {unit}")
 
-    # Conversion lambdas
+    # conversion lambdas: to seconds, and to a sample index
     if unit == "s":
         to_sec = lambda x: float(x)
         to_idx = lambda t: int(round(float(t) * sr))
@@ -335,7 +387,7 @@ def export_segment_embeddings_csv(
     else:
         raise RuntimeError("Unexpected time unit.")
 
-    # Real pass
+    # the real pass
     n_total = n_parsed = n_kept = 0
     n_oob = n_too_short = n_shape_skip = 0
 
@@ -361,20 +413,20 @@ def export_segment_embeddings_csv(
                 n_oob += 1
                 continue
 
-            # Slice; skip ultra tiny after rounding (< 2 samples)
+            # slice it out; skip anything ultra tiny after rounding (< 2 samples)
             if e - s < 2:
                 n_too_short += 1
                 continue
 
             clip = audio[s:e]
 
-            # Build input features (float32, no torch)
+            # build the input features (float32, no torch)
             feats = fe(clip, sampling_rate=sr, return_tensors="np")["input_features"]
 
-            # Encode with CT2, trying both layouts; pool to [D]
+            # encode with CT2, trying both layouts, then pool down to [D]
             vec = _encode_features_any_layout(ct2_model, feats)
 
-            # --- Debug: show raw candidate shapes for the first few rows ---
+            # --- purely for debugging: raw candidate shapes for the first few rows ---
             if _os.environ.get("TATERS_DEBUG") == "1" and n_parsed <= 3:
                 try:
                     a = np.ascontiguousarray(feats.astype("float32", copy=False))
@@ -400,7 +452,7 @@ def export_segment_embeddings_csv(
             n_kept += 1
 
 
-    # 5) Write CSV (header even if empty)
+    # 5) write the CSV (header even if we've got no rows)
     if embed_dim is None:
         header = ["start_time", "end_time", "speaker"]
     else:
@@ -481,17 +533,17 @@ def export_audio_embeddings_csv(
 
     out_csv = output_dir / f"{source_wav.stem}_embeddings.csv"
 
-    # 1) Load audio
+    # 1) load the audio
     y, in_sr = librosa.load(str(source_wav), sr=sr, mono=True)
     n = len(y)
     if n == 0:
-        # Write an empty header-only file
+        # nothing to do, so we write a header-only file and bail
         with out_csv.open("w", encoding="utf-8", newline="") as f:
             csv.writer(f).writerow(["start_time", "end_time", "speaker"])
         return out_csv
 
-    # 2) Load faster-whisper + ct2 + feature extractor (same as transcript path)
-    fw = WhisperModel(config.model_name, device=config.device, compute_type=config.compute_type)
+    # 2) load faster-whisper + ct2 + the feature extractor (same as transcript mode)
+    fw, resolved_device, resolved_compute = _load_whisper(config)
     try:
         ct2_model: ctranslate2.models.Whisper = fw.model  # type: ignore[attr-defined]
     except AttributeError:
@@ -501,11 +553,12 @@ def export_audio_embeddings_csv(
                 "Could not access the underlying CTranslate2 model from faster-whisper. "
                 "Consider passing a local CTranslate2 model directory as model_name."
             )
-        ct2_model = ctranslate2.models.Whisper(str(model_dir), device=config.device, compute_type=config.compute_type)
+        ct2_model = ctranslate2.models.Whisper(str(model_dir), device=resolved_device,
+                                              compute_type=resolved_compute)
 
     fe = WhisperFeatureExtractor.from_pretrained(_hf_repo_for(config.model_name))
 
-    # 3) Build segments (in samples)
+    # 3) build up the segments (in samples)
     segs: list[tuple[int, int]] = []
     win = max(1, int(round(window_s * sr)))
     hop = max(1, int(round(hop_s * sr)))
@@ -523,12 +576,12 @@ def export_audio_embeddings_csv(
                     break
                 s += hop
     elif strategy == "nonsilent":
-        # basic energy-based VAD; torch-free and fast
+        # basic energy-based VAD; no torch needed, and it's fast
         intervals = librosa.effects.split(y, top_db=top_db)
         for s, e in intervals:
             if e - s < min_len:
                 continue
-            # subdivide very long spans into ~window_s chunks
+            # chop very long spans down into ~window_s chunks
             cur = s
             while cur < e:
                 nxt = min(e, cur + win)
@@ -536,12 +589,12 @@ def export_audio_embeddings_csv(
                     segs.append((cur, nxt))
                 cur = nxt
         if not segs:
-            # fallback: whole file as one segment
+            # found nothing? then the whole file is one segment
             segs = [(0, n)]
     else:
         raise ValueError("strategy must be 'windows' or 'nonsilent'")
 
-    # 4) Encode each segment
+    # 4) encode each segment
     rows_out: list[list[Any]] = []
     embed_dim: Optional[int] = None
     vectors: list[np.ndarray] = []
@@ -555,13 +608,13 @@ def export_audio_embeddings_csv(
         if embed_dim is None:
             embed_dim = int(vec.shape[-1])
         vectors.append(vec)
-        # keep per-chunk row unless we're aggregating
+        # keep a row per chunk unless we're aggregating
         if aggregate == "none":
             t0 = s / float(sr)
             t1 = e / float(sr)
             rows_out.append([f"{t0:.3f}", f"{t1:.3f}", f"SEGMENT_{i}"] + vec.tolist())
 
-    # 5) Aggregate if requested
+    # 5) aggregate, if we were asked to
     if vectors and aggregate == "mean":
         vec = np.vstack(vectors).mean(axis=0)
         if apply_l2_normalization:
@@ -569,7 +622,7 @@ def export_audio_embeddings_csv(
         embed_dim = int(vec.shape[-1])
         rows_out = [["0.000", f"{n/float(sr):.3f}", "GLOBAL_MEAN"] + vec.tolist()]
 
-    # 6) Write CSV (header even if empty)
+    # 6) write the CSV (header even if we've got no rows)
     if embed_dim is None:
         header = ["start_time", "end_time", "speaker"]
     else:
@@ -595,14 +648,14 @@ if __name__ == "__main__":
     import argparse
     from taters.helpers.cliargs import add_bool_argument
     p = argparse.ArgumentParser(description="Export Whisper encoder embeddings.")
-    # Modes: (A) per-transcript segments, (B) general audio
+    # two modes: (A) per-transcript segments, (B) general audio
     p.add_argument("--transcript_csv", default=None, help="If provided, export per transcript segment.")
     p.add_argument("--source_wav", required=True)
     p.add_argument("--output_dir", default=None)
 
     # shared model opts
     p.add_argument("--model_name", default="base")
-    p.add_argument("--device", default="auto", choices=("auto", "cuda", "cpu"))
+    add_device_argument(p)
     p.add_argument("--compute_type", default="float16")
 
     # transcript mode

@@ -1,29 +1,20 @@
 from __future__ import annotations
 from pathlib import Path
-from typing import Optional, Literal, Union, Sequence, Iterable, Tuple
+from typing import Callable, Optional, Literal, Union, Sequence, Iterable, Tuple
 import csv
-import re
-import sys
 import numpy as np
-import nltk
-
-# Allow very large CSV fields (handles huge text safely).
-try:
-    csv.field_size_limit(sys.maxsize)
-except OverflowError:
-    csv.field_size_limit(2**31 - 1)
-
-# Lazy import to keep startup light.
-try:
-    from sentence_transformers import SentenceTransformer
-except Exception as e:
-    SentenceTransformer = None  # type: ignore
 
 from ..helpers.nltk_data import ensure_punkt
-from ..helpers.text_gather import (
-    csv_to_analysis_ready_csv,
-    txt_folder_to_analysis_ready_csv,
-)
+from ..helpers.atomic import atomic_write
+from ..helpers.gpu import device_note, resolve_device
+from ..helpers.progress import Ticker, announce, count_rows
+from ..helpers.doc_text import DOCUMENT_PATTERN
+from ..helpers.text_gather import (resolve_analysis_ready)
+from ..helpers.provenance import TEXT_GRAIN, TEXT_INPUT, records_settings
+from ..helpers.cliargs import CliSpec
+from ..helpers.csvio import widen_csv_field_limit
+
+widen_csv_field_limit()
 
 PathLike = Union[str, Path]
 
@@ -52,36 +43,14 @@ def _split_sentences(text: str) -> list[str]:
     """
     Split a text string into sentences.
 
-    Prefers ``nltk.tokenize.sent_tokenize`` if available; otherwise falls back
-    to a lightweight regex that splits on end punctuation followed by whitespace.
-
-    Parameters
-    ----------
-    text : str
-        Input text. ``None``/empty values are treated as empty strings.
-
-    Returns
-    -------
-    list of str
-        List of non-empty, stripped sentences. Returns an empty list when the
-        input is empty or contains no sentence-like chunks.
-
-    Notes
-    -----
-    The regex fallback is intentionally simple and language-agnostic; it may
-    under-segment or over-segment compared to NLTK's tokenizer.
+    The one splitter every sentence-by-sentence step shares
+    (:mod:`taters.text._sentences`), kept under its old name here for the
+    callers that import it from this module.
     """
+    from ._sentences import split_sentences
 
-    txt = (text or "").strip()
-    if not txt:
-        return []
-    try:
-        from nltk.tokenize import sent_tokenize  # type: ignore
-        return [s for s in sent_tokenize(txt) if s.strip()]
-    except Exception:
-        # crude but dependency-free: split on end punctuation + whitespace
-        parts = re.split(r"(?<=[.!?])\s+", txt)
-        return [p.strip() for p in parts if p.strip()]
+    return split_sentences(text)
+
 
 def _iter_items_from_csv(path: Path, *, id_col: str = "text_id", text_col: str = "text",
                          encoding: str = "utf-8-sig", delimiter: str = ",") -> Iterable[Tuple[str, str]]:
@@ -120,16 +89,20 @@ def _iter_items_from_csv(path: Path, *, id_col: str = "text_id", text_col: str =
         for row in reader:
             yield str(row[id_col]), (row.get(text_col) or "")
 
-def analyze_with_sentence_embeddings(
+@records_settings(binding=TEXT_INPUT, grain=TEXT_GRAIN,
+                  outputs=("out_features_csv",))
+def extract_sentence_embeddings(
     *,
     # ----- Input source (choose exactly one, or pass analysis_csv directly) -----
     csv_path: Optional[Union[str, Path]] = None,
     txt_dir: Optional[Union[str, Path]] = None,
     analysis_csv: Optional[Union[str, Path]] = None,
+    gathered_csv: Optional[Union[str, Path]] = None,
 
     # ----- Output -----
     out_features_csv: Optional[Union[str, Path]] = None,
-    overwrite_existing: bool = False,  # if the file already exists, let's not overwrite by default
+    overwrite_existing: bool = False,
+    workers: int = 0,
 
     # ====== SHARED I/O OPTIONS ======
     encoding: str = "utf-8-sig",
@@ -147,17 +120,20 @@ def analyze_with_sentence_embeddings(
 
     # ====== TXT FOLDER GATHER OPTIONS (when txt_dir is provided) ======
     recursive: bool = True,
-    pattern: str = "*.txt",
+    pattern: str = DOCUMENT_PATTERN,
     id_from: Literal["stem", "name", "path"] = "stem",
     include_source_path: bool = True,
 
     # ====== SentenceTransformer options ======
     model_name: str = "sentence-transformers/all-roberta-large-v1",
+    device: Optional[str] = "auto",
     batch_size: int = 32,
     normalize_l2: bool = True,       # set True if you want unit-length vectors
-    rounding: Optional[int] = None,   # None = full precision; e.g., 6 for ~float32-ish text
+    rounding: Optional[int] = None,   # None = full precision; 6 is about float32
     show_progress: bool = False,
+    on_progress: Optional[Callable[[int, int], None]] = None,
     pass_through_cols: Optional[Sequence[str]] = None,
+    verbose: bool = True,
 ) -> Path:
     """
     Average sentence embeddings per row of text and write a wide features CSV.
@@ -189,6 +165,19 @@ def analyze_with_sentence_embeddings(
         Folder of ``.txt`` files to gather from. Mutually exclusive with the other modes.
     analysis_csv : str or pathlib.Path, optional
         Prebuilt analysis-ready CSV containing exactly ``text_id`` and ``text``.
+    gathered_csv : str or pathlib.Path, optional
+        Where to write the intermediate "analysis-ready" table built from
+        ``csv_path`` or ``txt_dir``.
+    workers : int, default=0
+        Parallel processes for reading documents. ``0`` means automatic: three-quarters of the
+        logical cores; ``1`` turns parallelism off. Output files are
+        identical whatever the worker count.
+
+        By default it lands beside the *source* -- which means analyzing a
+        spreadsheet in someone's Downloads folder writes a file into their
+        Downloads folder. Pass this to keep the intermediate with the rest of a
+        run's output instead. Ignored when ``analysis_csv`` is given, because
+        then no gathering happens.
     out_features_csv : str or pathlib.Path, optional
         Output features CSV path. If ``None``, a default path is derived from the
         analysis-ready filename under ``./features/sentence-embeddings/``.
@@ -196,6 +185,10 @@ def analyze_with_sentence_embeddings(
         If ``False`` and the output file already exists, skip processing and return it.
         This also controls the intermediate analysis-ready CSV: when ``True``, it is rebuilt
         from the current source instead of reusing a stale copy from an earlier run.
+    verbose : bool, default True
+        Print incidental notices -- which model is loading, which requested
+        pass-through columns the input did not have. The pipeline runner passes
+        False when a live display owns the screen.
     pass_through_cols : Sequence[str], optional
         Column names from the analysis-ready CSV to copy into the output
         alongside ``text_id`` (e.g., ``["source","speaker"]``). **Any names
@@ -238,6 +231,13 @@ def analyze_with_sentence_embeddings(
 
     model_name : str, default="sentence-transformers/all-roberta-large-v1"
         Sentence-Transformers model name or path.
+    device : {"auto", "cuda", "cpu"} | None, default "auto"
+        Where to run the embedding model. "auto" uses the GPU when torch reports
+        one that works and falls back to the CPU when it does not; "cuda"
+        insists and raises if it cannot; "cpu" never touches the GPU. Previously
+        there was no way to ask: sentence-transformers takes the GPU whenever
+        torch reports one, which is fine until it is the third model in a
+        pipeline to do so.
     batch_size : int, default=32
         Batch size for model encoding.
     normalize_l2 : bool, default=True
@@ -245,7 +245,14 @@ def analyze_with_sentence_embeddings(
     rounding : int or None, default=None
         If provided, round floats to this many decimals (useful for smaller files).
     show_progress : bool, default=False
-        Show a progress bar during embedding.
+        Print the model's own encoding progress bar. Suppressed whenever
+        ``on_progress`` is given, because two bars fighting over the same
+        lines is worse than either alone.
+    on_progress : callable, optional
+        Called as ``on_progress(done, total, message=None)`` so a UI can show a
+        real bar instead of a spinner. Injected automatically by the pipeline
+        runner for any step function that declares this parameter. See
+        :mod:`taters.helpers.progress` for the contract.
 
     Returns
     -------
@@ -281,67 +288,6 @@ def analyze_with_sentence_embeddings(
     construct header columns ``e0..e{D-1}``.
     """
 
-    # pre-check that nltk sent_tokenizer is usable
-    use_nltk = _ensure_nltk_punkt(verbose=True)
-
-    # 1) analysis-ready CSV
-    if analysis_csv is not None:
-        analysis_ready = Path(analysis_csv)
-        if not analysis_ready.exists():
-            raise FileNotFoundError(f"analysis_csv not found: {analysis_ready}")
-    else:
-        if (csv_path is None) == (txt_dir is None):
-            raise ValueError("Provide exactly one of csv_path or txt_dir (or pass analysis_csv).")
-        if csv_path is not None:
-            analysis_ready = Path(
-                csv_to_analysis_ready_csv(
-                    csv_path=csv_path,
-                    text_cols=list(text_cols),
-                    id_cols=list(id_cols) if id_cols else None,
-                    mode=mode,
-                    group_by=list(group_by) if group_by else None,
-                    delimiter=delimiter,
-                    encoding=encoding,
-                    joiner=joiner,
-                    num_buckets=num_buckets,
-                    max_open_bucket_files=max_open_bucket_files,
-                    tmp_root=tmp_root,
-                    overwrite_existing=overwrite_existing,
-                )
-            )
-        else:
-            analysis_ready = Path(
-                txt_folder_to_analysis_ready_csv(
-                    root_dir=txt_dir,
-                    recursive=recursive,
-                    pattern=pattern,
-                    encoding=encoding,
-                    id_from=id_from,
-                    include_source_path=include_source_path,
-                    overwrite_existing=overwrite_existing,
-                )
-            )
-
-    # 1b) default output path
-    if out_features_csv is None:
-        out_features_csv = Path.cwd() / "features" / "sentence-embeddings" / analysis_ready.name
-    out_features_csv = Path(out_features_csv)
-    out_features_csv.parent.mkdir(parents=True, exist_ok=True)
-
-    if not overwrite_existing and Path(out_features_csv).is_file():
-        print("Sentence embedding feature output file already exists; returning existing file.")
-        return out_features_csv
-
-    # 2) load model
-    if SentenceTransformer is None:
-        raise ImportError(
-            "sentence-transformers is required. Install with `pip install sentence-transformers`."
-        )
-    print(f"Loading sentence-transformer model: {model_name}")
-    model = SentenceTransformer(model_name)
-    dim = int(getattr(model, "get_sentence_embedding_dimension", lambda: 768)())
-
-    # 3) header
     def _merge_cols(preferred: Optional[Sequence[str]], ensure: Optional[Sequence[str]]) -> list[str]:
         """
         Merge two sequences while preserving order and removing duplicates.
@@ -356,24 +302,91 @@ def analyze_with_sentence_embeddings(
                     seen.add(c)
         return out
 
-    # Always include id_cols in pass-through set (user doesn't need to repeat them)
+    # pre-check that nltk's sent_tokenizer is usable. we call this purely for
+    # the side effect (it downloads `punkt` if it's missing), and the sentence
+    # splitter falls back on its own if it's still not there, so there's no
+    # return value worth keeping
+    _ensure_nltk_punkt(verbose=verbose)
+
+    # we resolve these BEFORE the gather, because the gather is what has to
+    # preserve them. `pass_through_cols` used to only get applied when reading
+    # the analysis-ready CSV back, but the gather that produced it wrote
+    # `text_id` and `text` and nothing else. so every requested column came
+    # out present-but-empty, and anything grouping on them downstream silently
+    # collapsed into one meaningless bucket
     pt_cols: list[str] = _merge_cols(pass_through_cols, id_cols)
+
+    analysis_ready = resolve_analysis_ready(
+        csv_path=csv_path, txt_dir=txt_dir, analysis_csv=analysis_csv,
+        gathered_csv=gathered_csv, text_cols=text_cols, id_cols=id_cols,
+        mode=mode, group_by=group_by, delimiter=delimiter, encoding=encoding,
+        joiner=joiner, num_buckets=num_buckets,
+        max_open_bucket_files=max_open_bucket_files, tmp_root=tmp_root,
+        recursive=recursive, pattern=pattern, id_from=id_from,
+        include_source_path=include_source_path,
+        overwrite_existing=overwrite_existing, on_progress=on_progress,
+        workers=workers,
+        carry_cols=pt_cols or None, verbose=verbose)
+
+    if out_features_csv is None:
+        out_features_csv = Path.cwd() / "features" / "sentence-embeddings" / analysis_ready.name
+    out_features_csv = Path(out_features_csv)
+    out_features_csv.parent.mkdir(parents=True, exist_ok=True)
+
+    if not overwrite_existing and Path(out_features_csv).is_file():
+        if verbose:
+            print("Sentence embedding feature output file already exists; returning existing file.")
+        return out_features_csv
+
+    # 2) load model
+    #
+    # we import this here rather than at module scope. it used to be guarded up
+    # there, which keeps a missing install from breaking the import -- but
+    # that's not lazy, and sentence-transformers takes about fourteen seconds
+    # to load. the wizard imports this module just to read its signature when
+    # it builds the options screen, and was paying that every single time
+    try:
+        from sentence_transformers import SentenceTransformer
+    except Exception as e:
+        raise ImportError(
+            "sentence-transformers is required. Install with `pip install sentence-transformers`."
+        ) from e
+    # we resolve the device ourselves rather than leaving it to
+    # sentence-transformers, which grabs CUDA whenever torch reports it and
+    # gives us no way to find out afterwards what it picked. a step that
+    # silently moves to the GPU is a step that can silently run it out of memory
+    resolved, fallback_reason = resolve_device(device, backend="torch")
+    if verbose:
+        print(f"Loading sentence-transformer model: {model_name} on {resolved}")
+        if fallback_reason:
+            print(f"[sentence-embeddings] {fallback_reason}")
+    # and on the run display too, not only under `verbose` -- see the same
+    # announcement in transformer_embeddings for why
+    announce(on_progress, device_note("embedding", resolved, fallback_reason))
+    model = SentenceTransformer(model_name, device=resolved)
+    dim = int(getattr(model, "get_sentence_embedding_dimension", lambda: 768)())
+
+    # 3) header
     header = ["text_id"] + pt_cols + [f"e{i}" for i in range(dim)]
 
 
     # 4) stream rows → split → encode → average → (optional) L2 normalize → write
-    print("Extracting embeddings...")
-    with out_features_csv.open("w", newline="", encoding=encoding) as f:
+    if verbose:
+        print("Extracting embeddings...")
+    with atomic_write(out_features_csv, newline="", encoding=encoding) as f:
         writer = csv.writer(f)
         writer.writerow(header)
 
-        # Open the analysis-ready CSV as dicts so we can read extra cols
+        # open the analysis-ready CSV as dicts so we can read the extra cols
         with analysis_ready.open("r", newline="", encoding=encoding) as rf:
             reader = csv.DictReader(rf, delimiter=delimiter)
-            # Light validation: warn if any requested pass-through column is missing
+            # light validation: warn if any requested pass-through column is missing
             missing = [c for c in pt_cols if c not in (reader.fieldnames or [])]
-            if missing:
+            if missing and verbose:
                 print(f"[sentence-embeddings] WARNING: pass-through columns missing in source: {missing}")
+
+            _ticker = Ticker(on_progress,
+                             count_rows(analysis_ready, on_progress=on_progress))
 
             for row in reader:
                 text_id = str(row.get("text_id", ""))
@@ -389,7 +402,7 @@ def analyze_with_sentence_embeddings(
                         batch_size=batch_size,
                         convert_to_numpy=True,
                         normalize_embeddings=False,
-                        show_progress_bar=show_progress,
+                        show_progress_bar=show_progress and on_progress is None,
                     )
                     vec = emb.mean(axis=0).astype(np.float32, copy=False)
 
@@ -405,6 +418,7 @@ def analyze_with_sentence_embeddings(
                         values = [round(v, int(rounding)) for v in values]
 
                 writer.writerow([text_id] + pt_vals + values)
+                _ticker.tick()
 
 
     return out_features_csv
@@ -412,127 +426,39 @@ def analyze_with_sentence_embeddings(
 
 
 # --- CLI ------------------------------------------------------------
-def _build_arg_parser():
-    """
-    Create an ``argparse.ArgumentParser`` for the sentence-embedding CLI.
-
-    Defines mutually exclusive input sources (``--csv``, ``--txt-dir``,
-    ``--analysis-csv``), output/overwrite flags, CSV/TXT gathering options,
-    and Sentence-Transformers parameters.
-
-    Returns
-    -------
-    argparse.ArgumentParser
-        Configured parser instance.
-    """
-
-    import argparse
-    from ..helpers.cliargs import add_bool_argument
-    p = argparse.ArgumentParser(
-        description="Average sentence embeddings per row (Sentence-Transformers)."
-    )
-
-    src = p.add_mutually_exclusive_group(required=True)
-    src.add_argument("--csv", dest="csv_path", help="Source CSV to gather from")
-    src.add_argument("--txt-dir", dest="txt_dir", help="Folder of .txt files to gather from")
-    src.add_argument("--analysis-csv", dest="analysis_csv",
-                     help="Use an existing analysis-ready CSV (skip gathering)")
-
-    p.add_argument("--out", dest="out_features_csv", default=None,
-                   help="Output CSV (default: ./features/sentence-embeddings/<gathered_name>)")
-    add_bool_argument(p, "--overwrite_existing", default=False,
-                      help="Do you want to overwrite the output file if it already exists?")
-
-    # I/O
-    p.add_argument("--encoding", default="utf-8-sig")
-    p.add_argument("--delimiter", default=",")
-
-    # CSV gather options
-    p.add_argument("--text-col", dest="text_cols", action="append",
-                   help="Text column (repeatable). Default: --text-col text")
-    p.add_argument("--id-col", dest="id_cols", action="append",
-                   help="ID column(s) to carry through (repeatable)")
-    p.add_argument("--mode", choices=["concat", "separate"], default="concat")
-    p.add_argument("--group-by", dest="group_by", action="append",
-                   help="Group by column(s) (repeatable)")
-    p.add_argument("--joiner", default=" ")
-    p.add_argument("--num-buckets", type=int, default=512)
-    p.add_argument("--max-open-bucket-files", type=int, default=64)
-    p.add_argument("--tmp-root", default=None)
-
-    # TXT gather options
-    p.add_argument("--recursive", action="store_true", default=True)
-    p.add_argument("--no-recursive", dest="recursive", action="store_false")
-    p.add_argument("--pattern", default="*.txt")
-    p.add_argument("--id-from", choices=["stem", "name", "path"], default="stem")
-    p.add_argument("--include-source-path", action="store_true", default=True)
-    p.add_argument("--no-include-source-path", dest="include_source_path", action="store_false")
-
-    # Model options
-    p.add_argument("--model-name", default="sentence-transformers/all-roberta-large-v1")
-    p.add_argument("--batch-size", type=int, default=32)
-    p.add_argument("--normalize-l2", action="store_true", default=True,
-                   help="L2-normalize the final vector per row")
-    p.add_argument("--rounding", type=int, default=None,
-                   help="Round floats to N decimals (omit for full precision)")
-    p.add_argument("--show-progress", action="store_true", default=False)
-    p.add_argument("--pass-through-col", dest="pass_through_cols", action="append",
-               help="Copy this column from the analysis-ready CSV into the output (repeatable)")
 
 
-    return p
 
-def main():
-    """
-    Command-line entry point for row-level sentence embeddings.
+#: The name the module, its recipe and the facade used to disagree on: the
+#: module is `extract_sentence_embeddings`, the function was
+#: `analyze_with_sentence_embeddings`, the facade a third spelling. One name
+#: now; the old one stays callable.
+analyze_with_sentence_embeddings = extract_sentence_embeddings
 
-    Parses CLI arguments via :func:`_build_arg_parser`, normalizes list-like
-    defaults (e.g., ``--text-col``, ``--id-col``, ``--group-by``), invokes
-    :func:`analyze_with_sentence_embeddings`, and prints the resulting path.
+# ---------------------------------------------------------------------------
+# command line -- we derive this from the function(s) above; see
+# helpers.cliargs.CliSpec. the aliases and legacy flags are the spellings that
+# the old hand-written parser used; we keep them so that every documented
+# invocation still works
+# ---------------------------------------------------------------------------
 
-    Examples
-    --------
-    $ python -m taters.text.extract_sentence_embeddings \\
-        --csv transcripts/session.csv \\
-        --text-col text --id-col speaker --group-by speaker \\
-        --model-name sentence-transformers/all-roberta-large-v1 \\
-        --normalize-l2
-    """
-    args = _build_arg_parser().parse_args()
+CLI = CliSpec(
+    extract_sentence_embeddings,
+    description='Average sentence embeddings per row (Sentence-Transformers).',
+    aliases={
+        'csv_path': ['--csv'],
+        'out_features_csv': ['--out'],
+    },
+    legacy={
+        '--no-include-source-path': ['--include-source-path', 'false'],
+        '--no-recursive': ['--recursive', 'false'],
+    },
+)
 
-    # Defaults for list-ish args
-    text_cols = args.text_cols if args.text_cols else ["text"]
-    id_cols = args.id_cols if args.id_cols else None
-    group_by = args.group_by if args.group_by else None
 
-    out = analyze_with_sentence_embeddings(
-        csv_path=args.csv_path,
-        txt_dir=args.txt_dir,
-        analysis_csv=args.analysis_csv,
-        out_features_csv=args.out_features_csv,
-        overwrite_existing=args.overwrite_existing,
-        encoding=args.encoding,
-        delimiter=args.delimiter,
-        text_cols=text_cols,
-        id_cols=id_cols,
-        mode=args.mode,
-        group_by=group_by,
-        joiner=args.joiner,
-        num_buckets=args.num_buckets,
-        max_open_bucket_files=args.max_open_bucket_files,
-        tmp_root=args.tmp_root,
-        recursive=args.recursive,
-        pattern=args.pattern,
-        id_from=args.id_from,
-        include_source_path=args.include_source_path,
-        model_name=args.model_name,
-        batch_size=args.batch_size,
-        normalize_l2=args.normalize_l2,
-        rounding=args.rounding,
-        show_progress=args.show_progress,
-        pass_through_cols=(args.pass_through_cols or None),
-    )
-    print(str(out))
+def main(argv=None) -> int:
+    return CLI.run(argv)
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

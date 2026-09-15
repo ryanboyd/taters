@@ -91,6 +91,7 @@ vars:
   # Output roots (override if you want)
   transcripts_dir: "transcripts"
   features_dir: "features"
+  descriptives_dir: "stats_descriptives"
 
   # --- Acoustics knobs (optional) ---
   acoustics_mode: simple
@@ -117,6 +118,10 @@ steps:
 - scope: item
   call: potato.audio.transcribe_with_whisper
   save_as: diar
+  # Two at a time. faster-whisper caches one model and every worker shares
+  # it, so VRAM is flat -- but the single model serializes the GPU work, and
+  # past 2 there is nothing left to overlap with it.
+  max_workers: 2
   with:
     audio_path: "{{wav}}"
     out_dir: "{{var:transcripts_dir}}"
@@ -156,7 +161,13 @@ steps:
 - scope: item
   call: potato.audio.extract_whisper_embeddings
   save_as: whisper_feats
+  # One at a time -- a process and an encoder per file. See the note in
+  # conversation_video.yaml for the measurements.
+  max_workers: 1
   with:
+    # Explicit, because the gather below reads this folder from the
+    # same variable; the extractor\'s own default ignores it.
+    output_dir: "{{var:features_dir}}/whisper-embeddings"
     source_wav: "{{wav}}"
     transcript_csv: "{{pick:diar.raw_files.csv}}"
     time_unit: "ms"
@@ -175,7 +186,7 @@ steps:
     aggregate: false
     add_source_path: true
     overwrite_existing: "{{var:overwrite_existing}}"
-    out_csv: "features/acoustics_summary.csv"
+    out_csv: "{{var:features_dir}}/acoustics_summary.csv"
 
 # 6) GATHER whisper embeddings into a single CSV
 - scope: global
@@ -189,7 +200,7 @@ steps:
     per_file: true
     stats: ["mean"]
     overwrite_existing: "{{var:overwrite_existing}}"
-    out_csv: "features/whisper-embeddings_aggregated.csv"
+    out_csv: "{{var:features_dir}}/whisper-embeddings_aggregated.csv"
 
 # 7) GATHER transcripts (CSV) into a single unified CSV
 - scope: global
@@ -202,7 +213,7 @@ steps:
     aggregate: false
     add_source_path: true
     overwrite_existing: "{{var:overwrite_existing}}"
-    out_csv: "./all_transcripts.csv"
+    out_csv: "{{var:transcripts_dir}}/all_transcripts.csv"
 
 # 8) DICTIONARY CODING on the unified transcript CSV
 - scope: global
@@ -210,7 +221,7 @@ steps:
   save_as: dict_features
   with:
     csv_path: "{{transcripts_all}}"
-    out_features_csv: "features/dictionary.csv"
+    out_features_csv: "{{var:features_dir}}/dictionary.csv"
     text_cols: ["text"]
     id_cols: ["source","speaker"]
     group_by: ["source","speaker"]
@@ -227,7 +238,7 @@ steps:
   save_as: readability_features
   with:
     csv_path: "{{transcripts_all}}"
-    out_features_csv: "features/readability.csv"
+    out_features_csv: "{{var:features_dir}}/readability.csv"
     text_cols: ["text"]
     id_cols: ["source","speaker"]
     group_by: ["source","speaker"]
@@ -242,7 +253,7 @@ steps:
   save_as: lexrich_features
   with:
     csv_path: "{{transcripts_all}}"
-    out_features_csv: "features/lexical-richness.csv"
+    out_features_csv: "{{var:features_dir}}/lexical-richness.csv"
     text_cols: ["text"]
     id_cols: ["source","speaker"]
     group_by: ["source","speaker"]
@@ -257,12 +268,13 @@ steps:
   save_as: archetype_features
   with:
     csv_path: "{{transcripts_all}}"
-    out_features_csv: "features/archetypes.csv"
+    out_features_csv: "{{var:features_dir}}/archetypes.csv"
     text_cols: ["text"]
     id_cols: ["source","speaker"]
     group_by: ["source","speaker"]
     archetype_csvs: ["{{var:archetypes_dict_path}}"]
     model_name: "sentence-transformers/all-roberta-large-v1"
+    device: "{{var:device}}"
     mean_center_vectors: true
     rounding: 4
     overwrite_existing: "{{var:overwrite_existing}}"
@@ -276,6 +288,7 @@ steps:
     text_cols: ["text"]
     mode: "concat"
     model_name: "sentence-transformers/all-roberta-large-v1"
+    device: "{{var:device}}"
     normalize_l2: true
     pass_through_cols: ["source","speaker"]
     overwrite_existing: "{{var:overwrite_existing}}"
@@ -287,10 +300,32 @@ steps:
   with:
     root_dir: "{{sent_embeds}}"
     aggregate: true
-    group_by: ["text_id", "source", "speaker"]
+    # (source, speaker), and deliberately not text_id: the row-level
+    # embeddings are one row per utterance, so text_id is unique in every one
+    # of them and adding it to the key gives each group a single member --
+    # which makes this step a copy of its input, in the right shape and with
+    # the right columns, just unaggregated.
+    group_by: ["source", "speaker"]
     per_file: false
     stats: ["mean"]
     add_source_path: false
-    exclude_cols: ["start_time","end_time","text", "file_source"]
-    overwrite_existing: false
-    out_csv: "features/sentence-embeddings_aggregated.csv"
+    exclude_cols: ["text_id","start_time","end_time","text", "file_source"]
+    overwrite_existing: "{{var:overwrite_existing}}"
+    out_csv: "{{var:features_dir}}/sentence-embeddings_aggregated.csv"
+
+# ---- Descriptive statistics for every feature table -----------------------
+# Added to every run that writes a feature table: n, missing, mean, SD,
+# quartiles, range, skewness and kurtosis of every numeric measure, one
+# table per feature table under stats_descriptives/.
+- call: potato.stats.describe_features
+  scope: global
+  save_as: descriptives
+  with:
+    feature_csvs:
+      - "{{dict_features}}"
+      - "{{readability_features}}"
+      - "{{lexrich_features}}"
+      - "{{archetype_features}}"
+      - "{{sent_embeds_agg}}"
+    out_dir: "{{var:descriptives_dir}}"
+    overwrite_existing: "{{var:overwrite_existing}}"

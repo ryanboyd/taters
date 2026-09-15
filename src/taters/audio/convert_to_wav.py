@@ -4,9 +4,15 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Optional, Union
+from ..helpers.cliargs import CliSpec
 
 class FFmpegNotFoundError(RuntimeError):
     pass
+
+
+#: PCM bit depth -> ffmpeg codec name. Shared with the stream splitter, which
+#: used to carry its own copy of this table and of the PATH check below.
+PCM_CODECS = {16: "pcm_s16le", 24: "pcm_s24le", 32: "pcm_s32le"}
 
 def _check_ffmpeg():
     if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
@@ -21,6 +27,7 @@ def convert_audio_to_wav(
     bit_depth: int = 16,               # 16/24/32 signed PCM
     channels: int = 1,                 # 1=mono, 2=stereo
     overwrite_existing: bool = False,  # if the file already exists, let's not overwrite by default
+    verbose: bool = True,
 ) -> Path:
     """
     Convert any FFmpeg-readable audio/video file to a linear PCM WAV.
@@ -30,17 +37,21 @@ def convert_audio_to_wav(
     input_path : str | Path
         Source media file (audio or video container). FFmpeg must be able to read it.
     output_path : str | Path | None, optional
-        Target WAV path. If None, defaults to
-        ``<cwd>/audio/<input_stem>.wav``.
+        Target WAV path. If None, ``<output_dir>/<input_stem>.wav``.
+    output_dir : str | Path | None, optional
+        Where the WAV goes when ``output_path`` is not given. Defaults to
+        ``<cwd>/audio``.
     sample_rate : int, default 16000
         Desired sample rate (Hz).
     bit_depth : {16,24,32}, default 16
         Output PCM bit depth; maps to ``pcm_s{bit_depth}le`` codec.
-    channels : int | None, default 1
-        If provided, set number of output channels (e.g., 1=mono, 2=stereo).
-        If None, keep original channel count.
+    channels : int, default 1
+        Output channels: 1 for mono, 2 for stereo.
     overwrite_existing : bool, default False
         Overwrite `output_path` if it already exists.
+    verbose : bool, default True
+        Print incidental notices (such as "already exists, skipping"). The
+        pipeline runner passes False when a live display owns the screen.
 
     Returns
     -------
@@ -79,10 +90,11 @@ def convert_audio_to_wav(
         out_path = out_dir / base
 
     if not overwrite_existing and Path(out_path).is_file():
-        print("WAV file already exists; returning existing file.")
+        if verbose:
+            print("WAV file already exists; returning existing file.")
         return out_path
 
-    pcm_map = {16: "pcm_s16le", 24: "pcm_s24le", 32: "pcm_s32le"}
+    pcm_map = PCM_CODECS
     if bit_depth not in pcm_map:
         raise ValueError("bit_depth must be one of {16, 24, 32}.")
     if channels not in (1, 2):
@@ -111,33 +123,30 @@ def convert_audio_to_wav(
 
 
 # --- CLI --------------------------------------------------------------------
-def _build_arg_parser():
-    import argparse
-    from ..helpers.cliargs import add_bool_argument
-    p = argparse.ArgumentParser(description="Convert any audio (or A/V) file to PCM WAV via ffmpeg.")
-    p.add_argument("input", help="Input file (audio or video container)")
-    p.add_argument("--out", dest="output_path", default=None,
-                   help="Exact output .wav path (overrides --out-dir)")
-    p.add_argument("--out-dir", dest="output_dir", default=None,
-                   help="Directory for output (filename will be <input_stem>.wav)")
-    p.add_argument("--sr", dest="sample_rate", type=int, default=16000, help="Sample rate (Hz)")
-    p.add_argument("--bit-depth", type=int, choices=[16, 24, 32], default=16, help="PCM bit depth")
-    p.add_argument("--channels", type=int, choices=[1, 2], default=1, help="1=mono, 2=stereo")
-    add_bool_argument(p, "--overwrite_existing", default=False, help="Overwrite existing output")
-    return p
 
-def main():
-    args = _build_arg_parser().parse_args()
-    out = convert_audio_to_wav(
-        args.input,
-        output_path=args.output_path,
-        output_dir=args.output_dir,
-        sample_rate=args.sample_rate,
-        bit_depth=args.bit_depth,
-        channels=args.channels,
-        overwrite_existing=args.overwrite_existing,
-    )
-    print(str(out))
+
+# ---------------------------------------------------------------------------
+# Command line -- derived from the function(s) above; see helpers.cliargs.CliSpec.
+# The aliases and legacy flags are the spellings the hand-written parser used,
+# kept so every documented invocation still works.
+# ---------------------------------------------------------------------------
+
+CLI = CliSpec(
+    convert_audio_to_wav,
+    description='Convert one audio or video file to PCM WAV.',
+    aliases={
+        'output_dir': ['--out-dir'],
+        'output_path': ['--out'],
+        'sample_rate': ['--sr'],
+    },
+    legacy={},
+    positional=("input_path",),
+)
+
+
+def main(argv=None) -> int:
+    return CLI.run(argv)
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

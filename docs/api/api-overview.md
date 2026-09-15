@@ -1,0 +1,3 @@
+The API section is the authoritative reference for everything in Taters: classes, functions, and CLIs exactly as they exist in the codebase. Each page is generated from the source docstrings (numpy style), so signatures, parameter types, defaults, return values, and raised errors stay in sync with the current release. Use it when you already know what you want to call and need the precise arguments or behavior, or when you want to find related helpers within a module.
+
+It is exhaustive, which can be overwhelming if you are new to the toolkit. For a gentler introduction, start with [the Guides](../guides/guides-overview.md).

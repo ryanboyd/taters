@@ -13,9 +13,16 @@ Importing the package is cheap: the facade only pulls in heavy dependencies
 from __future__ import annotations
 
 from .Taters import Taters
+from .helpers.settings import apply_model_cache as _apply_model_cache
+
+# first thing's first: if someone picked a model cache in Settings (or set
+# TATERS_MODEL_CACHE), it has to be in the environment before any library
+# that downloads models gets imported -- the hub library reads it once, when
+# it first loads. cheap, too: this is one small JSON read.
+_apply_model_cache()
 
 try:  # pragma: no cover - depends on install method
-    from importlib.metadata import PackageNotFoundError, version as _version
+    from importlib.metadata import version as _version
 
     __version__ = _version("taters")
 except Exception:  # pragma: no cover - source checkouts without metadata

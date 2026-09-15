@@ -29,9 +29,9 @@ def test_converts_a_wav_to_the_requested_format(tiny_wav, tmp_path):
     out = convert_audio_to_wav(tiny_wav, output_path=tmp_path / "out.wav")
     stream = audio_stream(out)
     assert Path(out).is_file()
-    assert stream["codec_name"] == "pcm_s16le"      # 16-bit by default
-    assert int(stream["sample_rate"]) == 16000      # ASR-friendly default
-    assert int(stream["channels"]) == 1             # mono default
+    assert stream["codec_name"] == "pcm_s16le"      # 16-bit is our default
+    assert int(stream["sample_rate"]) == 16000      # the ASR-friendly default
+    assert int(stream["channels"]) == 1             # and mono by default
 
 
 @pytest.mark.parametrize("sample_rate", [8000, 22050, 44100, 48000])

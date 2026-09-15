@@ -1,0 +1,99 @@
+site_name: TATERS
+site_description: User guide and API reference for Taters
+site_url: https://taters.wiki
+repo_url: https://github.com/ryanboyd/taters
+
+docs_dir: docs
+
+theme:
+  logo: img/taters-small.png
+  favicon: img/favicon.ico
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default           # light
+      primary: blue grey        # the color; not the scheme name
+      toggle:
+        icon: material/brightness-7
+        name: Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate             # dark
+      primary: blue grey
+      toggle:
+        icon: material/brightness-4
+        name: Light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - toc.integrate
+    - content.code.copy
+    - content.code.annotate
+  navigation_depth: 3
+
+plugins:
+  - search
+  - macros:
+      include_dir: docs/
+      module_name:
+        docs/_macros
+      verbose: true
+  - mkdocstrings:
+      handlers:
+        python:
+          # `paths` is how the handler finds the source. The old `setup_commands`
+          # option belonged to the pre-griffe handler and was removed upstream;
+          # passing it now raises TypeError at build time.
+          paths: ["src"]
+          options:
+            docstring_style: numpy
+            docstring_section_style: table
+            show_source: true
+            show_root_heading: false
+            group_by_category: true      # classes/functions grouped
+            inherited_members: true
+            separate_signature: true
+            merge_init_into_class: true
+            members_order: alphabetical
+            show_root_toc_entry: false
+
+nav:
+  - Home: index.md
+  - Install Taters: install-guide.md
+
+  - The Taters App: guides/wizard.md
+
+  - Guides & Overviews:
+      - Overview: guides/guides-overview.md
+      - Analyzing Text: guides/analyzing-text.md
+      - Built-in Dictionaries & Archetypes: guides/bundled-dictionaries.md
+      - Analyzing Audio: guides/analyzing-audio.md
+      - Running Analyses: guides/running-analyses.md
+      - Statistics: guides/stats.md
+      - Utilities & Helpers: guides/utilities.md
+      - "Pipelines: All-in-One Analyses": guides/pipelines.md
+
+
+  - Help:
+      - Installation troubleshooting: install-troubleshooting.md
+
+  - Complete API Reference Docs:
+      - Overview: api/api-overview.md
+      - Core Class: api/taters.md
+      - Text Modules: api/text.md
+      - Audio Modules: api/audio.md
+      - Pipelines: api/pipelines.md
+      - Setup Wizard: api/wizard.md
+      - Writing Results Safely: api/reliability.md
+      - Statistics: api/stats.md
+      - Utilities & Helpers: api/utilities.md
+
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - attr_list
+  - def_list
+  - md_in_html
+  - toc:
+      permalink: true

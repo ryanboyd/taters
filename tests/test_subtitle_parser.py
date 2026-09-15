@@ -58,11 +58,16 @@ General Kenobi.
     [
         ("00:00:00,000", 0),
         ("00:00:01,000", 1_000),
-        ("00:00:01.500", 1_500),          # dot form accepted too
+        ("00:00:01.500", 1_500),          # we take the dot form too
         ("00:01:00,000", 60_000),
         ("01:00:00,000", 3_600_000),
         ("01:02:03,004", 3_723_004),
-        ("  00:00:02,000  ", 2_000),      # surrounding whitespace tolerated
+        ("  00:00:02,000  ", 2_000),      # stray whitespace around it is fine
+        # WebVTT lets you leave the hours off, and short-clip exporters actually do.
+        # this used to blow up the whole file at its very first cue
+        ("00:01.000", 1_000),
+        # ...and on the other end, a day-long recording is a perfectly legit SRT
+        ("100:00:00,000", 360_000_000),
     ],
 )
 def test_parse_timestamp(text, expected_ms):
@@ -140,12 +145,12 @@ def test_parse_vtt_skips_header_notes_and_cue_ids():
     assert len(segs) == 2
     assert segs[0].start_ms == 1_000
     assert segs[0].text == "Hello there."
-    assert segs[0].number is None          # VTT has no block numbers
+    assert segs[0].number is None          # VTT doesn't have block numbers
 
 
 def test_parse_vtt_drops_cue_settings_after_the_end_time():
     segs = parse_vtt(VTT_SAMPLE)
-    assert segs[1].end_ms == 6_250        # "align:start position:10%" ignored
+    assert segs[1].end_ms == 6_250        # "align:start position:10%" gets ignored
 
 
 def test_parse_vtt_without_a_header():
@@ -178,7 +183,8 @@ def test_parse_subtitles_picks_the_parser_from_the_extension(tmp_path):
 
     assert len(parse_subtitles(srt)) == 2
     assert len(parse_subtitles(vtt)) == 2
-    # SRT is the fallback for unknown extensions, which is common in the wild.
+    # unknown extensions fall back to SRT, since that's what they usually are
+    # out in the wild
     other = tmp_path / "a.sub"
     other.write_text(SRT_SAMPLE, encoding="utf-8")
     assert len(parse_subtitles(other)) == 2

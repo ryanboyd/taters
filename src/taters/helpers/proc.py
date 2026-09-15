@@ -9,11 +9,37 @@ exception message if the child fails.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import threading
 from collections import deque
 from pathlib import Path
-from typing import Mapping, Optional, Sequence, Tuple
+from typing import Dict, Mapping, Optional, Sequence, Tuple
+
+
+def _utf8_stdio(env: Optional[Mapping[str, str]]) -> Dict[str, str]:
+    """
+    Make the child write UTF-8, whatever the console's code page is.
+
+    A child that prints a path is a child that can be killed by the path. On
+    Windows, `print()` encodes to the active code page -- cp1252 for most
+    Western installs -- and a filename containing a character it cannot map
+    raises `UnicodeEncodeError` and takes the process down with a non-zero exit.
+
+    Media filenames are full of exactly those characters: anything downloaded
+    from the web arrives with fullwidth stand-ins (`：`, `？`, `／`) for the
+    punctuation a filesystem refuses. One real run lost a whole embeddings step
+    that way -- and lost it on the line announcing success, after the CSV had
+    already been written, so the work was done and thrown away.
+
+    `PYTHONIOENCODING` covers the child's own streams; `PYTHONUTF8` covers
+    anything it opens without naming an encoding. Neither overrides a value the
+    caller set deliberately.
+    """
+    merged: Dict[str, str] = dict(env) if env is not None else dict(os.environ)
+    merged.setdefault("PYTHONIOENCODING", "utf-8")
+    merged.setdefault("PYTHONUTF8", "1")
+    return merged
 
 
 def run_and_stream(
@@ -64,7 +90,7 @@ def run_and_stream(
     proc = subprocess.Popen(
         list(cmd),
         cwd=str(cwd) if cwd is not None else None,
-        env=dict(env) if env is not None else None,
+        env=_utf8_stdio(env),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -82,18 +108,17 @@ def run_and_stream(
             if stream:
                 print(f"{prefix}{line}", flush=True)
 
-    # The reader has to run off the main thread: iterating the pipe blocks until
-    # the child closes it, so waiting for output and enforcing `timeout` cannot
-    # happen on the same thread. (select() would be POSIX-only; this works on
-    # Windows too.)
+    # the reader has to run off the main thread: iterating the pipe blocks until
+    # the child closes it, so we can't wait for output and enforce `timeout` on
+    # the same thread. (select() would be POSIX-only; this works on Windows too.)
     reader = threading.Thread(target=_pump, name="taters-proc-reader", daemon=True)
     reader.start()
 
     try:
         proc.wait(timeout=timeout)
     except BaseException:
-        # Covers TimeoutExpired and KeyboardInterrupt alike: never leave an
-        # orphaned ffmpeg/whisper process behind.
+        # this covers TimeoutExpired and KeyboardInterrupt alike: we never want
+        # to leave an orphaned ffmpeg/whisper process behind.
         proc.kill()
         proc.wait()
         reader.join(timeout=5)

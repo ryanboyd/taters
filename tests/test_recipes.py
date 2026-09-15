@@ -1,0 +1,969 @@
+"""
+Tests for the recipe catalog — the hand-declared wiring behind the wizard.
+
+The catalog is the one part of the wizard that is not derived from the code, so
+it is the one part that can drift away from it. These tests pin it down: every
+`call` must resolve, every parameter named in a `with_` block or a `hidden`
+list must exist on the real function, and the capability graph must actually be
+satisfiable.
+
+Rename a parameter in `src/` and this file fails immediately, rather than a
+user finding out mid-run.
+"""
+
+from __future__ import annotations
+
+import pytest
+from preset_checks import templates_in, underlying
+
+from taters.ui import recipes as _r
+from taters.ui.introspect import describe, load_target
+from taters.ui.recipes import (
+    BASE_VARS,
+    CAPABILITIES,
+    RECIPES,
+    SOURCES,
+    TEXT_INPUT_KEYS,
+    by_id,
+    providers_of,
+    text_binding,
+    user_facing,
+)
+
+
+def pytest_generate_tests(metafunc):
+    """One test per recipe, so a failure names the recipe that broke."""
+    if "recipe" in metafunc.fixturenames:
+        metafunc.parametrize("recipe", RECIPES, ids=[r.id for r in RECIPES])
+
+
+# --- catalog-wide -----------------------------------------------------------
+
+def test_ids_are_unique():
+    ids = [r.id for r in RECIPES]
+    assert len(ids) == len(set(ids))
+
+
+def test_something_is_offered_to_the_user():
+    assert user_facing(), "the feature checklist would be empty"
+
+
+def test_every_requirement_has_a_producer():
+    """A capability nothing produces is a step that can never run."""
+    produced = {c for r in RECIPES for c in r.produces}
+    required = {c for r in RECIPES for c in r.requires}
+    assert required <= produced, f"unsatisfiable: {sorted(required - produced)}"
+
+
+def test_every_capability_is_described():
+    """`CAPABILITIES` supplies the wording for the wizard's prompts."""
+    used = {c for r in RECIPES for c in (r.requires | r.produces)}
+    assert used <= set(CAPABILITIES), f"undescribed: {sorted(used - set(CAPABILITIES))}"
+
+
+def test_auto_with_targets_exist():
+    for recipe in RECIPES:
+        for follow_on in recipe.auto_with:
+            by_id(follow_on)      # raises with the valid ids if it's a typo
+
+
+def test_transcripts_have_exactly_two_producers():
+    """
+    The wizard's one real branch. If this ever changes, `resolve_providers`
+    needs to know — a third option is fine, but silently going down to one
+    would mean the "how should we transcribe?" question stops being asked.
+    """
+    assert [r.id for r in providers_of("transcript_csv")] == ["transcribe", "diarize"]
+
+
+def test_by_id_names_the_alternatives_when_it_fails():
+    """The error has to be actionable; the bad id alone is not enough to fix it."""
+    with pytest.raises(KeyError, match="transcribe"):
+        by_id("transcirbe")
+
+
+# --- per recipe -------------------------------------------------------------
+
+def test_scope_is_valid(recipe):
+    assert recipe.scope in {"item", "global"}
+
+
+def test_call_resolves_through_the_facade(recipe):
+    """`potato.audio.foo` must be a real method on a real Taters instance."""
+    assert callable(underlying(recipe.call))
+
+
+def test_target_points_at_the_same_function_as_the_call(recipe):
+    """
+    A recipe names its function twice: once as a `call` for the runner, once as
+    a `target` the wizard imports to read options from. They must agree, or the
+    options screen describes a different function than the one that runs.
+    """
+    try:
+        target = load_target(recipe.target)
+    except ImportError as exc:
+        pytest.skip(f"{recipe.id} needs an optional dependency: {exc}")
+    assert target is underlying(recipe.call)
+
+
+def test_template_parameters_exist_on_the_function(recipe):
+    """Catches a renamed parameter before it reaches a preset."""
+    try:
+        spec = describe(load_target(recipe.target))
+    except ImportError as exc:
+        pytest.skip(f"{recipe.id} needs an optional dependency: {exc}")
+    unknown = set(recipe.with_) - set(spec.names)
+    assert not unknown, f"{recipe.id} passes parameters that do not exist: {sorted(unknown)}"
+
+
+def test_hidden_parameters_exist_on_the_function(recipe):
+    try:
+        spec = describe(load_target(recipe.target))
+    except ImportError as exc:
+        pytest.skip(f"{recipe.id} needs an optional dependency: {exc}")
+    unknown = set(recipe.hidden) - set(spec.names)
+    assert not unknown, f"{recipe.id} hides options that do not exist: {sorted(unknown)}"
+
+
+def test_required_parameters_are_supplied(recipe):
+    """
+    A step whose `with:` omits a required argument fails at call time, deep
+    inside a thread pool, with a traceback nobody wants to read.
+    """
+    try:
+        spec = describe(load_target(recipe.target))
+    except ImportError as exc:
+        pytest.skip(f"{recipe.id} needs an optional dependency: {exc}")
+    missing = [p.name for p in spec.params if p.required and p.name not in recipe.with_]
+    assert not missing, f"{recipe.id} never supplies required {missing}"
+
+
+def test_var_templates_are_declared_somewhere(recipe):
+    """
+    Every `{{var:x}}` a recipe uses must be contributed by some recipe or by
+    `BASE_VARS`, or the composed preset references a variable it never defines.
+    """
+    declared = set(BASE_VARS)
+    for other in RECIPES:
+        declared |= set(other.vars)
+
+    # templates_in() walks nested lists/dicts and copes with templates buried in
+    # a longer string, e.g. "{{var:features_dir}}/acoustics"
+    used = {expr.split(":", 1)[1]
+            for expr in templates_in(recipe.with_)
+            if expr.startswith("var:")}
+    assert used <= declared, f"{recipe.id} uses undeclared vars: {sorted(used - declared)}"
+
+
+def test_user_facing_recipes_explain_themselves(recipe):
+    """The checklist is the whole interface; a blank line there is useless."""
+    if not recipe.user_facing:
+        return
+    assert recipe.label and recipe.help
+    assert not recipe.label.endswith("."), "labels read better without a full stop"
+
+
+# ---------------------------------------------------------------------------
+# source-aware wiring
+# ---------------------------------------------------------------------------
+
+def test_every_recipe_declares_at_least_one_source():
+    for recipe in RECIPES:
+        assert recipe.sources, f"{recipe.id} is offered for no source at all"
+        unknown = set(recipe.sources) - set(SOURCES)
+        assert not unknown, f"{recipe.id} names unknown source(s) {sorted(unknown)}"
+
+
+def test_only_text_steps_claim_to_handle_text():
+    """
+    A recipe that says it works on a folder of essays but shells out to ffmpeg
+    would be offered to someone it can only fail for.
+    """
+    for recipe in RECIPES:
+        if set(recipe.sources) - {"media"}:
+            assert not recipe.needs_ffmpeg, f"{recipe.id} needs ffmpeg but claims text sources"
+            assert recipe.scope == "global", f"{recipe.id} is item-scoped but claims text sources"
+
+
+def test_text_input_recipes_are_the_ones_wired_to_transcripts():
+    """
+    `text_input` marks the steps whose input binding gets rewritten. If a step
+    reads the merged transcript table and is *not* marked, it would keep that
+    wiring on a text source and read a file the run never produced.
+    """
+    for recipe in RECIPES:
+        reads_transcripts = "unified_transcripts_csv" in recipe.requires
+        assert reads_transcripts == recipe.text_input, (
+            f"{recipe.id}: text_input={recipe.text_input} but "
+            f"requires unified_transcripts_csv = {reads_transcripts}"
+        )
+
+
+def test_text_binding_never_mixes_two_input_modes():
+    """
+    The analyzers take exactly one of `analysis_csv` / `csv_path` / `txt_dir`.
+    Two at once is not an error they raise; it is an error they ignore.
+    """
+    for source in ("txt_dir", "csv"):
+        binding = text_binding(source, text_cols=["t"], id_cols=["i"], pass_through=True)
+        present = {"csv_path", "txt_dir", "analysis_csv"} & set(binding)
+        assert len(present) == 1, f"{source} produced {sorted(present)}"
+
+
+def test_text_binding_keys_are_all_declared_as_input_keys():
+    """
+    `TEXT_INPUT_KEYS` is the strip-list applied before a rebind. A key the
+    binding sets but the list does not name would survive from the media wiring
+    and then be overwritten -- harmless -- but a key the *media* wiring sets and
+    the list does not name would survive and be read. Keeping the two in step is
+    what makes the rebind total.
+    """
+    for source in ("txt_dir", "csv"):
+        binding = text_binding(source, text_cols=["t"], id_cols=["i"], pass_through=True)
+        assert set(binding) <= set(TEXT_INPUT_KEYS), (
+            f"{source} sets {sorted(set(binding) - set(TEXT_INPUT_KEYS))}, "
+            "which the strip-list does not cover"
+        )
+
+
+def test_media_binding_is_empty_so_transcript_wiring_is_left_alone():
+    assert text_binding("media") == {}
+
+
+def test_text_binding_rejects_an_unknown_source():
+    with pytest.raises(KeyError, match="unknown source"):
+        text_binding("telepathy")
+
+
+def test_every_text_input_key_is_a_real_parameter():
+    """
+    The strip-list names arguments by hand. A rename in `src/` would leave a
+    stale entry that silently stops stripping the thing it was meant to strip.
+    """
+    for recipe in RECIPES:
+        if not recipe.text_input:
+            continue
+        params = {p.name for p in describe(load_target(recipe.target)).params}
+        for key in TEXT_INPUT_KEYS & set(recipe.with_):
+            assert key in params, f"{recipe.id}: with_[{key!r}] is not a parameter"
+
+
+def test_source_with_patches_name_real_parameters():
+    for recipe in RECIPES:
+        if not recipe.source_with:
+            continue
+        params = {p.name for p in describe(load_target(recipe.target)).params}
+        for source, patch in recipe.source_with.items():
+            assert source in SOURCES, f"{recipe.id}: unknown source {source!r}"
+            for key in patch:
+                assert key in params, f"{recipe.id}.source_with[{source!r}]: {key!r} is not a parameter"
+
+
+def test_text_sources_do_not_promise_results_per_speaker():
+    """
+    "per speaker per file" is exactly right for a recorded conversation and
+    simply untrue for a folder of essays. The help line under a checkbox is
+    most of what a non-programmer has to go on, so it has to match the source
+    they chose.
+    """
+    for recipe in RECIPES:
+        if not recipe.user_facing or set(recipe.sources) == {"media"}:
+            continue
+        shown = recipe.text_help or recipe.help
+        assert "speaker" not in shown.lower(), (
+            f"{recipe.id} offers itself for text but its help says: {shown!r}"
+        )
+
+
+def test_gathered_csv_is_a_real_parameter_on_every_text_analyzer():
+    """
+    It is set by `text_binding` for the non-media sources, so a rename in
+    `src/` would silently stop redirecting the intermediate rather than error.
+    """
+    for recipe in RECIPES:
+        if not recipe.text_input:
+            continue
+        params = {p.name for p in describe(load_target(recipe.target)).params}
+        assert "gathered_csv" in params, recipe.id
+
+
+# ---------------------------------------------------------------------------
+# how many files a GPU step may work on at once
+#
+# this is the one thing no amount of inspection can work out from the outside:
+# `transcribe` and `whisper_embeddings` have nearly identical signatures but
+# differ fourfold in how their VRAM scales. we measured on four files with `tiny`:
+#
+#   transcribe          272 MiB flat at 1, 2 and 4 workers   (one shared model)
+#   whisper_embeddings  240 -> 479 -> 893 MiB, and slower every step up
+#
+# so we declare it per step, once, and whoever writes the step is on the hook
+# ---------------------------------------------------------------------------
+
+def test_every_recipe_declares_what_it_does_to_the_gpu(recipe):
+    """
+    Explicitly, including the CPU ones. Inference exists as a safety net for
+    presets written before the field, not as the way the catalog works -- a
+    reader should be able to see the answer without deducing it.
+    """
+    from taters.helpers.gpu import GPU_USE
+
+    assert recipe.gpu_use in GPU_USE, (
+        f"{recipe.id} declares gpu_use={recipe.gpu_use!r}; expected one of {GPU_USE}"
+    )
+
+
+def test_a_step_that_shares_one_model_may_run_two_files(recipe):
+    from taters.helpers.gpu import WORKER_CAP
+
+    assert WORKER_CAP["gpu_one_model"] == 2
+    assert WORKER_CAP["gpu_model_each"] == 1
+    assert WORKER_CAP["cpu"] is None
+
+
+def test_an_undeclared_gpu_step_is_capped_at_one(recipe):
+    """
+    The safety net. A new module whose author forgot the field costs speed, not
+    a crashed batch -- so forgetting fails in the recoverable direction.
+    """
+    from dataclasses import replace as _replace
+
+    if not any(isinstance(v, str) and "{{var:device}}" in v
+               for v in recipe.with_.values()):
+        pytest.skip(f"{recipe.id} does not hand a device to anything")
+
+    undeclared = _replace(recipe, gpu_use=None)
+    assert undeclared.resolved_gpu_use == "gpu_model_each"
+    assert undeclared.worker_cap == 1
+
+
+def test_a_cpu_step_is_never_capped(recipe):
+    """
+    `--workers 8` has to keep meaning 8 for ffmpeg conversion and the merges.
+    Capping those would make the one concurrency knob a lie.
+    """
+    if recipe.resolved_gpu_use != "cpu":
+        pytest.skip(f"{recipe.id} uses the GPU")
+    assert recipe.worker_cap is None
+
+
+def test_the_cap_reaches_the_step_a_preset_will_carry(recipe):
+    """
+    Written into the YAML rather than left implicit, so a preset someone edits
+    by hand -- or hands to a colleague -- carries the limit with it instead of
+    depending on a catalog they may not have.
+    """
+    step = recipe.to_step()
+    if recipe.scope != "item" or recipe.worker_cap is None:
+        assert "max_workers" not in step
+    else:
+        assert step["max_workers"] == recipe.worker_cap
+
+
+def test_a_global_step_carries_no_ceiling(recipe):
+    """A `global` step is one call, so a ceiling on it states nothing."""
+    if recipe.scope == "global":
+        assert "max_workers" not in recipe.to_step()
+
+
+def test_the_gpu_steps_are_the_ones_we_think_they_are():
+    """
+    A canary on the catalog as a whole. If a step starts or stops using the GPU
+    and nobody updates its declaration, this is where it shows up -- rather than
+    in someone's out-of-memory error.
+    """
+    from taters.ui.recipes import RECIPES
+
+    on_gpu = {r.id for r in RECIPES if r.resolved_gpu_use != "cpu"}
+    assert on_gpu == {
+        "transcribe",            # one shared CTranslate2 model
+        "diarize",               # a subprocess per file: NeMo, Demucs, aligner
+        "whisper_embeddings",    # a subprocess per file: its own encoder
+        "archetypes",            # ArchetypeQuantifier loads a sentence-transformer
+        "sentence_embeddings",   # loads a sentence-transformer
+        "transformer_embeddings",  # loads an encoder
+        "adapt_encoder",           # trains one
+        "finetune_text_predictor", # trains one with heads
+        "text_predictor_apply", "hf_classifier_apply",    # loads the fine-tuned one
+        # the n-gram family under engine=stanza: one global call, one model.
+        # under the default nltk engine they never touch the GPU, but the
+        # declaration is about what the step *can* cost
+        "ngram_frequencies",
+        "doc_term_matrix",
+        "parts_of_speech",
+        "score_with_model",             # the saved model may be stanza-built
+        "topic_model_mem_apply",        # likewise: the theme model's tokenizer
+        "word_vectors_train",           # likewise: tokenizing under stanza
+        "word_vectors_apply",
+        "cohesion",              # stanza prep and/or the embedding model
+    }
+
+
+# ---------------------------------------------------------------------------
+# analysis levels
+# ---------------------------------------------------------------------------
+
+
+def test_every_level_groups_on_columns_the_source_actually_produces():
+    """
+    A `group_by` naming a column that is not there is a run-time error several
+    minutes in, not a no-op. `media` transcripts carry `source` (added by the
+    gather) and `speaker` (written by the transcriber); a spreadsheet's columns
+    belong to the user, which is what `group_by=None` means.
+    """
+    available = {"media": {"source", "speaker"}, "txt_dir": {"text_id"}}
+
+    for source, levels in _r.LEVELS.items():
+        for level in levels:
+            if level.group_by is None:
+                assert source == "csv", (
+                    f"{source}/{level.id} leaves its columns to the user, but "
+                    "only a spreadsheet can do that"
+                )
+                continue
+            unknown = set(level.group_by) - available.get(source, set())
+            assert not unknown, f"{source}/{level.id} groups on {sorted(unknown)}"
+
+
+def test_every_source_has_a_default_level_that_exists():
+    for source in _r.SOURCES:
+        assert source in _r.DEFAULT_LEVEL, source
+        # raises if the default names a level the source doesn't have
+        assert _r.level_by_id(source, None).id == _r.DEFAULT_LEVEL[source]
+
+
+def test_level_ids_are_unique_within_a_source():
+    for source, levels in _r.LEVELS.items():
+        ids = [level.id for level in levels]
+        assert len(ids) == len(set(ids)), f"{source}: {ids}"
+
+
+def test_the_level_governs_the_text_features_and_nothing_else():
+    """
+    Derived from the capability graph rather than declared, so a new module
+    needs no wizard work. The audio features must stay out: there is no
+    per-utterance WAV, so "one row per utterance" cannot mean anything for them.
+    """
+    aware = {r.id for r in _r.RECIPES if _r.level_aware(r)}
+
+    assert {"readability", "lexical_richness", "dictionaries", "archetypes",
+            "sentence_embeddings", "gather_sentence_embeddings"} <= aware
+    assert not ({"acoustics", "gather_whisper_embeddings", "convert_to_wav",
+                 "transcribe", "diarize", "gather_transcripts"} & aware)
+
+
+def test_every_per_file_table_has_something_that_collects_it():
+    """
+    An `item` step runs once per input and writes one CSV per input. Something
+    `global` has to collect those, or the run leaves a pile of per-file files
+    and no feature table -- and nothing about that failure is visible: every
+    step reports success, because every step did succeed.
+
+    `auto_with` is how a step says so, and it has no other structural check on
+    it, so forgetting it on a new extractor is the mistake this exists to catch.
+
+    A golden list rather than a rule, because whether per-file output is
+    acceptable on its own is a judgment the catalog cannot make. Transcripts
+    are: one .csv per recording in `transcripts/` is a thing people came for.
+    Per-file acoustic summaries are not -- nobody wants 400 one-row files. So a
+    *new* name appearing here is not automatically wrong, but it does mean
+    somebody has to decide, which is the point.
+    """
+    from taters.ui.compose import resolve_selection
+
+    uncollected = set()
+    for recipe in RECIPES:
+        tables = {c for c in recipe.produces if c.endswith("_csv")}
+        if recipe.scope != "item" or not tables:
+            continue
+        # through the closure, not the catalog. a gather that exists but isn't
+        # named anywhere never joins the pipeline, and asserting that it merely
+        # exists would pass whether or not `auto_with` mentions it
+        pipeline = resolve_selection([recipe.id],
+                                     providers={"transcript_csv": recipe.id}
+                                     if "transcript_csv" in recipe.produces else {})
+        if not any(x.scope == "global" and (tables & x.requires) for x in pipeline):
+            uncollected.add(recipe.id)
+
+    assert uncollected == {"transcribe", "diarize"}, (
+        f"{sorted(uncollected)} write a table per file with nothing to collect "
+        "them. If that is a new feature extractor, name a gather step in its "
+        "`auto_with`; if its per-file output stands on its own, add it here."
+    )
+
+
+def test_two_recipes_share_a_save_as_only_as_alternatives():
+    """
+    `transcribe` and `diarize` both save as `diar`, deliberately: downstream
+    steps reference `{{diar...}}` without caring which produced it, and
+    `resolve_selection` drops whichever the user did not choose.
+
+    That is only safe while they are alternatives. Two steps that could both
+    run with the same `save_as` would have the second overwrite the first for
+    everything downstream, which is silent and total.
+    """
+    from collections import Counter
+
+    for save_as, count in Counter(r.save_as for r in RECIPES).items():
+        if count == 1:
+            continue
+        sharers = [r for r in RECIPES if r.save_as == save_as]
+        shared_caps = set.intersection(*(set(r.produces) for r in sharers))
+        assert shared_caps, (
+            f"{[r.id for r in sharers]} share save_as={save_as!r} but produce "
+            "nothing in common, so they are not alternatives and would clobber "
+            "each other"
+        )
+        # ...and the capability they share has to be one the user gets asked
+        # about, otherwise nothing would ever drop the losers
+        for capability in shared_caps:
+            assert len(_r.providers_of(capability)) == count, capability
+
+
+#: Runtime libraries that cost seconds to import and that the options screen
+#: has no use for. Reading a function's parameter names must not pull these in.
+_HEAVY = ("torch", "sentence_transformers", "nemo", "transformers",
+          "archetypes.archetypes", "faster_whisper", "nltk")
+
+
+def test_reading_a_steps_settings_does_not_load_its_runtime(recipe):
+    """
+    From a real report: opening the options for "Archetype similarity" looked
+    like the wizard had frozen. It had not -- it was importing
+    `archetypes.archetypes`, which imports sentence-transformers, which imports
+    torch: **twenty seconds** of nothing, to find out what the parameters are
+    called.
+
+    The options screen only ever needs a signature and a docstring. Anything a
+    step needs in order to *run* belongs inside the function. This matters more
+    with every module built on a pre-trained model, so it is checked per recipe
+    rather than left as a note.
+
+    Run in a subprocess: `sys.modules` is process-wide and something else in
+    the suite will already have imported half of this list.
+    """
+    import subprocess
+    import sys
+    import textwrap
+
+    code = textwrap.dedent(f"""
+        import sys
+        from taters.ui.introspect import load_target, describe
+        describe(load_target({recipe.target!r}))
+        heavy = [m for m in {_HEAVY!r} if m in sys.modules]
+        print(",".join(heavy))
+    """)
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                       text=True, timeout=300)
+    if r.returncode != 0:
+        pytest.skip(f"{recipe.id} is not installed here: {r.stderr.strip()[-120:]}")
+
+    loaded = [m for m in r.stdout.strip().split(",") if m]
+    assert not loaded, (
+        f"reading {recipe.id}'s settings imported {loaded}. Move that import "
+        "inside the function that needs it -- the options screen only reads the "
+        "signature, and this is what makes it look frozen."
+    )
+
+
+# ---------------------------------------------------------------------------
+# the library
+# ---------------------------------------------------------------------------
+
+
+def test_library_declarations_name_real_kinds_and_real_parameters(recipe):
+    """
+    `library={"dict_paths": "dictionaries"}` is the whole hookup for a step
+    that consumes importable assets. Both halves are checkable: the kind must
+    exist in the catalog, and the parameter must exist on the function and be
+    wired in the step's `with:` -- a typo in either place would otherwise
+    surface as a picker that writes to nowhere.
+    """
+    from taters.helpers.library import kind_by_id
+
+    for param_name, kind_id in recipe.library.items():
+        kind_by_id(kind_id)                       # raises, naming valid kinds
+        if param_name not in recipe.library_defaults:
+            # optional library params (see Recipe.library_defaults) stay out
+            # of `with:` on purpose: untouched means the step runs without
+            # one. the mandatory ones have to be wired, otherwise the picker
+            # writes to nowhere
+            assert param_name in recipe.with_, (recipe.id, param_name)
+        spec = describe(load_target(recipe.target))
+        assert param_name in {p.name for p in spec.params}, (recipe.id, param_name)
+
+
+def test_library_default_entries_actually_ship(recipe):
+    """
+    `library_defaults` names files by their exact filename; a typo would
+    surface as a picker that quietly starts with nothing ticked. Every named
+    entry must exist in the package's shipped seed folder for that kind.
+    """
+    from taters.helpers.library import _shipped_dir, kind_by_id
+
+    for param_name, names in recipe.library_defaults.items():
+        assert param_name in recipe.library, (recipe.id, param_name)
+        shipped = _shipped_dir(kind_by_id(recipe.library[param_name]))
+        for name in names:
+            assert (shipped / name).is_file(), (recipe.id, param_name, name)
+
+
+def test_the_dictionary_consumers_declare_their_kinds():
+    """The known consumers; a golden pin so the hookup cannot quietly drop."""
+    assert _r.by_id("dictionaries").library == {"dict_paths": "dictionaries"}
+    assert _r.by_id("archetypes").library == {"archetype_csvs": "archetypes"}
+    assert _r.by_id("ngram_frequencies").library == {"stoplist_paths": "stoplists"}
+    assert _r.by_id("doc_term_matrix").library == {}
+
+
+def test_no_step_hardcodes_a_knob_the_pipeline_offers_as_a_variable(recipe):
+    """
+    From the code review (issues 6 and 7): the embeddings merge hardcoded
+    `overwrite_existing: False`, so `--var overwrite_existing=true` regenerated
+    every output except the aggregate -- stale numbers presented as fresh. And
+    every gather wrote its `out_csv` to a literal `features/...` while reading
+    `root_dir` from `{{var:features_dir}}` -- redirecting the variable made the
+    run fail or split output across two folders.
+
+    Pinned as a rule, not per instance: any parameter for which the pipeline
+    declares a variable must read that variable, everywhere it appears.
+    """
+    for key, wanted_var in (("overwrite_existing", "overwrite_existing"),):
+        if key in recipe.with_:
+            assert recipe.with_[key] == f"{{{{var:{wanted_var}}}}}", (
+                f"{recipe.id}.{key} hardcodes {recipe.with_[key]!r}"
+            )
+    for key, value in recipe.with_.items():
+        if isinstance(value, str) and value.startswith("features/"):
+            raise AssertionError(
+                f"{recipe.id}.{key} writes to a literal 'features/' path; "
+                "use {{var:features_dir}} so redirecting the variable moves "
+                "every output together"
+            )
+
+
+def test_a_gather_scans_exactly_where_its_producer_writes(recipe):
+    """
+    The whisper extractor once relied on its internal default output folder
+    while its gather read `{{var:features_dir}}/whisper-embeddings` -- identical
+    at the default, split the moment anyone redirected the variable, failing
+    the run with "No files matched". The producer must name the same location,
+    as the same template, so the two cannot drift apart.
+    """
+    for gather_id in recipe.auto_with:
+        gather = _r.by_id(gather_id)
+        root = gather.with_.get("root_dir")
+        if not isinstance(root, str) or not root.startswith("{{var:"):
+            continue    # e.g. "{{sent_embeds}}": wired to the step output itself
+        assert root in recipe.with_.values(), (
+            f"'{gather_id}' scans {root!r} but '{recipe.id}' never writes "
+            "there -- pass the same template to the producer's output "
+            "directory parameter"
+        )
+
+
+def test_the_acoustics_mode_description_offers_only_real_modes():
+    """Round-2 cut list: the description offered "full", which the analyzer's
+    Mode literal does not contain -- it silently behaved as "simple", the
+    quietest possible way to not give someone the features they asked for."""
+    import re
+
+    from taters.audio.analyze_vocal_acoustics import Mode
+    from typing import get_args
+
+    desc = _r.by_id("acoustics").vars["acoustics_mode"]["desc"]
+    offered = set(re.findall(r"[a-z]+", desc.split(":", 1)[1].lower())) - {"or", "and"}
+    real = set(get_args(Mode))
+    assert offered, "the description stopped naming the options at all"
+    assert offered <= real, f"description offers {offered - real} which do not exist"
+
+
+def test_every_offered_setting_explains_itself(recipe):
+    """
+    Reported: "most of the parameters don't seem to have a description
+    attached, meaning you'd have to already know what they are for". The
+    options screen shows each setting's docstring line; a parameter that is
+    offered but undocumented is a question the user cannot answer.
+    """
+    from taters.ui.wizard import describe, is_wired, load_target
+
+    spec = describe(load_target(recipe.target))
+    bare = [p.name for p in spec.params
+            if not p.desc and not p.required and not is_wired(recipe, p.name)]
+    assert not bare, f"{recipe.id} offers undocumented settings: {bare}"
+
+
+def test_param_when_gates_name_real_settings(recipe):
+    """A typo'd gate would hide a row forever (or never): both halves of every
+    `param_when` entry must exist on the target function."""
+    if not recipe.param_when:
+        return
+    from taters.ui.recipes import gate_of
+
+    spec = describe(load_target(recipe.target))
+    names = set(spec.names)
+    for param in recipe.param_when:
+        gate_param, op, _value = gate_of(recipe, param)   # raises on a bad shape
+        assert op in ("==", "!=")
+        assert param in names, (recipe.id, param)
+        assert gate_param in names, (recipe.id, gate_param)
+        assert gate_param not in recipe.param_when, (
+            recipe.id, "a gate must not itself be gated")
+
+
+def test_the_engine_aware_steps_share_the_engine_vars():
+    """One answer per pipeline for engine/tokenizer/stanza_lang: a vocabulary
+    prepared one way is silently unfindable by a step reading another way."""
+    for rid in ("ngram_frequencies", "doc_term_matrix", "parts_of_speech"):
+        rec = _r.by_id(rid)
+        for var in ("engine", "tokenizer", "stanza_lang"):
+            assert rec.with_[var] == f"{{{{var:{var}}}}}", (rid, var)
+            assert var in rec.vars, (rid, var)
+        assert rec.with_["device"] == "{{var:device}}", rid
+
+
+# ---------------------------------------------------------------------------
+# stages: the feature checklist and the statistics stage are separate screens
+# ---------------------------------------------------------------------------
+
+def test_the_feature_checklist_never_offers_an_analysis():
+    """
+    Mixing "extract cohesion" with "run an ANOVA" on one screen buries both:
+    the first is about what to measure, the second about what to conclude,
+    and the second cannot even be answered until the first is. `stage` keeps
+    them apart, and `user_facing()` is where that has to bite.
+    """
+    for source in SOURCES:
+        offered = {r.id for r in _r.user_facing(source)}
+        analyses = {r.id for r in RECIPES if r.stage == "analyze"}
+        assert not (offered & analyses), \
+            f"{source}: analysis steps leaked onto the feature checklist"
+
+
+def test_the_analysis_stage_offers_exactly_the_analyses():
+    offered = [r.id for r in _r.user_facing("csv", stage="analyze")]
+    # reducing the features to components is NOT a row here: it's a setting on
+    # each analysis, so it can differ between them and per feature set
+    assert offered == ["stats_group_differences", "stats_correlations",
+                       "stats_ridge_fit", "stats_classify_fit"]
+    # and nothing at all where there's no metadata to analyze
+    assert _r.user_facing("txt_dir", stage="analyze") == []
+
+
+def test_every_stats_step_is_a_tail_global_on_the_csv_path():
+    """The stats steps read feature tables the run just wrote; an item-scoped
+    or media-source one could not."""
+    for recipe in RECIPES:
+        if recipe.stage != "analyze":
+            continue
+        assert recipe.scope == "global", recipe.id
+        assert recipe.sources == ("csv",), recipe.id
+        assert not recipe.text_input, recipe.id
+        assert "stats" in recipe.tags, recipe.id
+
+
+def test_word_count_is_a_filter_ingredient_not_a_feature_to_pick():
+    """Nobody sets out to extract a word count: it is a thing you filter on,
+    and the filter question adds the step. Offering it alongside cohesion
+    and readability would put a one-column table on a list of analyses."""
+    for source in SOURCES:
+        offered = {r.id for r in _r.user_facing(source)}
+        assert "word_count" not in offered, source
+
+    # ...but it's still a real, joinable step the pipeline can run
+    recipe = _r.by_id("word_count")
+    assert recipe.feature_table and recipe.scope == "global"
+    assert set(recipe.sources) == {"media", "txt_dir", "csv"}
+
+
+# ---------------------------------------------------------------------------
+# closed sets have to say so, or the options screen turns into a guessing game
+# ---------------------------------------------------------------------------
+
+def test_a_setting_with_a_closed_set_offers_it_rather_than_a_text_box():
+    """The report: the correlations step's "method" was a free-text box, so
+    there was no way to learn that pearson, spearman and both were the
+    words it knew. A numpydoc type of {"a", "b"} turns it into a picker."""
+    expected = {
+        ("taters.stats.correlations:analyze_correlations", "method"):
+            ["pearson", "spearman", "both"],
+        ("taters.stats.group_differences:analyze_group_differences",
+         "posthoc"):
+            ["auto", "tukey", "games_howell", "bonferroni", "none"],
+    }
+    for (target, name), choices in expected.items():
+        spec = describe(load_target(target))
+        param = next(p for p in spec.params if p.name == name)
+        assert param.widget == "choice", f"{target}.{name} is a text box"
+        assert param.choices == choices
+
+
+def test_the_correction_menu_cannot_drift_from_the_methods_that_exist():
+    """The docstring's set and the implementation's set are two lists of the
+    same thing, and two lists of the same thing drift. Adding a correction
+    without offering it would leave it unreachable from the wizard."""
+    from taters.stats._common import P_ADJUST_METHODS
+
+    for target in ("taters.stats.correlations:analyze_correlations",
+                   "taters.stats.group_differences:analyze_group_differences"):
+        spec = describe(load_target(target))
+        param = next(p for p in spec.params if p.name == "p_adjust")
+        assert set(param.choices) == set(P_ADJUST_METHODS), target
+
+
+def test_every_step_that_takes_a_device_offers_the_devices():
+    """`device` is a *shared* setting, and the shared row borrows the spec of
+    whichever step happens to reference it first -- so one step documenting
+    it as bare `str` made the row a free-text box for everybody, depending on
+    what else was selected. Five did. Declaring the set everywhere makes the
+    donor irrelevant."""
+    from taters.helpers.gpu import DEVICE_CHOICES
+
+    checked = 0
+    for recipe in RECIPES:
+        if not any(isinstance(v, str) and "{{var:device}}" in v
+                   for v in recipe.with_.values()):
+            continue
+        try:
+            spec = describe(load_target(recipe.target))
+        except ImportError:
+            continue
+        param = next((p for p in spec.params if p.name == "device"), None)
+        if param is None:
+            continue
+        checked += 1
+        assert param.widget == "choice", \
+            f"{recipe.id} offers 'device' as a text box"
+        assert set(param.choices) <= set(DEVICE_CHOICES), \
+            f"{recipe.id} offers devices that are not devices: {param.choices}"
+    assert checked >= 8, "the test stopped finding the steps it guards"
+
+
+def test_every_merge_recipe_says_which_columns_are_not_features():
+    """The Whisper merge averaged `start_time`/`end_time` into predictors
+    because, unlike the sentence-embedding merge, it named no exclusions.
+    A merge that aggregates every numeric column has to say which are not
+    measures."""
+    merges = [r for r in RECIPES if r.feature_table
+              and r.target.endswith("feature_gather:feature_gather")]
+    assert merges, "the catalog has merge steps"
+    for r in merges:
+        assert r.with_.get("exclude_cols"), f"{r.id} names no exclude_cols"
+    whisper = by_id("gather_whisper_embeddings").with_["exclude_cols"]
+    assert {"start_time", "end_time"} <= set(whisper)
+    acoustics = by_id("gather_acoustics").with_["exclude_cols"]
+    assert {"start_s_mean", "end_s_mean", "segment_index_mean"} <= set(acoustics)
+
+
+def test_gate_rules_read_the_way_they_are_written():
+    """`(gate, value)` shows the row while the gate equals the value;
+    `(gate, "!=", value)` while it is anything else; an unknown live value
+    shows the row -- hiding a setting wrongly is the one mistake the screen
+    must never make."""
+    from taters.ui.introspect import EMPTY
+    from taters.ui.recipes import Recipe, gate_holds, gate_of
+
+    r = Recipe(id="r", label="r", help="", call="c", target="t", scope="global",
+               save_as="s", with_={},
+               param_when={"stanza_lang": ("engine", "stanza"),
+                           "pca_components": ("pca", "!=", "off")})
+    eq, ne = gate_of(r, "stanza_lang"), gate_of(r, "pca_components")
+    assert eq == ("engine", "==", "stanza") and ne == ("pca", "!=", "off")
+    assert gate_of(r, "engine") is None
+    assert gate_holds(eq, "stanza") and not gate_holds(eq, "nltk")
+    assert gate_holds(ne, "all") and gate_holds(ne, ["liwc"]) and not gate_holds(ne, "off")
+    assert gate_holds(eq, EMPTY) and gate_holds(ne, None)
+    bad = Recipe(id="b", label="b", help="", call="c", target="t", scope="global",
+                 save_as="s", with_={}, param_when={"x": ("y", "~", "z")})
+    with pytest.raises(ValueError, match="param_when"):
+        gate_of(bad, "x")
+
+
+def test_every_analysis_brings_the_word_clouds_and_then_the_report():
+    """
+    The clouds are drawn from the analyses' tables and shown by the report,
+    so they sit between the two: every analysis pulls the cloud step in
+    beside the report, and the catalog places it after the last analysis
+    and before the report, which is what orders the ready global steps.
+    """
+    from taters.ui.recipes import RECIPES, by_id
+
+    analyses = [r for r in RECIPES if r.stage == "analyze" and r.user_facing
+                and r.outcome_kind]
+    assert len(analyses) == 4
+    for r in analyses:
+        assert r.auto_with == ("stats_wordclouds", "stats_report"), r.id
+    ids = [r.id for r in RECIPES]
+    clouds, report = ids.index("stats_wordclouds"), ids.index("stats_report")
+    assert clouds < report
+    assert clouds > max(ids.index(r.id) for r in analyses)
+    assert by_id("stats_wordclouds").user_facing is False
+
+
+def test_the_text_stage_figure_steps_come_with_their_tables():
+    """The topic model brings its theme clouds and the frequency list its
+    corpus cloud; neither is on the checklist, and each needs exactly the
+    table its producer writes."""
+    from taters.ui.recipes import by_id
+
+    assert "topic_model_mem_wordclouds" in by_id("topic_model_mem").auto_with
+    assert "mem_loadings_csv" in by_id("topic_model_mem").produces
+    assert by_id("topic_model_mem_wordclouds").requires == {"mem_loadings_csv"}
+    assert "ngram_frequency_wordclouds" in by_id("ngram_frequencies").auto_with
+    assert by_id("ngram_frequency_wordclouds").requires == {"ngram_freq_csv"}
+    for rid in ("topic_model_mem_wordclouds", "ngram_frequency_wordclouds",
+                "stats_wordclouds"):
+        r = by_id(rid)
+        assert r.user_facing is False
+        assert r.with_["enabled"] == "{{var:wordclouds}}"
+
+
+def test_the_retention_rule_is_a_shared_setting_on_the_analyses_and_the_topic_model():
+    """Parallel analysis or Kaiser is one answer for the run's reductions,
+    and one for the topic model -- everyday settings both, shown only while
+    the count is automatic (or the reduction is on)."""
+    from taters.ui.recipes import (RECIPES, by_id, gate_of,
+                                   _STATS_ANALYSIS_WITH)
+
+    assert _STATS_ANALYSIS_WITH["pca_retain"] == "{{var:stats_pca_retain}}"
+    for r in RECIPES:
+        if r.stage == "analyze" and r.user_facing and r.outcome_kind:
+            assert r.vars["stats_pca_retain"]["default"] == "parallel", r.id
+            assert gate_of(r, "pca_retain") == ("pca", "!=", "off"), r.id
+    mem = by_id("topic_model_mem")
+    assert mem.with_["retain"] == "{{var:mem_retain}}"
+    assert mem.with_["n_components"] == "{{var:mem_components}}"
+    assert mem.vars["mem_retain"]["default"] == "parallel"
+    assert gate_of(mem, "retain") == ("n_components", "==", "0")
+
+
+def test_combining_the_tables_is_a_shared_setting_shown_only_when_together():
+    from taters.ui.recipes import by_id, gate_of
+
+    for rid in ("stats_ridge_fit", "stats_classify_fit"):
+        r = by_id(rid)
+        assert r.with_["set_combos"] == "{{var:stats_set_combos}}", rid
+        assert r.vars["stats_set_combos"]["default"] == "subsets", rid
+        assert gate_of(r, "set_combos") == ("feature_sets", "!=", "per_table"), rid
+
+
+def test_every_feature_table_names_its_own_output_file():
+    """
+    A feature table's file stem is the feature set's name in every result
+    -- the metrics, the coefficients, the models, the word clouds. A step
+    that leaves the file name to its analyzer inherits whatever the input
+    was called, and the sentence embeddings came out as a feature set named
+    "texts" after the gathered table (a real report). Every feature step
+    names its file, under the features folder, with a stem that says what
+    it measures.
+    """
+    from taters.ui.recipes import RECIPES
+
+    for r in RECIPES:
+        if not r.feature_table or r.consumes_feature_tables:
+            continue
+        named = r.with_.get("out_features_csv") or r.with_.get("out_csv")
+        assert isinstance(named, str) and named.startswith("{{var:features_dir}}/"), r.id
+        stem = named.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        assert stem and "texts" not in stem and "{{" not in stem.replace(
+            "{{var:weighting}}", ""), r.id

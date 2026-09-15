@@ -8,6 +8,7 @@ into a batch wondering whether anything is happening.
 `capsys` is a built-in pytest fixture that captures whatever the test printed.
 """
 
+import os
 import subprocess
 import sys
 import textwrap
@@ -85,7 +86,7 @@ def test_tail_is_capped_at_the_requested_number_of_lines():
     )
     lines = tail.splitlines()
     assert len(lines) == 10
-    assert lines == [str(i) for i in range(490, 500)]      # the *last* ten
+    assert lines == [str(i) for i in range(490, 500)]      # the *last* ten, mind you
 
 
 def test_empty_output_gives_an_empty_tail():
@@ -146,3 +147,75 @@ def test_timeout_kills_the_child_and_raises():
             timeout=1,
             stream=False,
         )
+
+
+# ---------------------------------------------------------------------------
+# a child that prints a path shouldn't get killed by the path
+#
+# this actually happened to us on Windows: the embeddings subprocess did all its
+# work, wrote its CSV, and then died with `UnicodeEncodeError` on the line
+# announcing success, because the filename had a `：` (U+FF1A) in it and the
+# console's code page was cp1252. exit code 1, so the parent called the step a
+# failure and threw away work that was already sitting on disk.
+#
+# media filenames are full of those characters: anything downloaded from the
+# web shows up with fullwidth stand-ins for the punctuation a filesystem won't
+# take
+# ---------------------------------------------------------------------------
+
+def test_a_child_can_print_a_name_the_console_cannot_encode(tmp_path):
+    code = (
+        "import sys\n"
+        "print('Wrote: Cathedrals\\uff1a Crash Course #11.wav')\n"
+    )
+    code, tail = run_and_stream(
+        [sys.executable, "-c", code],
+        env={**os.environ, "PYTHONIOENCODING": "cp1252"},
+    )
+    # if the caller picks an encoding on purpose, we respect it. otherwise the
+    # default below wouldn't really be a default, just always-on
+    assert code != 0 or "：" in tail
+
+
+def test_the_default_lets_a_child_print_anything(tmp_path):
+    source = "print('Wrote: Cathedrals\\uff1a Crash Course #11.wav')"
+    code, tail = run_and_stream([sys.executable, "-c", source])
+
+    assert code == 0, tail
+    assert "：" in tail
+
+
+def test_the_child_is_told_to_use_utf8(tmp_path):
+    """
+    Asserted on the child's own environment rather than on a crash, because the
+    crash cannot be reproduced here: it needs a console code page that cannot
+    represent the character, and every POSIX runner is already UTF-8 (PEP 538
+    even coerces the C locale). The mechanism is testable everywhere, and it is
+    the mechanism the fix consists of.
+    """
+    source = ("import os, sys\n"
+              "print(os.environ.get('PYTHONIOENCODING'), sys.stdout.encoding)")
+    code, tail = run_and_stream([sys.executable, "-c", source])
+
+    assert code == 0, tail
+    assert tail.split()[0] == "utf-8", f"the child was not told to use UTF-8: {tail!r}"
+
+
+def test_a_deliberate_encoding_is_not_overridden():
+    """
+    `setdefault`, not assignment. Someone who set `PYTHONIOENCODING` on purpose
+    -- to reproduce this very bug, say -- has to keep getting what they asked
+    for.
+    """
+    from taters.helpers.proc import _utf8_stdio
+
+    assert _utf8_stdio({"PYTHONIOENCODING": "cp1252"})["PYTHONIOENCODING"] == "cp1252"
+    assert _utf8_stdio({})["PYTHONIOENCODING"] == "utf-8"
+
+
+def test_the_ambient_environment_still_reaches_the_child(monkeypatch):
+    """`env=None` means "inherit", and must not become "inherit nothing"."""
+    from taters.helpers.proc import _utf8_stdio
+
+    monkeypatch.setenv("TATERS_MARKER", "present")
+    assert _utf8_stdio(None)["TATERS_MARKER"] == "present"

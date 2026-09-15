@@ -8,7 +8,7 @@ It simply delegates to the real implementation in
 ``taters/audio/diarizer/whisper_diar_wrapper.py``.
 """
 
-# thin alias (args still pass through)
+# just a thin alias (args still pass straight through)
 from .diarizer.whisper_diar_wrapper import main as main
 
 if __name__ == "__main__":

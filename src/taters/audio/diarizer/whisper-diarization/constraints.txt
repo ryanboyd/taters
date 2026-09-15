@@ -1,2 +1,0 @@
-numpy<2
-indic-numtowords @ git+https://github.com/AI4Bharat/indic-numtowords.git

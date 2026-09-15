@@ -102,7 +102,7 @@ def test_unknown_preset_names_the_available_ones(project, repo_root):
     assert "conversation_video" in (res.stderr + res.stdout)
 
 
-# --- a real run -------------------------------------------------------------
+# --- actually running one ---------------------------------------------------
 
 def test_global_only_pipeline_runs_and_writes_outputs(project, repo_root):
     res = run_pipeline(
@@ -118,7 +118,7 @@ def test_global_only_pipeline_runs_and_writes_outputs(project, repo_root):
     with ready.open(newline="", encoding="utf-8-sig") as f:
         rows = list(csv.DictReader(f))
     assert {r["speaker"] for r in rows} == {"alice", "bob"}
-    # alice appears in both input files; her turns should be pooled.
+    # alice shows up in both input files, so her turns should get pooled
     alice = next(r for r in rows if r["speaker"] == "alice")
     assert alice["group_count"] == "2"
 
@@ -138,27 +138,34 @@ def test_manifest_records_steps_and_artifacts(project, repo_root):
     assert manifest["preset"] == "smoke"
     assert manifest["errors"] == []
     assert set(manifest["globals"]) == {"merged", "ready"}
-    # Artifacts are stored JSON-safe (Paths become strings).
+    # artifacts get stored JSON-safe (Paths become strings)
     assert isinstance(manifest["globals"]["merged"], str)
 
 
 def test_var_override_reaches_the_step(project, repo_root):
     """`--var` should beat the preset's own vars block."""
+    import os
+
     out = project / "out" / "ready.csv"
     run_pipeline("--preset", "smoke", cwd=project, repo_root=repo_root)
-    out.write_text("sentinel\n", encoding="utf-8")
+    # we date it into the past: a gathered table with its record gets kept under
+    # overwrite_existing=false (its date stays) and remade under =true (its
+    # date moves). a hand-written sentinel wouldn't do here, since a gathered
+    # file with no record gets rebuilt on sight
+    old = out.stat().st_mtime - 3600
+    os.utime(out, (old, old))
 
     run_pipeline(
         "--preset", "smoke", "--var", "overwrite_existing=false",
         cwd=project, repo_root=repo_root,
     )
-    assert out.read_text(encoding="utf-8") == "sentinel\n"
+    assert out.stat().st_mtime == old
 
     run_pipeline(
         "--preset", "smoke", "--var", "overwrite_existing=true",
         cwd=project, repo_root=repo_root,
     )
-    assert out.read_text(encoding="utf-8") != "sentinel\n"
+    assert out.stat().st_mtime > old
 
 
 def test_preset_file_path_also_works(project, repo_root):
@@ -191,8 +198,8 @@ def test_a_failing_global_step_stops_the_run_and_is_recorded(project, repo_root)
         cwd=project, repo_root=repo_root,
     )
     assert "GLOBAL step failed" in res.stdout
-    # The exit code has to reflect the failure, or a scheduled job silently
-    # reports success while producing nothing.
+    # the exit code has to reflect the failure, otherwise a scheduled job
+    # quietly reports success while producing nothing
     assert res.returncode != 0
 
     manifest = json.loads((project / "out" / "manifest.json").read_text(encoding="utf-8"))
@@ -302,8 +309,8 @@ def test_one_bad_item_does_not_stop_the_others(sandbox, repo_root):
 
     pipelines = sandbox / "pipelines"
     pipelines.mkdir()
-    # find_files raises FileNotFoundError for a root that does not exist; we
-    # point at "<input>_dir", which exists only for the good file.
+    # find_files raises FileNotFoundError for a root that doesn't exist, so we
+    # point at "<input>_dir", which only exists for the good file
     (inputs / "good.wav_dir").mkdir()
     (pipelines / "mixed.yaml").write_text(
         "meta:\n  id: mixed\n"
@@ -321,8 +328,8 @@ def test_one_bad_item_does_not_stop_the_others(sandbox, repo_root):
         "--out-manifest", "out/manifest.json",
         cwd=sandbox, repo_root=repo_root,
     )
-    # Non-zero because one item failed — but the good one still ran, which is
-    # the property being tested here.
+    # non-zero because one item failed, but the good one still ran, and that's
+    # really what we're testing here
     assert res.returncode != 0
 
     manifest = json.loads((sandbox / "out" / "manifest.json").read_text(encoding="utf-8"))
@@ -347,7 +354,7 @@ def resource_dirs(sandbox) -> dict:
     """
     liwc = sandbox / "resources" / "liwc"
     liwc.mkdir(parents=True)
-    # LIWC2007 .dic format: category header between % lines, then word<TAB>ids.
+    # LIWC2007 .dic format: category header between % lines, then word<TAB>ids
     (liwc / "mini.dic").write_text(
         "%\n1\tposemo\n2\tnegemo\n%\n"
         "happy\t1\ngood\t1\nlove*\t1\nsad\t2\nbad\t2\nterrible\t2\n",
@@ -408,14 +415,20 @@ def test_conversation_video_preset_end_to_end(
     )
 
     manifest = json.loads((sandbox / "run_manifest.json").read_text(encoding="utf-8"))
-    # Check the manifest before the exit code: it says *what* broke.
+    # check the manifest before the exit code, since it tells us *what* broke
     assert manifest["errors"] == [], manifest["errors"]
     assert manifest["items"] and manifest["items"][0]["status"] == "ok", manifest["items"]
     assert res.returncode == 0, res.stdout[-3000:]
 
-    # Every step of the preset should have left its artifact behind.
+    # every step of the preset should've left its artifact behind
     assert list((sandbox / "transcripts").rglob("*.csv")), "no transcript produced"
-    assert (sandbox / "all_transcripts.csv").is_file()
+    # under `transcripts/`, which is where the preset's gather step writes it
+    # (`out_csv: "{{var:transcripts_dir}}/all_transcripts.csv"`). this used to
+    # look in the sandbox root and had been failing unnoticed since the preset
+    # changed. a `slow` test nobody had run in a while, which is the hazard of
+    # the opt-in layer, and the reason to run `pytest -m slow` before a release
+    # rather than only when something feels wrong
+    assert (sandbox / "transcripts" / "all_transcripts.csv").is_file()
 
     for relative in [
         "features/acoustics_summary.csv",
@@ -430,14 +443,14 @@ def test_conversation_video_preset_end_to_end(
         assert path.is_file(), f"{relative} was not produced"
         assert path.stat().st_size > 0, f"{relative} is empty"
 
-    # And the feature tables should describe the speakers we actually found.
+    # and the feature tables should describe the speakers we actually found
     with (sandbox / "features" / "dictionary.csv").open(newline="", encoding="utf-8-sig") as f:
         dict_rows = list(csv.DictReader(f))
     assert dict_rows, "dictionary features are empty"
     columns = set(dict_rows[0])
     assert {"source", "speaker"} <= columns, "id columns were not carried through"
-    # Global counts are unprefixed; each dictionary's categories are namespaced
-    # by its filename, so our mini.dic contributes mini__posemo / mini__negemo.
+    # global counts are unprefixed, and each dictionary's categories get
+    # namespaced by its filename, so our mini.dic gives us mini__posemo / mini__negemo
     assert "WC" in columns
     assert {"mini__posemo", "mini__negemo"} <= columns, sorted(columns)
     assert all(float(r["WC"]) > 0 for r in dict_rows), "speakers with no words"
@@ -480,3 +493,271 @@ def test_failed_preset_run_reports_a_nonzero_exit_code(
 
     manifest = json.loads((sandbox / "run_manifest.json").read_text(encoding="utf-8"))
     assert manifest["errors"], "the failure should be recorded in the manifest"
+
+
+# --- --quiet ----------------------------------------------------------------
+#
+# the runner had no way to turn its output down. `run_preset` grew a `verbose`
+# argument for the TUI's benefit (a live display can't share the screen with a
+# step printing into it), but the command line got left with the one setting
+# it always had. on a four-file transcription that's 638 lines, one per
+# decoded segment
+
+def test_quiet_suppresses_the_step_by_step_chatter(project, repo_root):
+    loud = run_pipeline("--preset", "smoke", cwd=project, repo_root=repo_root)
+    quiet = run_pipeline("--preset", "smoke", "--quiet", cwd=project, repo_root=repo_root)
+
+    assert loud.returncode == 0 and quiet.returncode == 0, quiet.stderr
+    assert "[pipeline] Step 1/2" in loud.stdout
+    assert "Step 1/2" not in quiet.stdout
+
+
+def test_quiet_reaches_the_steps_own_printing_too(project, repo_root):
+    """
+    Not just the runner's lines. The chatter that actually drowns a terminal
+    comes from inside the steps, which each default to printing and never used
+    to be told otherwise.
+    """
+    # `smoke` overwrites by default, so we turn that off so a second run
+    # short-circuits and each step says so. that line comes from inside the step,
+    # not the runner, which is exactly the kind --quiet had no way to reach
+    resume = ("--preset", "smoke", "--var", "overwrite_existing=false")
+    run_pipeline(*resume, cwd=project, repo_root=repo_root)
+    loud = run_pipeline(*resume, cwd=project, repo_root=repo_root)
+    quiet = run_pipeline(*resume, "--quiet", cwd=project, repo_root=repo_root)
+
+    assert "already exists" in loud.stdout
+    assert "already exists" not in quiet.stdout
+
+
+def test_quiet_still_says_whether_it_worked(project, repo_root):
+    """
+    The outcome is not chatter. A quiet run that says nothing at all about
+    whether it succeeded is a worse tool than a loud one.
+    """
+    res = run_pipeline("--preset", "smoke", "--quiet", cwd=project, repo_root=repo_root)
+    assert res.returncode == 0
+    assert "[pipeline] Items:" in res.stdout or not json.loads(
+        (project / "run_manifest.json").read_text(encoding="utf-8"))["items"]
+
+
+def test_quiet_still_names_the_files_that_failed(sandbox, repo_root):
+    inputs = sandbox / "media"
+    inputs.mkdir()
+    (inputs / "good.wav").touch()
+    (inputs / "bad.wav").touch()
+    (inputs / "good.wav_dir").mkdir()
+
+    pipelines = sandbox / "pipelines"
+    pipelines.mkdir()
+    (pipelines / "mixed.yaml").write_text(
+        "meta:\n  id: mixed3\n"
+        "steps:\n"
+        "  - scope: item\n"
+        "    call: taters.helpers.find_files.find_files\n"
+        "    save_as: seen\n"
+        "    with:\n"
+        "      root_dir: '{{input}}_dir'\n"
+        "      file_type: any\n",
+        encoding="utf-8",
+    )
+    res = run_pipeline(
+        "--root_dir", "media", "--file_type", "audio", "--preset", "mixed3", "--quiet",
+        cwd=sandbox, repo_root=repo_root,
+    )
+
+    assert res.returncode != 0, "a quiet run must still fail loudly"
+    assert "1 ok, 1 failed" in res.stdout
+    assert "bad.wav" in res.stdout
+
+
+def test_a_plain_run_prints_what_it_always_printed(project, repo_root):
+    """
+    Adding `--quiet` must not change the default. This covers the runner's own
+    lines; that no *step* starts printing differently is the job of
+    `test_a_loud_run_leaves_a_quiet_step_alone`, which watches what the runner
+    actually hands a step function.
+    """
+    res = run_pipeline("--preset", "smoke", cwd=project, repo_root=repo_root)
+    assert "[pipeline] Step 1/2: potato.helpers.feature_gather" in res.stdout
+    assert "[pipeline] Step 2/2: potato.helpers.csv_to_analysis_ready_csv" in res.stdout
+    assert "[pipeline] Manifest written to:" in res.stdout
+
+
+
+def test_a_relative_manifest_path_is_anchored_where_the_caller_stood(tmp_path, monkeypatch):
+    """
+    From the second review (issue 25): `run_preset` chdir'd into work_dir and
+    only then resolved a relative out_manifest -- so `taters --dir data` wrote
+    data/mypipe/data/mypipe/run_manifest.json while every screen pointed at the
+    real path, which did not exist.
+    """
+    import json
+
+    from taters.pipelines.run_pipeline import run_preset
+
+    monkeypatch.chdir(tmp_path)
+    preset = {
+        "meta": {"id": "anchor", "title": "Anchor"},
+        "vars": {},
+        # one do-nothing global step, since an empty steps list gets refused outright
+        "steps": [{"scope": "global", "call": "potato.helpers.find_files",
+                   "save_as": "listing",
+                   "with": {"root_dir": ".", "extensions": [".none"]}}],
+    }
+    rel = Path("data") / "anchor" / "run_manifest.json"
+
+    run_preset(preset, out_manifest=rel, verbose=False,
+               work_dir=Path("data") / "anchor")
+
+    assert (tmp_path / rel).exists(), "the manifest is not where the caller said"
+    assert not (tmp_path / "data" / "anchor" / "data").exists(), (
+        "the relative path was re-anchored under work_dir"
+    )
+    assert json.loads((tmp_path / rel).read_text(encoding="utf-8"))["preset"] == "anchor"
+
+
+# ---------------------------------------------------------------------------
+# one parallelism dial
+# ---------------------------------------------------------------------------
+
+def test_the_workers_dial_resolves_in_priority_order(monkeypatch):
+    """--workers beats the preset's `workers` variable beats automatic; 0 and
+    None both mean "not decided here" at every layer. Every door goes through
+    the one policy: automatic is three-quarters of the cores, and no answer
+    exceeds the machine's core count."""
+    from taters.helpers import parallel_map as pm
+    from taters.pipelines.run_pipeline import _run_wide_workers
+
+    monkeypatch.setattr(pm.os, "cpu_count", lambda: 8)
+    assert _run_wide_workers(6, {"workers": 2}) == 6
+    assert _run_wide_workers(None, {"workers": 2}) == 2
+    assert _run_wide_workers(None, {"workers": 0}) == 6, "auto = 8 - 8//4"
+    assert _run_wide_workers(0, {"workers": 3}) == 3
+    assert _run_wide_workers(None, {}) == 6
+    assert _run_wide_workers(None, {"workers": "not a number"}) == 6
+    assert _run_wide_workers(99, {}) == 8, "the flag is clamped to the machine"
+    assert _run_wide_workers(None, {"workers": 99}) == 8, "the var too"
+
+
+def test_the_resolved_dial_feeds_the_var_templates_too(tmp_path):
+    """
+    The unification's whole point: `--workers N` and `vars: workers:` steer the
+    SAME number, and the text steps' `{{var:workers}}` templates see the
+    resolved value -- whichever door it came in by.
+    """
+
+    from taters.pipelines.run_pipeline import run_preset
+
+    seen = {}
+
+    def probe(**kwargs):
+        seen.update(kwargs)
+        return str(tmp_path / "out.csv")
+
+    import taters.pipelines.run_pipeline as rp
+    preset = {
+        "meta": {"id": "t"},
+        "vars": {"workers": 2},
+        "steps": [{"scope": "global", "call": "helpers.find_files",
+                   "save_as": "x", "with": {"workers": "{{var:workers}}"}}],
+    }
+    # resolve_call would want a real target, so we monkeypatch at the seam instead
+    orig = rp.resolve_call
+    rp.resolve_call = lambda name, potato: probe
+    try:
+        run_preset(preset, out_manifest=tmp_path / "m.json")
+        assert seen["workers"] == 2, "vars.workers must reach the step"
+        seen.clear()
+        run_preset(preset, workers=5, out_manifest=tmp_path / "m.json")
+        assert seen["workers"] == 5, "--workers must override vars.workers"
+    finally:
+        rp.resolve_call = orig
+
+
+def test_a_workers_signature_is_the_whole_authoring_contract(tmp_path):
+    """
+    Drop-in module story: a GLOBAL step whose function declares `workers` gets
+    the run's resolved dial injected -- no recipe wiring, no `with:` line. An
+    explicit `with:` value still wins, and a function without the parameter
+    is called exactly as before.
+    """
+    import taters.pipelines.run_pipeline as rp
+
+    seen = {}
+
+    def takes_workers(*, workers=None, **kw):
+        seen["workers"] = workers
+        return "x"
+
+    def takes_none():
+        # a truly empty signature: **kwargs would count as "accepts workers",
+        # which is the facade case, and that one's meant to be injectable
+        seen["none"] = True
+        return "y"
+
+    preset = {
+        "meta": {"id": "t"},
+        "vars": {"workers": 3},
+        "steps": [
+            {"scope": "global", "call": "a", "save_as": "a", "with": {}},
+            {"scope": "global", "call": "b", "save_as": "b",
+             "with": {"workers": 2}},
+            {"scope": "global", "call": "c", "save_as": "c", "with": {}},
+        ],
+    }
+    funcs = {"a": takes_workers, "b": takes_workers, "c": takes_none}
+    orig = rp.resolve_call
+    rp.resolve_call = lambda name, potato: funcs[name]
+    try:
+        seen.clear()
+        rp.run_preset(preset, out_manifest=tmp_path / "m.json")
+    finally:
+        rp.resolve_call = orig
+
+    # step a: injected from the dial; step b: the preset's explicit 2 wins
+    assert seen["none"] is True
+    assert seen["workers"] == 2          # last call to takes_workers was b
+    # rerun watching step a alone
+    rp.resolve_call = lambda name, potato: funcs["a"]
+    try:
+        seen.clear()
+        rp.run_preset({"meta": {"id": "t"}, "vars": {"workers": 3},
+                       "steps": [{"scope": "global", "call": "a",
+                                  "save_as": "a", "with": {}}]},
+                      out_manifest=tmp_path / "m.json")
+    finally:
+        rp.resolve_call = orig
+    assert seen["workers"] == 3
+
+
+def test_item_steps_get_workers_one_because_fanout_is_their_parallelism(tmp_path):
+    """An internal pool per fanned-out call would multiply into cores-squared;
+    an ITEM function that declares `workers` is told 1."""
+    import taters.pipelines.run_pipeline as rp
+
+    seen = []
+
+    def item_fn(*, input=None, workers=None, **kw):
+        seen.append(workers)
+        return {"ok": True}
+
+    (tmp_path / "in").mkdir()
+    (tmp_path / "in" / "a.txt").write_text("x", encoding="utf-8")
+    (tmp_path / "in" / "b.txt").write_text("x", encoding="utf-8")
+
+    preset = {
+        "meta": {"id": "t"},
+        "vars": {"workers": 8},
+        "steps": [{"scope": "item", "call": "f", "save_as": "f",
+                   "with": {"input": "{{item.path}}"}}],
+    }
+    orig = rp.resolve_call
+    rp.resolve_call = lambda name, potato: item_fn
+    try:
+        rp.run_preset(preset, root_dir=tmp_path / "in", file_type="any",
+                      out_manifest=tmp_path / "m.json")
+    finally:
+        rp.resolve_call = orig
+
+    assert seen and all(w == 1 for w in seen)

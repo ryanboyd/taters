@@ -2,15 +2,15 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, Union, Sequence, Literal, Iterable, Dict, Any
+from typing import Callable, Optional, Union, Sequence, Literal, Dict, Any
 import csv
-import sys
 
 
-from ..helpers.text_gather import (
-    csv_to_analysis_ready_csv,
-    txt_folder_to_analysis_ready_csv,
-)
+from ..helpers.atomic import atomic_write
+from ..helpers.doc_text import DOCUMENT_PATTERN
+from ..helpers.text_gather import (resolve_analysis_ready)
+from ..helpers.provenance import TEXT_GRAIN, TEXT_INPUT, records_settings
+from ..helpers.cliargs import CliSpec
 
 
 # ---- textstat loader ---------------------------------------------------------
@@ -31,24 +31,65 @@ def _require_textstat():
         ) from e
 
 
+# ---- Per-document scoring (runs inline or in a worker process) ---------------
+
+def _score_text(metrics: Sequence[str], txt: str) -> list:
+    """Every metric's value for one text, best-effort per metric."""
+    textstat = _require_textstat()
+    values = []
+    for name in metrics:
+        fn = getattr(textstat, name, None)
+        if fn is None:
+            values.append(None)
+            continue
+        try:
+            values.append(fn(txt))
+        except Exception:
+            values.append(None)
+    return values
+
+
+#: Per-process state for scoring workers: the metric list arrives once via
+#: the initializer, not pickled per text.
+_READ_WORKER: Dict[str, Any] = {}
+
+
+def _init_readability_worker(metrics: Sequence[str]) -> None:
+    _READ_WORKER["metrics"] = list(metrics)
+
+
+def _readability_in_worker(pair):
+    _tid, text = pair
+    return _score_text(_READ_WORKER["metrics"], (text or "").strip())
+
+
 # ---- Core API ----------------------------------------------------------------
 
+@records_settings(binding=TEXT_INPUT, grain=TEXT_GRAIN,
+                  outputs=("out_features_csv",),
+                  # these are just raw sizes; the indices we compute from them
+                  # are the actual measures
+                  bookkeeping=("lexicon_count", "sentence_count", "char_count",
+                               "syllable_count", "difficult_words"))
 def analyze_readability(
     *,
     # ----- Input source (choose exactly one, or pass analysis_csv directly) -----
     csv_path: Optional[Union[str, Path]] = None,
     txt_dir: Optional[Union[str, Path]] = None,
-    analysis_csv: Optional[Union[str, Path]] = None,  # if provided, gathering is skipped
+    analysis_csv: Optional[Union[str, Path]] = None,  # if given, we skip gathering
+    gathered_csv: Optional[Union[str, Path]] = None,
+    on_progress: Optional[Callable[[int, int], None]] = None,
 
     # ----- Output -----
     out_features_csv: Optional[Union[str, Path]] = None,
     overwrite_existing: bool = False,
+    workers: int = 0,
 
     # ====== SHARED I/O OPTIONS ======
     encoding: str = "utf-8-sig",
 
     # ====== CSV GATHER OPTIONS ======
-    # Only used when csv_path is provided
+    # these only matter when csv_path is provided
     text_cols: Sequence[str] = ("text",),
     id_cols: Optional[Sequence[str]] = None,
     mode: Literal["concat", "separate"] = "concat",
@@ -60,9 +101,9 @@ def analyze_readability(
     tmp_root: Optional[Union[str, Path]] = None,
 
     # ====== TXT FOLDER GATHER OPTIONS ======
-    # Only used when txt_dir is provided
+    # these only matter when txt_dir is provided
     recursive: bool = True,
-    pattern: str = "*.txt",
+    pattern: str = DOCUMENT_PATTERN,
     id_from: Literal["stem", "name", "path"] = "stem",
     include_source_path: bool = True,
 
@@ -98,7 +139,6 @@ def analyze_readability(
     - ``gunning_fog``
     - ``text_standard``                 (string label)
     - ``spache_readability``            (for shorter/children texts; may be None)
-    - ``readability_consensus``         (string label)
     - ``syllable_count``                (on entire text)
     - ``lexicon_count``                 (word count)
     - ``sentence_count``
@@ -116,6 +156,27 @@ def analyze_readability(
     analysis_csv : str or pathlib.Path, optional
         Prebuilt analysis-ready CSV with columns ``text_id`` and ``text`` (additional columns
         such as ``source``/``speaker`` will be copied through to the output).
+    gathered_csv : str or pathlib.Path, optional
+        Where to write the intermediate "analysis-ready" table built from
+        ``csv_path`` or ``txt_dir``.
+
+        By default it lands beside the *source* -- which means analyzing a
+        spreadsheet in someone's Downloads folder writes a file into their
+        Downloads folder. Pass this to keep the intermediate with the rest of a
+        run's output instead. Ignored when ``analysis_csv`` is given, because
+        then no gathering happens.
+    on_progress : callable, optional
+        Called as ``on_progress(done, total, message=None)`` so a UI can show a
+        real bar instead of a spinner.
+
+        ``total`` is the row count of the analysis-ready table, which is fully
+        written before measuring starts, so it is known up front. Until it is,
+        ``total`` is ``None`` and ``done`` is a running tally -- the long silent
+        passes (reading the input, counting its rows) report through the same
+        callback with a ``message`` saying which one is running.
+
+        Injected automatically by the pipeline runner for any step function that
+        declares this parameter.
     out_features_csv : str or pathlib.Path, optional
         Output file path. If ``None``, defaults to
         ``./features/readability/<analysis_ready_filename>``.
@@ -135,7 +196,8 @@ def analyze_readability(
     group_by : Sequence[str] or None, optional
         Optional grouping keys used during CSV gathering (e.g., ``["speaker"]``).
     delimiter : str, default=","
-        Delimiter for reading/writing CSV files.
+        Column separator of the *input* spreadsheet. The gathered table and
+        the output are always comma-separated.
     joiner : str, default=" "
         Separator used when concatenating multiple text chunks in ``"concat"`` mode.
     num_buckets : int, default=512
@@ -153,6 +215,13 @@ def analyze_readability(
     include_source_path : bool, default=True
         If ``True``, include the absolute source path as an additional column when gathering
         from a text folder.
+
+    pass_through_cols : Sequence[str] or None, optional
+        Extra input columns to copy into the output beside ``text_id``.
+    workers : int, default=0
+        Parallel processes for reading documents. ``0`` means automatic:
+        three-quarters of the logical cores; ``1`` turns parallelism off. Output files are
+        identical whatever the worker count.
 
     Returns
     -------
@@ -186,48 +255,19 @@ def analyze_readability(
     - Additional columns present in the analysis-ready CSV (beyond ``text``) are copied through
       to the output (e.g., ``source``, ``speaker``, ``group_count``), aiding joins/aggregation.
     """
-    textstat = _require_textstat()
+    _require_textstat()   # fail early, with a message that says what to do
 
-    # 1) Accept or produce the analysis-ready CSV (must have: text_id, text)
-    if analysis_csv is not None:
-        analysis_ready = Path(analysis_csv)
-        if not analysis_ready.exists():
-            raise FileNotFoundError(f"analysis_csv not found: {analysis_ready}")
-    else:
-        if (csv_path is None) == (txt_dir is None):
-            raise ValueError("Provide exactly one of csv_path or txt_dir (or pass analysis_csv).")
+    analysis_ready = resolve_analysis_ready(
+        csv_path=csv_path, txt_dir=txt_dir, analysis_csv=analysis_csv,
+        gathered_csv=gathered_csv, text_cols=text_cols, id_cols=id_cols,
+        mode=mode, group_by=group_by, delimiter=delimiter, encoding=encoding,
+        joiner=joiner, num_buckets=num_buckets,
+        max_open_bucket_files=max_open_bucket_files, tmp_root=tmp_root,
+        recursive=recursive, pattern=pattern, id_from=id_from,
+        include_source_path=include_source_path,
+        overwrite_existing=overwrite_existing, on_progress=on_progress,
+        workers=workers)
 
-        if csv_path is not None:
-            analysis_ready = Path(
-                csv_to_analysis_ready_csv(
-                    csv_path=csv_path,
-                    text_cols=list(text_cols),
-                    id_cols=list(id_cols) if id_cols else None,
-                    mode=mode,
-                    group_by=list(group_by) if group_by else None,
-                    delimiter=delimiter,
-                    encoding=encoding,
-                    joiner=joiner,
-                    num_buckets=num_buckets,
-                    max_open_bucket_files=max_open_bucket_files,
-                    tmp_root=tmp_root,
-                    overwrite_existing=overwrite_existing,
-                )
-            )
-        else:
-            analysis_ready = Path(
-                txt_folder_to_analysis_ready_csv(
-                    root_dir=txt_dir,
-                    recursive=recursive,
-                    pattern=pattern,
-                    encoding=encoding,
-                    id_from=id_from,
-                    include_source_path=include_source_path,
-                    overwrite_existing=overwrite_existing,
-                )
-            )
-
-    # 2) Decide default features path if not provided:
     if out_features_csv is None:
         out_features_csv = Path.cwd() / "features" / "readability" / analysis_ready.name
     out_features_csv = Path(out_features_csv)
@@ -237,7 +277,7 @@ def analyze_readability(
         print(f"Readability output file already exists; returning existing file: {out_features_csv}")
         return out_features_csv
 
-    # 3) Metrics list
+    # 3) our list of metrics
     metrics = [
         "flesch_reading_ease",
         "smog_index",
@@ -250,7 +290,6 @@ def analyze_readability(
         "gunning_fog",
         "text_standard",
         "spache_readability",
-        "readability_consensus",
         "syllable_count",
         "lexicon_count",
         "sentence_count",
@@ -260,169 +299,85 @@ def analyze_readability(
         "avg_letter_per_word",
     ]
 
-    # 4) Stream input and write output
-    with analysis_ready.open("r", newline="", encoding=encoding) as fin, \
-         out_features_csv.open("w", newline="", encoding=encoding) as fout:
-        reader = csv.DictReader(fin, delimiter=delimiter)
+    # 4) figure out the output's shape from the input's header alone. the
+    # gatherer writes the analysis-ready table with commas no matter what the
+    # source used, so `delimiter` stops here and does NOT get passed on. when
+    # we did pass it on, a ";" spreadsheet blew up with "Expected columns
+    # 'text_id' and 'text' ... found ['text_id,id,text']" -- on the one step
+    # that almost every study picks
+    with analysis_ready.open("r", newline="", encoding=encoding) as fin:
+        header_fields = csv.DictReader(fin).fieldnames or []
 
-        if "text_id" not in reader.fieldnames or "text" not in reader.fieldnames:
-            raise ValueError(
-                f"Expected columns 'text_id' and 'text' in {analysis_ready}; found {reader.fieldnames}"
-            )
+    if "text_id" not in header_fields or "text" not in header_fields:
+        raise ValueError(
+            f"Expected columns 'text_id' and 'text' in {analysis_ready}; found {header_fields}"
+        )
 
-        # Decide pass-through columns:
-        requested_pt = list(pass_through_cols or [])
-        if not requested_pt and id_cols:
-            requested_pt = list(id_cols)
+    # there's one shared rule for what rides along beside text_id -- see
+    # resolve_passthrough_columns for the order of preference and for the two
+    # columns it never carries
+    from ..helpers.row_map import resolve_passthrough_columns
 
-        if not requested_pt:
-            # Back-compat: pass through all non-text, excluding text_id (we add it explicitly)
-            auto = [c for c in (reader.fieldnames or []) if c not in ("text", "text_id")]
-            requested_pt = auto
+    passthrough_cols = resolve_passthrough_columns(
+        header_fields, pass_through_cols=pass_through_cols, id_cols=id_cols,
+        group_by=group_by, analysis_ready=analysis_ready)
+    fieldnames = ["text_id", *passthrough_cols, *metrics]
 
-        # Validate presence
-        fields = set(reader.fieldnames or [])
-        missing = [c for c in requested_pt if c not in fields]
-        if missing:
-            raise ValueError(
-                f"Requested pass-through columns not present in analysis-ready CSV {analysis_ready}: {missing}"
-            )
+    # 5) scoring is CPU-bound per row and the rows don't depend on each other,
+    # so we run it on the shared pooled-row driver. that gives us results in
+    # file order no matter the worker count, plus one live sub-bar per
+    # document in flight. `_score_text` is the one scorer that both the inline
+    # path and the workers run
+    from ..helpers.parallel_map import pool_workers
+    from ..helpers.row_map import map_text_rows
 
-        # Output header: text_id + pass-through + metrics
-        passthrough_cols = list(dict.fromkeys(requested_pt))  # preserve order, dedupe
-        fieldnames = ["text_id", *passthrough_cols, *metrics]
-        writer = csv.DictWriter(fout, fieldnames=fieldnames, delimiter=delimiter)
+    with atomic_write(out_features_csv, newline="", encoding=encoding) as fout:
+        writer = csv.DictWriter(fout, fieldnames=fieldnames)
         writer.writeheader()
-
-        # Safe metric caller (handles version differences)
-        def _call_metric(name: str, txt: str) -> Any:
-            fn = getattr(textstat, name, None)
-            if fn is None:
-                if name == "readability_consensus" and hasattr(textstat, "text_standard"):
-                    try:
-                        return textstat.text_standard(txt)
-                    except Exception:
-                        return None
-                return None
-            try:
-                return fn(txt)
-            except Exception:
-                return None
-
-        for row in reader:
-            txt = (row.get("text") or "").strip()
+        for row, values in map_text_rows(
+                analysis_ready, encoding=encoding,
+                workers=lambda n_rows: pool_workers(workers, n_rows),
+                message="measuring readability", on_progress=on_progress,
+                inline_fn=lambda pair: _score_text(metrics, (pair[1] or "").strip()),
+                pool_fn=_readability_in_worker,
+                initializer=_init_readability_worker,
+                initargs=(list(metrics),)):
             out_row: Dict[str, Any] = {
                 "text_id": row.get("text_id"),
                 **{k: row.get(k, "") for k in passthrough_cols},
+                **dict(zip(metrics, values)),
             }
-            for m in metrics:
-                out_row[m] = _call_metric(m, txt)
             writer.writerow(out_row)
-
     return out_features_csv
 
 
 # ---- CLI ---------------------------------------------------------------------
 
-def _build_arg_parser():
-    """
-    Create an ``argparse.ArgumentParser`` for the readability CLI.
 
-    Mirrors the CSV/TXT gathering and output options used elsewhere in Taters.
-    """
-    import argparse
-    p = argparse.ArgumentParser(
-        description="Compute textstat readability metrics for an analysis-ready CSV."
-    )
+# ---------------------------------------------------------------------------
+# command line -- we derive this from the function(s) above; see
+# helpers.cliargs.CliSpec. the aliases and legacy flags are the spellings that
+# the old hand-written parser used; we keep them so that every documented
+# invocation still works
+# ---------------------------------------------------------------------------
 
-    # Input source (choose one)
-    src = p.add_mutually_exclusive_group(required=True)
-    src.add_argument("--csv", dest="csv_path", help="Source CSV to gather from")
-    src.add_argument("--txt-dir", dest="txt_dir", help="Folder of .txt files to gather from")
-    src.add_argument("--analysis-csv", dest="analysis_csv",
-                     help="Use an existing analysis-ready CSV (skip gathering)")
-
-    # Output
-    p.add_argument("--out", dest="out_features_csv", default=None,
-                   help="Output CSV (default: ./features/readability/<gathered_name>)")
-    p.add_argument("--overwrite_existing", type=lambda s: str(s).lower() == "true", default=False,
-                   help="Overwrite output if it exists (true/false). Default: false")
-
-    # I/O
-    p.add_argument("--encoding", default="utf-8-sig")
-    p.add_argument("--delimiter", default=",")
-
-    # CSV gather options
-    p.add_argument("--text-col", dest="text_cols", action="append",
-                   help="Text column (repeatable). Default: --text-col text")
-    p.add_argument("--id-col", dest="id_cols", action="append",
-                   help="ID column(s) to carry through (repeatable)")
-    p.add_argument("--mode", choices=["concat", "separate"], default="concat")
-    p.add_argument("--group-by", dest="group_by", action="append",
-                   help="Group by column(s) (repeatable)")
-    p.add_argument("--joiner", default=" ")
-    p.add_argument("--num-buckets", type=int, default=512)
-    p.add_argument("--max-open-bucket-files", type=int, default=64)
-    p.add_argument("--tmp-root", default=None)
-
-    # TXT gather options
-    p.add_argument("--recursive", action="store_true", default=True)
-    p.add_argument("--no-recursive", dest="recursive", action="store_false")
-    p.add_argument("--pattern", default="*.txt")
-    p.add_argument("--id-from", choices=["stem", "name", "path"], default="stem")
-    p.add_argument("--include-source-path", action="store_true", default=True)
-    p.add_argument("--no-include-source-path", dest="include_source_path", action="store_false")
-
-    return p
+CLI = CliSpec(
+    analyze_readability,
+    description='Compute textstat readability metrics for an analysis-ready CSV.',
+    aliases={
+        'csv_path': ['--csv'],
+        'out_features_csv': ['--out'],
+    },
+    legacy={
+        '--no-include-source-path': ['--include-source-path', 'false'],
+        '--no-recursive': ['--recursive', 'false'],
+    },
+)
 
 
-def main():
-    r"""
-    Command-line entry point for readability metrics.
-
-    Examples
-    --------
-    On a prebuilt analysis-ready CSV:
-
-    $ python -m taters.text.analyze_readability --analysis-csv transcripts.csv
-
-    Gather from a transcript CSV and group by speaker before scoring:
-
-    $ python -m taters.text.analyze_readability \
-        --csv transcripts/session.csv \
-        --text-col text --id-col source --id-col speaker \
-        --group-by source --group-by speaker --mode concat
-    """
-    args = _build_arg_parser().parse_args()
-
-    # Defaults for list-ish args
-    text_cols = args.text_cols if args.text_cols else ["text"]
-    id_cols = args.id_cols if args.id_cols else None
-    group_by = args.group_by if args.group_by else None
-
-    out = analyze_readability(
-        csv_path=args.csv_path,
-        txt_dir=args.txt_dir,
-        analysis_csv=args.analysis_csv,
-        out_features_csv=args.out_features_csv,
-        overwrite_existing=args.overwrite_existing,
-        encoding=args.encoding,
-        text_cols=text_cols,
-        id_cols=id_cols,
-        mode=args.mode,
-        group_by=group_by,
-        delimiter=args.delimiter,
-        joiner=args.joiner,
-        num_buckets=args.num_buckets,
-        max_open_bucket_files=args.max_open_bucket_files,
-        tmp_root=args.tmp_root,
-        recursive=args.recursive,
-        pattern=args.pattern,
-        id_from=args.id_from,
-        include_source_path=args.include_source_path,
-    )
-    print(str(out))
+def main(argv=None) -> int:
+    return CLI.run(argv)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

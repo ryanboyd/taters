@@ -1,33 +1,42 @@
 from pathlib import Path
-from typing import Optional, Literal, Union, Sequence, Iterable, Tuple
+from typing import Callable, Optional, Literal, Union, Sequence, Iterable, Tuple
 import csv
 
 from .dictionary_analyzers import multi_dict_analyzer as mda
 from ..helpers.find_files import find_files
-from ..helpers.text_gather import (
-    csv_to_analysis_ready_csv,
-    txt_folder_to_analysis_ready_csv,
-)
+from ..helpers.progress import count_rows
+from ..helpers.doc_text import DOCUMENT_PATTERN
+from ..helpers.text_gather import (resolve_analysis_ready)
+from ..helpers.provenance import TEXT_GRAIN, TEXT_INPUT, records_settings
+from ..helpers.cliargs import CliSpec
 
+@records_settings(binding=TEXT_INPUT, grain=TEXT_GRAIN,
+                  outputs=("out_features_csv",),
+                  # this is the word count that the categories are percentages of
+                  bookkeeping=("WC",),
+                  assets={"dict_paths": "dictionaries"})
 def analyze_with_dictionaries(
     *,
     # ----- Input source (choose exactly one, or pass analysis_csv directly) -----
     csv_path: Optional[Union[str, Path]] = None,
     txt_dir: Optional[Union[str, Path]] = None,
-    analysis_csv: Optional[Union[str, Path]] = None,  # if provided, gathering is skipped
+    analysis_csv: Optional[Union[str, Path]] = None,  # if given, we skip gathering
+    gathered_csv: Optional[Union[str, Path]] = None,
+    on_progress: Optional[Callable[[int, int], None]] = None,
 
     # ----- Output -----
     out_features_csv: Optional[Union[str, Path]] = None,
-    overwrite_existing: bool = False,  # if the file already exists, let's not overwrite by default
+    overwrite_existing: bool = False,
+    workers: int = 0,  # if the file already exists, let's not overwrite by default
 
     # ----- Dictionaries -----
-    dict_paths: Sequence[Union[str, Path]], # LIWC2007 (.dic) or LIWC-22 format (.dicx, .csv)
+    dict_paths: Sequence[Union[str, Path]], # LIWC2007 (.dic) or LIWC-22 (.dicx, .csv)
 
     # ====== SHARED I/O OPTIONS ======
     encoding: str = "utf-8-sig",
 
     # ====== CSV GATHER OPTIONS ======
-    # Only used when csv_path is provided
+    # these only matter when csv_path is provided
     text_cols: Sequence[str] = ("text",),
     id_cols: Optional[Sequence[str]] = None,
     mode: Literal["concat", "separate"] = "concat",
@@ -39,9 +48,9 @@ def analyze_with_dictionaries(
     tmp_root: Optional[Union[str, Path]] = None,
 
     # ====== TXT FOLDER GATHER OPTIONS ======
-    # Only used when txt_dir is provided
+    # these only matter when txt_dir is provided
     recursive: bool = True,
-    pattern: str = "*.txt",
+    pattern: str = DOCUMENT_PATTERN,
     id_from: Literal["stem", "name", "path"] = "stem",
     include_source_path: bool = True,
 
@@ -76,6 +85,20 @@ def analyze_with_dictionaries(
         Folder containing ``.txt`` files to gather from. Mutually exclusive with other modes.
     analysis_csv : str or pathlib.Path, optional
         Prebuilt analysis-ready CSV with exactly two columns: ``text_id`` and ``text``.
+    gathered_csv : str or pathlib.Path, optional
+        Where to write the intermediate "analysis-ready" table built from
+        ``csv_path`` or ``txt_dir``.
+
+        By default it lands beside the *source* -- which means analyzing a
+        spreadsheet in someone's Downloads folder writes a file into their
+        Downloads folder. Pass this to keep the intermediate with the rest of a
+        run's output instead. Ignored when ``analysis_csv`` is given, because
+        then no gathering happens.
+    on_progress : callable, optional
+        Called as ``on_progress(done, total, message=None)`` so a UI can show a
+        real bar instead of a spinner. Injected automatically by the pipeline
+        runner for any step function that declares this parameter. See
+        :mod:`taters.helpers.progress` for the contract.
     out_features_csv : str or pathlib.Path, optional
         Output file path. If ``None``, defaults to
         ``./features/dictionary/<analysis_ready_filename>``.
@@ -120,6 +143,10 @@ def analyze_with_dictionaries(
         Emit relative frequencies instead of raw counts, when supported by the dictionary engine.
     drop_punct : bool, default=True
         Drop punctuation prior to analysis (dictionary-dependent).
+    workers : int, default=0
+        Parallel processes for reading documents and scoring texts. ``0`` means automatic:
+        three-quarters of the logical cores; ``1`` turns parallelism off. Output files are
+        identical whatever the worker count.
     rounding : int, default=4
         Decimal places to round numeric outputs. Use ``None`` to disable rounding.
     retain_captures : bool, default=False
@@ -159,47 +186,17 @@ def analyze_with_dictionaries(
     """
 
 
-    # 1) Produce or accept the analysis-ready CSV (must have columns: text_id,text)
-    if analysis_csv is not None:
-        analysis_ready = Path(analysis_csv)
-        if not analysis_ready.exists():
-            raise FileNotFoundError(f"analysis_csv not found: {analysis_ready}")
-    else:
-        if (csv_path is None) == (txt_dir is None):
-            raise ValueError("Provide exactly one of csv_path or txt_dir (or pass analysis_csv).")
+    analysis_ready = resolve_analysis_ready(
+        csv_path=csv_path, txt_dir=txt_dir, analysis_csv=analysis_csv,
+        gathered_csv=gathered_csv, text_cols=text_cols, id_cols=id_cols,
+        mode=mode, group_by=group_by, delimiter=delimiter, encoding=encoding,
+        joiner=joiner, num_buckets=num_buckets,
+        max_open_bucket_files=max_open_bucket_files, tmp_root=tmp_root,
+        recursive=recursive, pattern=pattern, id_from=id_from,
+        include_source_path=include_source_path,
+        overwrite_existing=overwrite_existing, on_progress=on_progress,
+        workers=workers)
 
-        if csv_path is not None:
-            analysis_ready = Path(
-                csv_to_analysis_ready_csv(
-                    csv_path=csv_path,
-                    text_cols=list(text_cols),
-                    id_cols=list(id_cols) if id_cols else None,
-                    mode=mode,
-                    group_by=list(group_by) if group_by else None,
-                    delimiter=delimiter,
-                    encoding=encoding,
-                    joiner=joiner,
-                    num_buckets=num_buckets,
-                    max_open_bucket_files=max_open_bucket_files,
-                    tmp_root=tmp_root,
-                    overwrite_existing=overwrite_existing,
-                )
-            )
-        else:
-            analysis_ready = Path(
-                txt_folder_to_analysis_ready_csv(
-                    root_dir=txt_dir,
-                    recursive=recursive,
-                    pattern=pattern,
-                    encoding=encoding,
-                    id_from=id_from,
-                    include_source_path=include_source_path,
-                    overwrite_existing=overwrite_existing,
-                )
-            )
-
-    # 1b) Decide default features path if not provided:
-    #     <cwd>/features/dictionary/<analysis_ready_filename>
     if out_features_csv is None:
         out_features_csv = Path.cwd() / "features" / "dictionary" / analysis_ready.name
     out_features_csv = Path(out_features_csv)
@@ -210,7 +207,7 @@ def analyze_with_dictionaries(
         return out_features_csv
 
 
-    # 2) Validate dictionaries
+    # 2) validate the dictionaries
     def _expand_dict_inputs(paths):
         """
         Normalize dictionary inputs into a unique, ordered list of files.
@@ -238,7 +235,7 @@ def analyze_with_dictionaries(
         seen = set()
         for p in map(Path, paths):
             if p.is_dir():
-                # Find .dic/.dicx/.csv under this folder (recursive), stable order
+                # find .dic/.dicx/.csv under this folder (recursive), stable order
                 found = find_files(
                     root_dir=p,
                     extensions=[".dic", ".dicx", ".csv"],
@@ -267,7 +264,7 @@ def analyze_with_dictionaries(
 
     dict_paths = _expand_dict_inputs(dict_paths)
 
-        # 3) Stream the analysis-ready CSV into the analyzer → features CSV
+        # 3) stream the analysis-ready CSV into the analyzer → features CSV
     def _iter_items_from_csv_with_meta(
         path: Path,
         *,
@@ -303,7 +300,7 @@ def analyze_with_dictionaries(
                 raise ValueError(
                     f"Expected columns '{id_col}' and '{text_col}' in {path}; found {fields}"
                 )
-            # If id_cols were requested, enforce they exist up-front (fail fast)
+            # if id_cols were requested, make sure they exist up-front (fail fast)
             missing = [c for c in wanted if c not in fields]
             if missing:
                 raise ValueError(
@@ -316,9 +313,26 @@ def analyze_with_dictionaries(
                 meta = {c: str(row.get(c, "") or "") for c in wanted}
                 yield tid, text, meta
 
-    # Use multi_dict_analyzer as the middle layer (new API)
+
+    # we use multi_dict_analyzer as the middle layer (new API). it pulls the
+    # generator above lazily, writes as it goes, and owns the progress story:
+    # "scoring documents", with one sub-bar per document in flight on displays
+    # that can show it
+    total_rows = count_rows(analysis_ready, on_progress=on_progress)
+
+    # there's one shared rule for what rides along beside text_id -- see
+    # resolve_passthrough_columns: same order of preference that every per-row
+    # analyzer uses, and the same two columns that never get carried
+    from ..helpers.row_map import resolve_passthrough_columns
+
+    with analysis_ready.open("r", newline="", encoding=encoding) as _fh:
+        _header = csv.DictReader(_fh).fieldnames or []
+    passthrough = resolve_passthrough_columns(
+        _header, id_cols=id_cols, group_by=group_by,
+        analysis_ready=analysis_ready)
+
     mda.analyze_texts_to_csv(
-        items=_iter_items_from_csv_with_meta(analysis_ready, pass_through_cols=id_cols or []),
+        items=_iter_items_from_csv_with_meta(analysis_ready, pass_through_cols=passthrough),
         dict_files=dict_paths,
         out_csv=out_features_csv,
         relative_freq=relative_freq,
@@ -327,8 +341,12 @@ def analyze_with_dictionaries(
         retain_captures=retain_captures,
         wildcard_mem=wildcard_mem,
         id_col_name="text_id",
-        pass_through_cols=list(id_cols or []),  # <-- inject id_cols right after text_id
+        pass_through_cols=passthrough,  # these land right after text_id
+        workers=workers,
+        on_progress=on_progress,
+        total_hint=total_rows,
         encoding=encoding,
+        verbose=on_progress is None,
     )
 
 
@@ -337,139 +355,36 @@ def analyze_with_dictionaries(
 
 
 # --- CLI ------------------------------------------------------------
-def _build_arg_parser():
-    """
-    Create an ``argparse.ArgumentParser`` for the dictionary coding CLI.
 
-    The parser exposes three mutually exclusive input modes (``--csv``, ``--txt-dir``,
-    ``--analysis-csv``), output/overwrite options, repeatable ``--dict`` arguments
-    (accepting files or directories), gathering parameters for CSV/TXT inputs,
-    and analyzer pass-through options.
 
-    Returns
-    -------
-    argparse.ArgumentParser
-        Configured parser instance.
-    """
+# ---------------------------------------------------------------------------
+# command line -- we derive this from the function(s) above; see
+# helpers.cliargs.CliSpec. the aliases and legacy flags are the spellings that
+# the old hand-written parser used; we keep them so that every documented
+# invocation still works
+# ---------------------------------------------------------------------------
 
-    import argparse
-    from ..helpers.cliargs import add_bool_argument
-    p = argparse.ArgumentParser(
-        description="ContentCoder: multi-dictionary coding into one CSV (globals once + per-dict blocks)."
-    )
+CLI = CliSpec(
+    analyze_with_dictionaries,
+    description='ContentCoder: multi-dictionary coding into one CSV (globals once + per-dict blocks).',
+    aliases={
+        'csv_path': ['--csv'],
+        'dict_paths': ['--dict'],
+        'out_features_csv': ['--out'],
+    },
+    legacy={
+        '--no-drop-punct': ['--drop-punct', 'false'],
+        '--no-include-source-path': ['--include-source-path', 'false'],
+        '--no-recursive': ['--recursive', 'false'],
+        '--no-relative-freq': ['--relative-freq', 'false'],
+        '--no-wildcard-mem': ['--wildcard-mem', 'false'],
+    },
+)
 
-    # Input source (choose one)
-    src = p.add_mutually_exclusive_group(required=True)
-    src.add_argument("--csv", dest="csv_path", help="Source CSV to gather from")
-    src.add_argument("--txt-dir", dest="txt_dir", help="Folder of .txt files to gather from")
-    src.add_argument("--analysis-csv", dest="analysis_csv",
-                     help="Use an existing analysis-ready CSV (skip gathering)")
 
-    # Output
-    p.add_argument("--out", dest="out_features_csv", default=None,
-                   help="Output CSV (default: ./features/dictionary/<gathered_name>)")
-    add_bool_argument(p, "--overwrite_existing", default=False,
-                      help="Do you want to overwrite the output file if it already exists?")
+def main(argv=None) -> int:
+    return CLI.run(argv)
 
-    # Dictionaries (repeatable)
-    p.add_argument("--dict", dest="dict_paths", action="append", required=True,
-                   help="Path to a .dicx dictionary (repeat this flag for multiple)")
-
-    # I/O
-    p.add_argument("--encoding", default="utf-8-sig")
-    p.add_argument("--delimiter", default=",")
-
-    # CSV gather options
-    p.add_argument("--text-col", dest="text_cols", action="append",
-                   help="Text column (repeatable). Default: --text-col text")
-    p.add_argument("--id-col", dest="id_cols", action="append",
-                   help="ID column(s) to carry through (repeatable)")
-    p.add_argument("--mode", choices=["concat", "separate"], default="concat")
-    p.add_argument("--group-by", dest="group_by", action="append",
-                   help="Group by column(s) (repeatable)")
-    p.add_argument("--joiner", default=" ")
-    p.add_argument("--num-buckets", type=int, default=512)
-    p.add_argument("--max-open-bucket-files", type=int, default=64)
-    p.add_argument("--tmp-root", default=None)
-
-    # TXT gather options
-    p.add_argument("--recursive", action="store_true", default=True)
-    p.add_argument("--no-recursive", dest="recursive", action="store_false")
-    p.add_argument("--pattern", default="*.txt")
-    p.add_argument("--id-from", choices=["stem", "name", "path"], default="stem")
-    p.add_argument("--include-source-path", action="store_true", default=True)
-    p.add_argument("--no-include-source-path", dest="include_source_path", action="store_false")
-
-    # Analyzer options (pass-through to ContentCoder)
-    p.add_argument("--relative-freq", action="store_true", default=True)
-    p.add_argument("--no-relative-freq", dest="relative_freq", action="store_false")
-    p.add_argument("--drop-punct", action="store_true", default=True)
-    p.add_argument("--no-drop-punct", dest="drop_punct", action="store_false")
-    p.add_argument("--retain-captures", action="store_true", default=False)
-    p.add_argument("--wildcard-mem", action="store_true", default=True)
-    p.add_argument("--no-wildcard-mem", dest="wildcard_mem", action="store_false")
-    p.add_argument("--rounding", type=int, default=4)
-
-    return p
-
-def main():
-    r"""
-    Command-line entry point for multi-dictionary content coding.
-
-    Parses CLI arguments via :func:`_build_arg_parser`, normalizes list-like defaults,
-    invokes :func:`analyze_with_dictionaries`, and prints the resulting output path.
-
-    Examples
-    --------
-    Basic usage on a CSV with grouping by speaker:
-
-    $ python -m taters.text.analyze_with_dictionaries \
-        --csv transcripts/session.csv \
-        --text-col text --id-col speaker --group-by speaker \
-        --dict dictionaries/liwc/LIWC-22\ Dictionary\ (2022-01-27).dicx
-
-    Notes
-    -----
-    Boolean flags include positive/negative pairs (e.g., ``--recursive`` /
-    ``--no-recursive``, ``--relative-freq`` / ``--no-relative-freq``) to make
-    CLI behavior explicit.
-    """
-
-    args = _build_arg_parser().parse_args()
-
-    # Defaults for list-ish args
-    text_cols = args.text_cols if args.text_cols else ["text"]
-    id_cols = args.id_cols if args.id_cols else None
-    group_by = args.group_by if args.group_by else None
-
-    out = analyze_with_dictionaries(
-        csv_path=args.csv_path,
-        txt_dir=args.txt_dir,
-        analysis_csv=args.analysis_csv,
-        out_features_csv=args.out_features_csv,
-        overwrite_existing=args.overwrite_existing,
-        dict_paths=args.dict_paths,
-        encoding=args.encoding,
-        text_cols=text_cols,
-        id_cols=id_cols,
-        mode=args.mode,
-        group_by=group_by,
-        delimiter=args.delimiter,
-        joiner=args.joiner,
-        num_buckets=args.num_buckets,
-        max_open_bucket_files=args.max_open_bucket_files,
-        tmp_root=args.tmp_root,
-        recursive=args.recursive,
-        pattern=args.pattern,
-        id_from=args.id_from,
-        include_source_path=args.include_source_path,
-        relative_freq=args.relative_freq,
-        drop_punct=args.drop_punct,
-        rounding=args.rounding,
-        retain_captures=args.retain_captures,
-        wildcard_mem=args.wildcard_mem,
-    )
-    print(str(out))
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

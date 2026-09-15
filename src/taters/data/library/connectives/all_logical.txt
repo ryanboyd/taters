@@ -1,0 +1,46 @@
+# Logical connectives, extending and contrasting.
+#
+# Format: one word or phrase per line; a TAB plus a Penn tag (TAG or
+# TAG|TAG) restricts an ambiguous single word to that use.
+# Provenance -- entries are grouped by where the item appears:
+#   [H&H]  Halliday & Hasan (1976), Cohesion in English, ch. 5.
+#   [PDTB] Prasad et al. (2008), PDTB 2.0 explicit connectives.
+#   [taters] curated here for the construct; in neither inventory.
+# The CATEGORY definitions follow Halliday & Hasan (1976) and the
+# Coh-Metrix taxonomy (Graesser, McNamara, Louwerse & Cai, 2004).
+# Written for taters; nothing here is copied from TAACO.
+
+# -- In Halliday & Hasan (1976, ch. 5):
+and
+or
+then	RB
+so	IN|CC
+therefore
+hence
+consequently
+furthermore
+however
+though
+nevertheless
+otherwise
+as a result
+in that case
+nor
+
+# -- In the PDTB 2.0 explicit-connective inventory:
+if
+because
+thus
+moreover
+although
+whereas
+nonetheless
+unless
+accordingly
+else
+
+# -- taters curation (in neither inventory):
+whenever
+only if
+if and only if
+on the condition

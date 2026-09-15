@@ -1,0 +1,55 @@
+# Runs the test suite on a machine that is not yours.
+#
+# The whole point: your laptop has every optional dependency installed, in one
+# arrangement, on one OS. A fresh checkout on a clean machine is what everybody
+# else gets, and it is the only way to find out that something only worked
+# because of a package you installed months ago and forgot about.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # lets you press "Run workflow" by hand from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    strategy:
+      # without this, one Python version failing cancels the others, and you
+      # lose the information you most want: is this version-specific or not?
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: FFmpeg
+        # a handful of tests are marked needs_ffmpeg and skip themselves
+        # without it. it is one apt line, so we may as well actually run them
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: CPU-only PyTorch
+        # sentence-transformers pulls torch in, and the default PyPI wheel on
+        # Linux drags roughly 2.5 GB of CUDA libraries with it -- for a runner
+        # with no GPU. Installing the CPU build FIRST means pip already has a
+        # torch and never fetches the CUDA one.
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install Taters
+        run: pip install -e . pytest ruff
+
+      - name: Lint
+        run: ruff check --isolated --select E4,E9,F --exclude reference .
+
+      - name: Tests
+        # test_hashbrowns is the demo's own suite and is not part of the
+        # contract the rest of the code keeps.
+        run: pytest -q --ignore=tests/test_hashbrowns.py

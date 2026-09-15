@@ -42,7 +42,7 @@ def test_video_group_matches_only_video_extensions(tree):
 
 
 def test_audio_group_is_case_insensitive(tree):
-    # shout.WAV is uppercase on disk and must still be found.
+    # shout.WAV is uppercase on disk and we still want to find it.
     assert names(find_files(tree, file_type="audio")) == {"shout.WAV", "song.mp3", "deep.wav"}
 
 
@@ -79,7 +79,7 @@ def test_extensions_accept_any_spelling(tree, exts):
 
 
 def test_extensions_override_the_group(tree):
-    # file_type says video, but the explicit extension list wins.
+    # file_type says video, but an explicit extension list should win.
     assert names(find_files(tree, file_type="video", extensions=[".txt"])) == {"notes.txt"}
 
 
@@ -102,7 +102,7 @@ def test_non_recursive_stays_in_the_top_folder(tree):
 def test_hidden_files_and_folders_are_skipped_by_default(tree):
     found = names(find_files(tree, file_type="video"))
     assert ".secret.mp4" not in found
-    assert "buried.mp4" not in found      # lives inside .dotdir
+    assert "buried.mp4" not in found      # this one lives inside .dotdir
 
 
 def test_include_hidden_picks_up_dotfiles_and_dotdirs(tree):
@@ -198,7 +198,8 @@ def test_ffprobe_verify_drops_files_without_the_requested_stream(tmp_path, tiny_
     """
     root = tmp_path / "media"
     root.mkdir()
-    import shutil, subprocess
+    import shutil
+    import subprocess
     shutil.copy(tiny_video, root / "with_audio.mp4")
     subprocess.run(
         ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
@@ -206,20 +207,20 @@ def test_ffprobe_verify_drops_files_without_the_requested_stream(tmp_path, tiny_
         check=True, capture_output=True,
     )
 
-    # By extension alone, both files look like video.
+    # going by extension alone, both files look like video.
     assert names(find_files(root, file_type="video")) == {"with_audio.mp4", "silent.mp4"}
 
-    # Asking for audio *and* verifying keeps only the one that really has an
-    # audio stream. (An explicit extension list is needed because "mp4" is not
-    # in the audio extension group.)
+    # now we ask for audio *and* verify, which should keep only the one that
+    # actually has an audio stream. (we need the explicit extension list here
+    # because "mp4" isn't in the audio extension group.)
     assert names(
         find_files(root, file_type="audio", extensions=[".mp4"], ffprobe_verify=True)
     ) == {"with_audio.mp4"}
 
-    # Without the explicit extensions, no .mp4 is even a candidate for audio.
+    # without the explicit extensions, no .mp4 is even a candidate for audio.
     assert names(find_files(root, file_type="audio", ffprobe_verify=True)) == set()
 
-    # Both files genuinely carry a video stream, so both survive video verification.
+    # both files do carry a video stream, so both should survive video verification.
     assert names(find_files(root, file_type="video", ffprobe_verify=True)) == {
         "with_audio.mp4", "silent.mp4",
     }

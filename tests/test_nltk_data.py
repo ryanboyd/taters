@@ -35,7 +35,7 @@ def test_ensure_punkt_reports_status_when_verbose(capsys):
 
 
 def test_ensure_punkt_is_quiet_when_asked():
-    # No assertion on the return value: this is about not printing.
+    # we don't care what comes back here, just that nothing gets printed
     ensure_punkt(verbose=False)
 
 

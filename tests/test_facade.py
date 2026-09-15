@@ -41,7 +41,7 @@ def test_package_exposes_a_version():
     assert isinstance(taters.__version__, str) and taters.__version__
 
 
-@pytest.mark.parametrize("namespace", ["audio", "text", "helpers"])
+@pytest.mark.parametrize("namespace", ["audio", "text", "helpers", "stats", "figures"])
 def test_namespaces_exist(namespace):
     assert hasattr(Taters(), namespace)
 
@@ -61,14 +61,65 @@ FACADE_METHODS = [
     ("text", "analyze_with_dictionaries"),
     ("text", "analyze_with_archetypes"),
     ("text", "analyze_readability"),
+    ("text", "analyze_sentiment_vader"),
+    ("text", "analyze_word_count"),
     ("text", "analyze_lexical_richness"),
     ("text", "extract_sentence_embeddings"),
     ("text", "convert_subtitles"),
+    ("text", "analyze_cohesion"),
+    ("text", "analyze_ngram_frequencies"),
+    ("text", "analyze_parts_of_speech"),
+    ("text", "build_doc_term_matrix"),
+    ("text", "topic_model_mem"),
+    ("text", "train_word_vectors"),
+    ("text", "apply_word_vectors"),
+    ("text", "import_word_vectors"),
+    ("text", "describe_word_vectors"),
+    ("text", "extract_transformer_embeddings"),
+    ("text", "adapt_encoder"),
+    ("text", "finetune_text_predictor"),
+    ("text", "apply_text_predictor"),
+    ("text", "import_hf_classifier"),
+    ("text", "apply_hf_classifier"),
+    ("text", "apply_mem_model"),
+    ("stats", "assemble_analysis_table"),
+    ("stats", "analyze_group_differences"),
+    ("stats", "analyze_correlations"),
+    ("stats", "write_stats_report"),
+    ("stats", "fit_ridge_csv"),
+    ("stats", "apply_ridge_csv"),
+    ("stats", "fit_classifier_csv"),
+    ("stats", "apply_classifier_csv"),
+    ("stats", "fit_pca_csv"),
+    ("stats", "apply_pca_csv"),
+    ("stats", "describe_features"),
+    ("figures", "stats_wordclouds"),
+    ("figures", "theme_wordclouds"),
+    ("figures", "frequency_wordclouds"),
+    ("figures", "neighbor_wordclouds"),
     ("helpers", "txt_folder_to_analysis_ready_csv"),
     ("helpers", "csv_to_analysis_ready_csv"),
     ("helpers", "find_files"),
     ("helpers", "feature_gather"),
 ]
+
+
+def test_the_contract_list_covers_every_public_facade_method():
+    """
+    The list above is what every facade contract test runs over, and it had
+    silently fallen eleven methods behind the facade -- both classifier
+    methods, the topic model, cohesion, n-grams, the matrix. A method that is
+    not on the list is a method the contract tests do not cover.
+    """
+    import inspect
+
+    t = Taters()
+    listed = set(FACADE_METHODS)
+    actual = {(ns, name) for ns in ("audio", "text", "stats", "helpers", "figures")
+              for name, _m in inspect.getmembers(getattr(t, ns), inspect.ismethod)
+              if not name.startswith("_")}
+    assert actual - listed == set(), f"not on the contract list: {sorted(actual - listed)}"
+    assert listed - actual == set(), f"listed but gone: {sorted(listed - actual)}"
 
 
 @pytest.mark.parametrize("namespace,method", FACADE_METHODS, ids=lambda v: str(v))
@@ -129,8 +180,8 @@ def test_importing_taters_does_not_drag_in_the_heavy_stack(repo_root):
         "'sentence_transformers','pandas','nemo','parselmouth') if m in sys.modules]\n"
         "print(','.join(heavy))"
     )
-    # The child is a fresh interpreter, so it needs to be told where the
-    # package lives (pytest's `pythonpath` setting only applies to this process).
+    # the child is a fresh interpreter, so we have to tell it where the package
+    # lives (pytest's `pythonpath` setting only applies to this process).
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(
         [str(repo_root / "src"), env.get("PYTHONPATH", "")]

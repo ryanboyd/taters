@@ -1,0 +1,62 @@
+# Positive (extending) connectives across categories.
+#
+# Format: one word or phrase per line; a TAB plus a Penn tag (TAG or
+# TAG|TAG) restricts an ambiguous single word to that use.
+# Provenance -- entries are grouped by where the item appears:
+#   [H&H]  Halliday & Hasan (1976), Cohesion in English, ch. 5.
+#   [PDTB] Prasad et al. (2008), PDTB 2.0 explicit connectives.
+#   [taters] curated here for the construct; in neither inventory.
+# The CATEGORY definitions follow Halliday & Hasan (1976) and the
+# Coh-Metrix taxonomy (Graesser, McNamara, Louwerse & Cai, 2004).
+# Written for taters; nothing here is copied from TAACO.
+
+# -- In Halliday & Hasan (1976, ch. 5):
+and
+furthermore
+besides
+in addition
+likewise
+similarly
+for instance
+so	IN|CC
+therefore
+hence
+consequently
+as a result
+then	RB
+next	RB|IN
+meanwhile
+first
+finally
+in the same way
+
+# -- In the PDTB 2.0 explicit-connective inventory:
+also
+moreover
+additionally
+as well
+for example
+because
+since	IN
+thus
+accordingly
+so that
+when	WRB
+while	IN
+after	IN
+before	IN
+once	IN
+if
+indeed
+plus
+
+# -- taters curation (in neither inventory):
+namely
+due to
+in order to
+during
+second
+whenever
+only if
+equally
+again

@@ -6,6 +6,7 @@ from typing import Iterable, List, Optional, Literal, Union
 import argparse
 import csv
 import re
+from ..helpers.atomic import atomic_write
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -34,19 +35,22 @@ class SubtitleSegment:
     Instances are immutable (``frozen=True``) so they can be safely shared and hashed.
     """
 
-    number: Optional[int]           # SRT index if present; None for VTT/no-number
-    start_ms: int                   # start time in milliseconds
-    end_ms: int                     # end time in milliseconds
-    text: str                       # text content (possibly multi-line)
-    name: Optional[str] = None      # optional speaker name (VTT-style notes/inline tags not parsed here)
+    number: Optional[int]           # the SRT index, if there is one; None for VTT
+    start_ms: int                   # start time, in milliseconds
+    end_ms: int                     # end time, in milliseconds
+    text: str                       # the cue text (might span several lines)
+    name: Optional[str] = None      # speaker name; we don't parse VTT notes/tags for it
 
 
 # ---------------------------------------------------------------------------
 # Common helpers
 # ---------------------------------------------------------------------------
 
-_TS_SRT = re.compile(r"^(\d{1,2}):([0-5]\d):([0-5]\d)[,.](\d{3})$")
-_TS_VTT = _TS_SRT  # Same format; VTT uses '.' between seconds and ms, but we accept both , and .
+# we make the hours optional (WebVTT allows ``mm:ss.ttt``, and short-clip
+# exporters actually write it) and unbounded, since a day-long recording is a
+# perfectly legitimate SRT
+_TS_SRT = re.compile(r"^(?:(\d+):)?([0-5]\d):([0-5]\d)[,.](\d{3})$")
+_TS_VTT = _TS_SRT  # same format; VTT uses '.' before the ms, but we take , or .
 
 def _to_ms(hh: int, mm: int, ss: int, ms: int) -> int:
     """
@@ -75,7 +79,8 @@ def _parse_timestamp(ts: str) -> int:
     """
     Parse a timestamp string into milliseconds.
 
-    Accepts both ``HH:MM:SS,mmm`` and ``HH:MM:SS.mmm`` forms (SRT/VTT).
+    Accepts both ``HH:MM:SS,mmm`` and ``HH:MM:SS.mmm`` forms (SRT/VTT); the
+    hours may be omitted (``MM:SS.mmm``, which WebVTT allows) or exceed 99.
 
     Parameters
     ----------
@@ -96,7 +101,8 @@ def _parse_timestamp(ts: str) -> int:
     m = _TS_SRT.match(ts.strip())
     if not m:
         raise ValueError(f"Invalid timestamp: {ts!r}")
-    hh, mm, ss, ms = (int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)))
+    hh, mm, ss, ms = (int(m.group(1) or 0), int(m.group(2)), int(m.group(3)),
+                      int(m.group(4)))
     return _to_ms(hh, mm, ss, ms)
 
 def _fmt_ms_srt(ms: int) -> str:
@@ -222,13 +228,13 @@ def parse_srt(text: str) -> List[SubtitleSegment]:
     out: List[SubtitleSegment] = []
 
     while i < n:
-        # Skip blank lines
+        # first, skip past any blank lines
         while i < n and lines[i].strip() == "":
             i += 1
         if i >= n:
             break
 
-        # Optional numeric index
+        # the numeric index, if this block has one
         number = None
         maybe_num = lines[i].strip()
         ts_line_idx = i
@@ -240,10 +246,11 @@ def parse_srt(text: str) -> List[SubtitleSegment]:
         if i >= n:
             break
 
-        # Timestamp line
+        # now the timestamp line
         m = _SRT_TS_LINE.match(lines[ts_line_idx].strip())
         if not m:
-            # Some SRTs omit numeric indices—allow timestamps immediately
+            # some SRTs skip the numeric index entirely, so we let the
+            # timestamp come first
             m = _SRT_TS_LINE.match(lines[i].strip())
             if not m:
                 raise ValueError(f"SRT parse error: expected timestamp near line {ts_line_idx+1}")
@@ -253,21 +260,21 @@ def parse_srt(text: str) -> List[SubtitleSegment]:
         start_ms = _parse_timestamp(m.group("start"))
         end_ms = _parse_timestamp(m.group("end"))
 
-        # Content lines until blank
+        # then the content lines, up until the next blank
         content: List[str] = []
         while i < n and lines[i].strip() != "":
             content.append(lines[i])
             i += 1
 
         if not content:
-            # SRT often allows empty entries, but we'll keep it consistent:
-            # accept empty text as empty string.
+            # SRT allows empty cues, so we keep things consistent and treat
+            # one as an empty string
             content = [""]
 
         text_block = "\n".join(content)
         out.append(SubtitleSegment(number=number, start_ms=start_ms, end_ms=end_ms, text=text_block, name=None))
 
-        # Skip the trailing blank between blocks
+        # lastly, skip the trailing blank between blocks
         while i < n and lines[i].strip() == "":
             i += 1
 
@@ -309,10 +316,10 @@ def parse_vtt(text: str) -> List[SubtitleSegment]:
     i = 0
     n = len(lines)
 
-    # Header
+    # the header
     if i < n and lines[i].strip().upper().startswith("WEBVTT"):
         i += 1
-        # Skip header meta until blank line
+        # skip the header metadata, up to the blank line
         while i < n and lines[i].strip() != "":
             i += 1
         while i < n and lines[i].strip() == "":
@@ -321,9 +328,9 @@ def parse_vtt(text: str) -> List[SubtitleSegment]:
     out: List[SubtitleSegment] = []
 
     while i < n:
-        # Skip NOTE/STYLE blocks
+        # NOTE and STYLE blocks aren't cues, so we skip them
         if lines[i].strip().startswith("NOTE") or lines[i].strip().upper() == "STYLE":
-            # Skip until blank line
+            # ...all the way to the blank line
             i += 1
             while i < n and lines[i].strip() != "":
                 i += 1
@@ -331,19 +338,19 @@ def parse_vtt(text: str) -> List[SubtitleSegment]:
                 i += 1
             continue
 
-        # Optional cue identifier line (not used here)
-        # If next non-empty line contains '-->' treat as timestamp; else it's an ID.
-        # Lookahead 2 lines max
+        # cues can have an identifier line before the timestamp. we don't use
+        # it, so: if this line has '-->' it's the timestamp, otherwise we peek
+        # at the next line (two lines of lookahead, max)
         if i < n and "-->" not in lines[i]:
-            # Might be identifier; check next line
+            # might be an identifier; check the next line
             if i + 1 < n and "-->" in lines[i + 1]:
-                i += 1  # consume ID; ignore value
-            # else fall through; if invalid, timestamp line will fail below
+                i += 1  # eat the ID and ignore its value
+            # otherwise we fall through, and the timestamp check below complains
 
         if i >= n:
             break
 
-        # Timestamp line
+        # the timestamp line
         line = lines[i].strip()
         if "-->" not in line:
             raise ValueError(f"VTT parse error: expected timestamp at line {i+1}")
@@ -352,10 +359,10 @@ def parse_vtt(text: str) -> List[SubtitleSegment]:
             raise ValueError(f"VTT parse error: invalid timestamp at line {i+1}")
 
         start_ms = _parse_timestamp(parts[0])
-        end_ms = _parse_timestamp(parts[1].split(" ")[0])  # drop cue settings if present
+        end_ms = _parse_timestamp(parts[1].split(" ")[0])  # drop any cue settings
         i += 1
 
-        # Content until blank
+        # the content, up until the next blank
         content: List[str] = []
         while i < n and lines[i].strip() != "":
             content.append(lines[i])
@@ -414,7 +421,8 @@ def parse_subtitles(input_path: Union[str, Path], *, encoding: Optional[str] = N
     if ext == ".vtt":
         return parse_vtt(raw)
     else:
-        # Default to SRT for .srt or any other unknown extension (common in the wild)
+        # anything that isn't .vtt (including unknown extensions, which are
+        # common in the wild) gets treated as SRT
         return parse_srt(raw)
 
 
@@ -450,7 +458,7 @@ def render_to_csv(segs: Iterable[SubtitleSegment], out_path: Union[str, Path], *
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("w", encoding="utf-8", newline="") as f:
+    with atomic_write(out_path, mode="w", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
         header = ["start_time", "end_time"]
         if include_name:
@@ -486,7 +494,7 @@ def render_to_srt(segs: Iterable[SubtitleSegment], out_path: Union[str, Path]) -
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("w", encoding="utf-8", newline="") as f:
+    with atomic_write(out_path, mode="w", encoding="utf-8", newline="") as f:
         for i, s in enumerate(segs, start=1):
             f.write(f"{i}\n")
             f.write(f"{_fmt_ms_srt(s.start_ms)} --> {_fmt_ms_srt(s.end_ms)}\n")
@@ -514,7 +522,7 @@ def render_to_vtt(segs: Iterable[SubtitleSegment], out_path: Union[str, Path]) -
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("w", encoding="utf-8", newline="") as f:
+    with atomic_write(out_path, mode="w", encoding="utf-8", newline="") as f:
         f.write("WEBVTT\n\n")
         for s in segs:
             f.write(f"{_fmt_ms_vtt(s.start_ms)} --> {_fmt_ms_vtt(s.end_ms)}\n")
@@ -573,15 +581,15 @@ def convert_subtitles(
 
     ext_for = {"csv": ".csv", "srt": ".srt", "vtt": ".vtt"}
     if to not in ext_for:
-        # Validated up front: otherwise an unknown format with an explicit
-        # `output` path silently fell through to the VTT renderer.
+        # we check this up front. otherwise, an unknown format with an explicit
+        # `output` path would fall straight through to the VTT renderer
         raise ValueError(f"Unsupported output format: {to!r}. Choose from csv, srt, vtt.")
 
     in_path = Path(input).resolve()
     if not in_path.exists():
         raise FileNotFoundError(f"Subtitle file not found: {in_path}")
 
-    # Default output location if not provided
+    # if we weren't given an output path, we make one up
     if output is not None:
         out_path = Path(output)
     else:
@@ -593,7 +601,7 @@ def convert_subtitles(
 
     segs = parse_subtitles(in_path, encoding=encoding)
 
-    # Render
+    # now we render
     if to == "csv":
         return render_to_csv(segs, out_path, include_name=include_name)
     elif to == "srt":

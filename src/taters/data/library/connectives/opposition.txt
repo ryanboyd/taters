@@ -1,0 +1,41 @@
+# Adversative / contrastive connectives.
+#
+# Format: one word or phrase per line; a TAB plus a Penn tag (TAG or
+# TAG|TAG) restricts an ambiguous single word to that use.
+# Provenance -- entries are grouped by where the item appears:
+#   [H&H]  Halliday & Hasan (1976), Cohesion in English, ch. 5.
+#   [PDTB] Prasad et al. (2008), PDTB 2.0 explicit connectives.
+#   [taters] curated here for the construct; in neither inventory.
+# The CATEGORY definitions follow Halliday & Hasan (1976) and the
+# Coh-Metrix taxonomy (Graesser, McNamara, Louwerse & Cai, 2004).
+# Written for taters; nothing here is copied from TAACO.
+
+# -- In Halliday & Hasan (1976, ch. 5):
+but
+however
+though
+nevertheless
+instead
+yet	CC
+still	RB
+on the other hand
+on the contrary
+at the same time
+by contrast
+all the same
+rather
+despite this
+
+# -- In the PDTB 2.0 explicit-connective inventory:
+although
+whereas
+conversely
+nonetheless
+in contrast
+by comparison
+regardless
+
+# -- taters curation (in neither inventory):
+despite
+rather than
+even though

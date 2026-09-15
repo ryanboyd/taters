@@ -1,12 +1,15 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence, Union
+from typing import Callable, Optional, Sequence, Union
 import re
-import csv
-import sys
 import pandas as pd
 import numpy as np
+from .atomic import atomic_write
+from .progress import Ticker, announce
+from .provenance import records_settings
+from .cliargs import CliSpec
+from .csvio import widen_csv_field_limit
 
 PathLike = Union[str, Path]
 
@@ -49,7 +52,8 @@ def _iter_csv_files(
     if not root.exists():
         return
     if root.is_file():
-        # Not the intended mode, but be permissive: if it's a file and matches, yield it.
+        # not the intended mode, but let's be permissive: if it's a file and
+        # matches, yield it.
         if root.match(pattern):
             yield root.resolve()
         return
@@ -105,11 +109,8 @@ def _read_csv_add_source(
     read errors should be handled by the caller.
     """
 
-    # Allow very large cells (long transcripts)
-    try:
-        csv.field_size_limit(sys.maxsize)
-    except OverflowError:
-        csv.field_size_limit(2**31 - 1)
+    # let very large cells through (long transcripts blow past the default)
+    widen_csv_field_limit()
 
     df = pd.read_csv(path, dtype="object", sep=delimiter, encoding=encoding)
 
@@ -122,47 +123,28 @@ def _read_csv_add_source(
             candidate = f"{base}.{n}"
         return candidate
 
-    # ---- De-duplicate any pre-existing columns named exactly 'source'
-    cols = list(df.columns)
-    seen = set(cols)
-
-    # Rename exact 'source' occurrences
-    if "source" in seen:
-        new_cols = []
-        # We'll track taken names as we rename
+    def _make_room(name: str) -> None:
+        """Rename an input column that collides with one we are about to add
+        (`source`, `source_path`) to `name.N`, so nothing is overwritten."""
+        cols = list(df.columns)
+        if name not in cols:
+            return
         taken = set(cols)
-        for name in cols:
-            if name == "source":
-                new_name = _next_available("source", taken)
-                new_cols.append(new_name)
-                taken.add(new_name)
-                taken.discard("source")  # doesn't matter, just for clarity
-            else:
-                new_cols.append(name)
-        df.columns = new_cols
-        cols = new_cols
-        seen = set(cols)
+        renamed = []
+        for col in cols:
+            if col == name:
+                col = _next_available(name, taken)
+                taken.add(col)
+            renamed.append(col)
+        df.columns = renamed
 
-    # Now we can safely insert our pipeline 'source'
+    # the pipeline's own `source` (and `source_path`) lead the table; if an
+    # input column has the same name, we keep it (renamed) rather than clobber it.
+    _make_room("source")
     df.insert(0, "source", path.stem)
 
-    # ---- Handle source_path similarly if requested
     if add_source_path:
-        cols = list(df.columns)
-        seen = set(cols)
-        if "source_path" in seen:
-            new_cols = []
-            taken = set(cols)
-            for name in cols:
-                if name == "source_path":
-                    new_name = _next_available("source_path", taken)
-                    new_cols.append(new_name)
-                    taken.add(new_name)
-                    taken.discard("source_path")
-                else:
-                    new_cols.append(name)
-            df.columns = new_cols
-
+        _make_room("source_path")
         # place our 'source_path' right after 'source' if possible
         insert_at = 1 if "source" in df.columns else 0
         df.insert(insert_at, "source_path", str(path.resolve()))
@@ -243,23 +225,23 @@ def _promote_inner_keys(df: pd.DataFrame, keys: Sequence[str]) -> pd.DataFrame:
     existing = set(cols)
 
     for base in keys:
-        # Find numbered variants like base.1, base.2, ...
+        # go looking for numbered variants like base.1, base.2, ...
         numbered = [c for c in cols if c == f"{base}.1" or c.startswith(f"{base}.")]
         has_base = base in existing
         if numbered:
             numbered.sort()
-            inner_col = numbered[0]              # choose the first stable candidate
+            inner_col = numbered[0]              # first after sorting, so it's stable
             if has_base:
-                # Demote file-level base to 'file_<base>' (unique if needed)
+                # demote the file-level base to 'file_<base>' (uniquified if needed)
                 demoted = _unique(f"file_{base}", existing)
                 df.rename(columns={base: demoted}, inplace=True)
                 existing.discard(base)
                 existing.add(demoted)
-            # Promote inner to base
+            # now we promote the inner column up to the base name
             df.rename(columns={inner_col: base}, inplace=True)
             existing.discard(inner_col)
             existing.add(base)
-            # refresh for next iteration
+            # refresh these for the next time around
             cols = list(df.columns)
             existing = set(cols)
 
@@ -292,6 +274,8 @@ def feature_gather(
     # output
     out_csv: Optional[PathLike] = None,
     overwrite_existing: bool = False,
+    verbose: bool = True,
+    on_progress: Optional[Callable[..., None]] = None,
 ) -> Path:
     """
     Single entry point to concatenate or aggregate feature CSVs from one folder.
@@ -360,6 +344,7 @@ def feature_gather(
 
     if not aggregate:
         return gather_csvs_to_one(
+            on_progress=on_progress,
             root_dir=root_dir,
             pattern=pattern,
             recursive=recursive,
@@ -368,6 +353,7 @@ def feature_gather(
             add_source_path=add_source_path,
             out_csv=out_csv,
             overwrite_existing=overwrite_existing,
+            verbose=verbose,
         )
 
     # aggregate=True
@@ -385,6 +371,7 @@ def feature_gather(
         )
 
     return aggregate_features(
+        on_progress=on_progress,
         root_dir=root_dir,
         pattern=pattern,
         recursive=recursive,
@@ -394,9 +381,23 @@ def feature_gather(
         plan=plan,
         out_csv=out_csv,
         overwrite_existing=overwrite_existing,
+        verbose=verbose,
     )
 
 
+#: The gather steps turn per-item acoustics and per-utterance embeddings into
+#: one joinable table, and their own settings are plumbing. The ones that
+#: decided the numbers -- the Whisper model, the embedding model, the
+#: acoustics thresholds -- live upstream, which is why `root_dir` is binding:
+#: the chain walk follows it and folds in the records beside the files it
+#: read. One tuple for both writers: only the aggregating one carried it, so
+#: the plain concatenation (the acoustics summary) wrote no record and a
+#: model fitted on it could never be checked.
+GATHER_BINDING = ("root_dir", "pattern", "recursive", "delimiter",
+                  "encoding", "add_source_path")
+
+
+@records_settings(binding=GATHER_BINDING, outputs=("out_csv",))
 def gather_csvs_to_one(
     *,
     root_dir: PathLike,
@@ -407,6 +408,8 @@ def gather_csvs_to_one(
     add_source_path: bool = False,
     out_csv: Optional[PathLike] = None,
     overwrite_existing: bool = False,
+    verbose: bool = True,
+    on_progress: Optional[Callable[..., None]] = None,
 ) -> Path:
     """
     Concatenate many CSVs into a single CSV with origin metadata.
@@ -462,13 +465,18 @@ def gather_csvs_to_one(
     out_csv.parent.mkdir(parents=True, exist_ok=True)
 
     if out_csv.exists() and not overwrite_existing:
-        print(f"Aggregated feature output file already exists; returning existing file: {out_csv}")
+        if verbose:
+            print(f"Aggregated feature output file already exists; returning existing file: {out_csv}")
         return out_csv
 
     files = list(_iter_csv_files(root, pattern=pattern, recursive=recursive))
     if not files:
         raise FileNotFoundError(f"No files matched {pattern} under {root}")
 
+    # we tick once per table read: a big embeddings folder took a minute under
+    # a bare spinner, which looks an awful lot like a hang.
+    announce(on_progress, "reading feature tables")
+    ticker = Ticker(on_progress, len(files))
     frames = []
     for fp in files:
         try:
@@ -481,21 +489,27 @@ def gather_csvs_to_one(
                 )
             )
         except Exception as e:
-            print(f"[gather] WARNING: failed to read {fp}: {e}")
+            if verbose:
+                print(f"[gather] WARNING: failed to read {fp}: {e}")
+        ticker.tick(message="reading feature tables")
 
     if not frames:
         raise RuntimeError("No CSVs could be read successfully.")
 
     merged = pd.concat(frames, axis=0, ignore_index=True)
 
-    # Ensure 'source' is first (and 'source_path' next if present)
+    # make sure 'source' is first (and 'source_path' next, if we have it)
     cols = list(merged.columns)
     if "source" in cols:
         lead = ["source"] + (["source_path"] if "source_path" in cols else [])
         rest = [c for c in cols if c not in lead]
         merged = merged[lead + rest]
 
-    merged.to_csv(out_csv, index=False, encoding=encoding)
+    # atomic write, like every other skip-if-exists table: the next run will
+    # treat this one as finished, so a Ctrl-C mid-write used to leave a sticky
+    # truncated table behind.
+    with atomic_write(out_csv, mode="w", newline="", encoding=encoding) as fh:
+        merged.to_csv(fh, index=False)
     return out_csv
 
 
@@ -587,10 +601,10 @@ def _filter_columns(
     if exclude_regex:
         rx = re.compile(exclude_regex)
         keep = [c for c in keep if not rx.search(c)]
-    # Always preserve group keys (and drop duplicates while preserving order).
-    # Only keys that actually exist are re-added: selecting a missing column here
-    # would raise a bare pandas KeyError and pre-empt the caller's much clearer
-    # "Missing group-by columns in data: [...]" error.
+    # always hang onto the group keys (dropping duplicates, but keeping order).
+    # we only re-add keys that actually exist: selecting a missing column here
+    # would raise a bare pandas KeyError and beat the caller's much clearer
+    # "Missing group-by columns in data: [...]" error to the punch.
     present = set(df.columns)
     keep = list(dict.fromkeys([k for k in must_keep if k in present] + keep))
     return df[keep]
@@ -619,13 +633,14 @@ def _numeric_subframe(df: pd.DataFrame) -> pd.DataFrame:
 
     num_df = df.apply(pd.to_numeric, errors="coerce")
     num_df = num_df.select_dtypes(include=[np.number])
-    # A column of pure text coerces to all-NaN, which is still a float column —
-    # keeping it would emit meaningless "<textcol>__mean" columns full of NaN.
-    # Columns where at least one value parsed as a number are kept as-is.
+    # a column of pure text coerces to all-NaN, which is still a float column --
+    # if we kept it we'd spit out meaningless "<textcol>__mean" columns full of
+    # NaN. any column where at least one value parsed as a number, we keep.
     usable = [c for c in num_df.columns if num_df[c].notna().any()]
     return num_df[usable]
 
 
+@records_settings(binding=GATHER_BINDING, outputs=("out_csv",))
 def aggregate_features(
     *,
     root_dir: PathLike,
@@ -637,6 +652,8 @@ def aggregate_features(
     plan: AggregationPlan,
     out_csv: Optional[PathLike] = None,
     overwrite_existing: bool = False,
+    verbose: bool = True,
+    on_progress: Optional[Callable[..., None]] = None,
 ) -> Path:
     """
     Discover files, read, concatenate, and aggregate numeric columns per plan.
@@ -697,13 +714,16 @@ def aggregate_features(
     out_csv.parent.mkdir(parents=True, exist_ok=True)
 
     if out_csv.exists() and not overwrite_existing:
-        print(f"Aggregated feature output file already exists; returning existing file: {out_csv}")
+        if verbose:
+            print(f"Aggregated feature output file already exists; returning existing file: {out_csv}")
         return out_csv
 
     files = list(_iter_csv_files(root, pattern=pattern, recursive=recursive))
     if not files:
         raise FileNotFoundError(f"No files matched {pattern} under {root}")
 
+    announce(on_progress, "reading feature tables")
+    ticker = Ticker(on_progress, len(files))
     frames = []
     for fp in files:
         try:
@@ -716,15 +736,17 @@ def aggregate_features(
                 )
             )
         except Exception as e:
-            print(f"[aggregate] WARNING: failed to read {fp}: {e}")
+            if verbose:
+                print(f"[aggregate] WARNING: failed to read {fp}: {e}")
+        ticker.tick(message="reading feature tables")
 
     if not frames:
         raise RuntimeError("No CSVs could be read successfully.")
 
     df = pd.concat(frames, axis=0, ignore_index=True)
 
-    # If we are aggregating across files (per_file=False),
-    # promote inner keys (e.g., 'source.1' -> 'source') and demote file-level keys.
+    # if we're aggregating across files (per_file=False), we promote the inner
+    # keys (e.g., 'source.1' -> 'source') and demote the file-level keys.
     if not plan.per_file:
         df = _promote_inner_keys(df, plan.group_by)
 
@@ -736,28 +758,28 @@ def aggregate_features(
             if k in cols:
                 resolved.append(k)
                 continue
-            # Look for numbered variants like 'k.1', 'k.2', ...
+            # go looking for numbered variants like 'k.1', 'k.2', ...
             prefix = f"{k}."
             candidates = [c for c in columns if c == f"{k}.1" or c.startswith(prefix)]
             if candidates:
-                # pick the first stable candidate
+                # sorted first, so we pick the same one every time
                 resolved.append(sorted(candidates)[0])
             else:
-                # leave unresolved; we'll error below with a helpful message
+                # leave it unresolved; we'll error out below with a helpful message
                 resolved.append(k)
         return resolved
 
-    # Build (base) group keys from the plan
+    # build the (base) group keys from the plan
     group_keys = list(plan.group_by)
     if plan.per_file:
         if "source" not in df.columns:
             raise ValueError("source column is missing; cannot group per_file.")
         group_keys = ["source"] + group_keys
 
-    # Resolve collisions against actual columns
+    # resolve any collisions against the columns we actually have
     group_keys = _resolve_keys(group_keys, df.columns)
 
-    # Now filter but ALWAYS keep group keys
+    # now we filter, but we ALWAYS keep the group keys
     df_f = _filter_columns(
         df,
         exclude_cols=tuple(plan.exclude_cols) + ("source_path",),
@@ -770,30 +792,31 @@ def aggregate_features(
     if missing:
         raise ValueError(f"Missing group-by columns in data: {missing}")
 
-    # Candidate numeric features
+    # everything that isn't a key is a candidate feature; keep the numeric ones
     feature_cols = [c for c in df_f.columns if c not in set(group_keys)]
     numeric_df = _numeric_subframe(df_f[feature_cols])
     if numeric_df.empty:
         raise ValueError("No numeric columns available for aggregation after filtering.")
 
-    # Reattach group keys for grouping
+    # stick the group keys back on so we can group by them
     gdf = pd.concat([df_f[group_keys].reset_index(drop=True),
                      numeric_df.reset_index(drop=True)], axis=1)
 
     agg_ops = {c: list(plan.stats) for c in numeric_df.columns}
     grouped = gdf.groupby(group_keys, dropna=plan.dropna).agg(agg_ops)
 
-    # Flatten MultiIndex columns and order 'source' first
+    # flatten the MultiIndex columns down to '<col>__<stat>'
     grouped.columns = [f"{c}__{stat}" for (c, stat) in grouped.columns]
     grouped = grouped.reset_index()
 
-    # Ensure 'source' (and 'source_path' if present) lead the output
+    # make sure 'source' (and 'source_path' if present) lead the output
     cols = list(grouped.columns)
     lead = [c for c in ("source", "source_path") if c in cols]
     rest = [c for c in cols if c not in lead]
     grouped = grouped[lead + rest]
 
-    grouped.to_csv(out_csv, index=False, encoding=encoding)
+    with atomic_write(out_csv, mode="w", newline="", encoding=encoding) as fh:
+        grouped.to_csv(fh, index=False)
     return out_csv
 
 
@@ -801,157 +824,25 @@ def aggregate_features(
 # Minimal CLI
 # ---------------------------
 
-def _build_parser():
-    """
-    Create an ``argparse.ArgumentParser`` for the CLI.
 
-    The parser defines three subcommands:
+# ---------------------------------------------------------------------------
+# Command line -- derived from the functions above; see helpers.cliargs.CliSpec.
+# ---------------------------------------------------------------------------
 
-    - ``gather``: Concatenate CSVs with origin metadata.
-    - ``aggregate``: Aggregate numeric columns by group keys.
-    - ``run``: Single entry point; toggles aggregation via ``--aggregate``.
-
-    Returns
-    -------
-    argparse.ArgumentParser
-        Configured parser with subcommands and options.
-    """
-
-    import argparse
-    p = argparse.ArgumentParser(
-        description="Gather and optionally aggregate feature CSVs across a single folder."
-    )
-    sub = p.add_subparsers(dest="cmd", required=True)
-
-    # existing: gather
-    g = sub.add_parser("gather", help="Concatenate CSVs with source metadata.")
-    g.add_argument("--root_dir", required=True, help="Root folder (or a single CSV file)")
-    g.add_argument("--pattern", default="*.csv")
-    g.add_argument("--no-recursive", action="store_true")
-    g.add_argument("--delimiter", default=",")
-    g.add_argument("--encoding", default="utf-8-sig")
-    g.add_argument("--add-source-path", action="store_true")
-    g.add_argument("--out-csv", default=None)
-    g.add_argument("--overwrite-existing", "--overwrite_existing", dest="overwrite_existing",
-                   action="store_true", default=False)
-
-    # existing: aggregate
-    a = sub.add_parser("aggregate", help="Aggregate numeric columns by keys.")
-    a.add_argument("--root_dir", required=True)
-    a.add_argument("--pattern", default="*.csv")
-    a.add_argument("--no-recursive", action="store_true")
-    a.add_argument("--delimiter", default=",")
-    a.add_argument("--encoding", default="utf-8-sig")
-    a.add_argument("--add-source-path", action="store_true")
-    a.add_argument("--group-by", nargs="+", required=True, help="e.g., speaker")
-    a.add_argument("--per-file", action="store_true", help="Group per file via source_stem")
-    a.add_argument("--stats", nargs="+", default=["mean", "std"])
-    a.add_argument("--exclude-cols", nargs="*", default=[], help="Columns to drop before aggregation")
-    a.add_argument("--include-regex", default=None)
-    a.add_argument("--exclude-regex", default=None)
-    a.add_argument("--out-csv", default=None)
-    a.add_argument("--overwrite-existing", "--overwrite_existing", dest="overwrite_existing",
-                   action="store_true", default=False)
-
-    # new: run (single entry; toggle aggregation with a flag)
-    r = sub.add_parser("run", help="Single entry: concat or aggregate depending on --aggregate.")
-    r.add_argument("--root_dir", required=True)
-    r.add_argument("--pattern", default="*.csv")
-    r.add_argument("--no-recursive", action="store_true")
-    r.add_argument("--delimiter", default=",")
-    r.add_argument("--encoding", default="utf-8-sig")
-    r.add_argument("--add-source-path", action="store_true")
-    r.add_argument("--aggregate", action="store_true", help="Enable aggregation mode")
-    r.add_argument("--group-by", nargs="+", help="Keys for aggregation (required if --aggregate)")
-    r.add_argument("--per-file", action="store_true", help="Group per file via source_stem")
-    r.add_argument("--stats", nargs="+", default=["mean", "std"])
-    r.add_argument("--exclude-cols", nargs="*", default=[], help="Columns to drop before aggregation")
-    r.add_argument("--include-regex", default=None)
-    r.add_argument("--exclude-regex", default=None)
-    r.add_argument("--out-csv", default=None)
-    r.add_argument("--overwrite-existing", "--overwrite_existing", dest="overwrite_existing",
-                   action="store_true", default=False)
-
-    return p
+CLI = CliSpec(
+    {"gather": gather_csvs_to_one, "aggregate": aggregate_features,
+     "run": feature_gather},
+    description="Concatenate or aggregate the feature tables under a folder.",
+    legacy={"--no-recursive": ["--recursive", "false"]},
+    # we build the plan from the other arguments (`group_by`, `stats`, ...);
+    # there's no sensible way to type one out on a command line.
+    skip=("plan",),
+)
 
 
-def main():
-    """
-    Entry point for the command-line interface.
-
-    Parses arguments, dispatches to :func:`gather_csvs_to_one`,
-    :func:`aggregate_features`, or :func:`feature_gather` depending on the
-    selected subcommand, and prints the resulting output path.
-
-    Notes
-    -----
-    This function is invoked when the module is executed as a script::
-
-        python -m taters.helpers.feature_gather <subcommand> [options]
-    """
-
-    parser = _build_parser()
-    args = parser.parse_args()
-
-    if args.cmd == "gather":
-        out = gather_csvs_to_one(
-            root_dir=args.root_dir,
-            pattern=args.pattern,
-            recursive=not args.no_recursive,
-            delimiter=args.delimiter,
-            encoding=args.encoding,
-            add_source_path=args.add_source_path,
-            out_csv=args.out_csv,
-            overwrite_existing=args.overwrite_existing,
-        )
-        print(str(out))
-        return
-
-    if args.cmd == "aggregate":
-        plan = AggregationPlan(
-            group_by=args.group_by,
-            per_file=args.per_file,
-            stats=tuple(args.stats),
-            exclude_cols=tuple(args.exclude_cols or []),
-            include_regex=args.include_regex,
-            exclude_regex=args.exclude_regex,
-        )
-        out = aggregate_features(
-            root_dir=args.root_dir,
-            pattern=args.pattern,
-            recursive=not args.no_recursive,
-            delimiter=args.delimiter,
-            encoding=args.encoding,
-            add_source_path=args.add_source_path,
-            plan=plan,
-            out_csv=args.out_csv,
-            overwrite_existing=args.overwrite_existing,
-        )
-        print(str(out))
-        return
-
-    if args.cmd == "run":
-        out = feature_gather(
-            root_dir=args.root_dir,
-            pattern=args.pattern,
-            recursive=not args.no_recursive,
-            delimiter=args.delimiter,
-            encoding=args.encoding,
-            add_source_path=args.add_source_path,
-            aggregate=args.aggregate,
-            group_by=args.group_by,          # may be None if aggregate=False
-            per_file=args.per_file,
-            stats=tuple(args.stats),
-            exclude_cols=tuple(args.exclude_cols or []),
-            include_regex=args.include_regex,
-            exclude_regex=args.exclude_regex,
-            out_csv=args.out_csv,
-            overwrite_existing=args.overwrite_existing,
-        )
-        print(str(out))
-        return
-
+def main(argv=None) -> int:
+    return CLI.run(argv)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -18,11 +18,14 @@ Two modes are supported:
 """
 
 from __future__ import annotations
-import os, sys, shlex
+import os
+import shlex
+import sys
 from pathlib import Path
 from typing import Optional, Literal, Union
 
 from ..helpers.proc import run_and_stream
+from ..helpers.cliargs import CliSpec
 
 def extract_whisper_embeddings(
     *,
@@ -88,15 +91,14 @@ def extract_whisper_embeddings(
     output_dir : str | Path | None, optional
         Directory for the output CSV. If None, defaults to
         ``./features/whisper-embeddings``.
-    model_name : str, default "base"
-        Model identifier passed through to the worker (e.g., "tiny", "base",
-        "small", "large-v3" or a local CTranslate2 model directory).
+    model_name : {"tiny", "tiny.en", "base", "base.en", "small", "small.en", "medium", "medium.en", "large-v2", "large-v3", "large-v3-turbo", "distill-large-v3"} or str, default "base"
+        Model identifier passed through to the worker: a faster-whisper model
+        name, or the path of a local CTranslate2 model directory.
     device : {"auto","cuda","cpu"}, default "auto"
         Runtime device. If "cpu", environment variables are set to disable CUDA
         in the child process.
-    compute_type : str, default "float16"
-        CTranslate2 compute type (e.g., "float16", "int8", "float32"); passed to
-        the worker module.
+    compute_type : {"int8", "int8_float16", "int8_bfloat16", "int16", "float16", "bfloat16", "float32"}, default "float16"
+        CTranslate2 compute type, passed to the worker module.
     run_in_subprocess : bool, default True
         If True (recommended), runs extraction in a separate Python process to
         isolate Torch/CUDA state from the parent process.
@@ -107,6 +109,9 @@ def extract_whisper_embeddings(
     extractor_module : str, default "chopshop.audio.extract_whisper_embeddings_subproc"
         Dotted module path whose ``__main__`` implements the extractor CLI.
 
+    overwrite_existing : bool, default=False
+        If ``False`` and the output already exists, skip the work and return
+        the existing path.
     Returns
     -------
     Path
@@ -144,7 +149,7 @@ def extract_whisper_embeddings(
     """
     
     source_wav = Path(source_wav).resolve()
-    # default to ./features/whisper-embeddings when not provided
+    # no output dir given? we default to ./features/whisper-embeddings
     out_dir_final = (
         Path(output_dir).resolve()
         if output_dir
@@ -159,7 +164,7 @@ def extract_whisper_embeddings(
         return output_csv
 
     if not run_in_subprocess:
-        # ---- In-process path (only when you’re sure no Torch/CUDA conflicts) ----
+        # ---- in-process path (only if you're sure there are no Torch/CUDA clashes) --
         from .extract_whisper_embeddings_subproc import (  # type: ignore
             export_segment_embeddings_csv,
             export_audio_embeddings_csv,
@@ -191,9 +196,9 @@ def extract_whisper_embeddings(
                 )
             )
 
-    # ---- Subprocess path (recommended) ----
+    # ---- subprocess path (the one we recommend) ----
     env = os.environ.copy()
-    # Keep Transformers from importing heavy backends in the child
+    # keep Transformers from dragging in the heavy backends in the child
     env.setdefault("TRANSFORMERS_NO_TORCH", "1")
     env.setdefault("TRANSFORMERS_NO_TF", "1")
     env.setdefault("TRANSFORMERS_NO_FLAX", "1")
@@ -202,12 +207,14 @@ def extract_whisper_embeddings(
         env.update({k: str(v) for k, v in extra_env.items()})
 
     if device == "cpu":
-        # Make sure the child won’t try CUDA
+        # make sure the child doesn't go trying CUDA on us
         env.update({"CUDA_VISIBLE_DEVICES": "", "USE_CUDA": "0", "FORCE_CPU": "1"})
     else:
-        # Best-effort: prepend cuDNN wheel's lib dir if available
+        # best effort: if the cuDNN wheel is installed, put its lib dir up front
         try:
-            import nvidia.cudnn, pathlib  # type: ignore
+            import pathlib
+
+            import nvidia.cudnn  # type: ignore
             cudnn_lib = str(pathlib.Path(nvidia.cudnn.__file__).with_name("lib"))
             env["LD_LIBRARY_PATH"] = cudnn_lib + ":" + env.get("LD_LIBRARY_PATH", "")
         except Exception:
@@ -239,7 +246,8 @@ def extract_whisper_embeddings(
         print("Launching embedding subprocess:")
         print(" ", shlex.join(cmd))
 
-    # Stream as it runs so long extractions are not silent; keep the tail for errors.
+    # stream output as it runs so long extractions aren't silent; we hang onto
+    # the tail for the error message if it fails.
     returncode, tail = run_and_stream(
         cmd,
         env=env,
@@ -263,78 +271,29 @@ def extract_whisper_embeddings(
 
 
 # --- CLI support: run this module directly -----------------------------------
-def _build_arg_parser():
-    import argparse
-    from ..helpers.cliargs import add_bool_argument
-    p = argparse.ArgumentParser(
-        description="Taters: export Whisper encoder embeddings (env-safe wrapper)."
-    )
-    # required
-    p.add_argument("--source_wav", required=True, help="Path to input WAV")
 
-    # optional transcript-driven mode
-    p.add_argument("--transcript_csv", default=None, help="Transcript CSV for segment-level embeddings")
-    p.add_argument("--time_unit", default="auto", choices=("auto", "ms", "s", "samples"))
 
-    # general-audio mode
-    p.add_argument("--strategy", default="windows", choices=("windows", "nonsilent"))
-    p.add_argument("--window_s", type=float, default=30.0)
-    p.add_argument("--hop_s", type=float, default=15.0)
-    p.add_argument("--min_seg_s", type=float, default=1.0)
-    p.add_argument("--top_db", type=float, default=30.0)
-    p.add_argument("--aggregate", default="none", choices=("none", "mean"))
+# ---------------------------------------------------------------------------
+# Command line -- derived from the function(s) above; see helpers.cliargs.CliSpec.
+# The aliases and legacy flags are the spellings the hand-written parser used,
+# kept so every documented invocation still works.
+# ---------------------------------------------------------------------------
 
-    # outputs
-    p.add_argument("--output_dir", default=None, 
-                   help="Output directory for the CSV (default: ./features/whisper-embeddings)",
-    )
-    add_bool_argument(p, "--overwrite_existing", default=False,
-                      help="Do you want to overwrite the output file if it already exists?")
+CLI = CliSpec(
+    extract_whisper_embeddings,
+    description='Whisper encoder embeddings for a recording, windowed or per utterance.',
+    aliases={},
+    legacy={
+        '--no-subprocess': ['--run-in-subprocess', 'false'],
+        '--quiet': ['--verbose', 'false'],
+    },
+    skip=("extra_env",),
+)
 
-    # model/runtime
-    p.add_argument("--model_name", default="base")
-    p.add_argument("--device", default="auto", choices=("auto", "cuda", "cpu"))
-    p.add_argument("--compute_type", default="float16")
 
-    # execution strategy
-    p.add_argument("--run_in_subprocess", action="store_true", default=True,
-                   help="(default) Run extractor in a subprocess")
-    p.add_argument("--no-subprocess", dest="run_in_subprocess", action="store_false",
-                   help="Run in-process (only if you're sure no CUDA/Torch conflicts)")
-    p.add_argument("--verbose", action="store_true", default=True)
-    p.add_argument("--quiet", dest="verbose", action="store_false")
+def main(argv=None) -> int:
+    return CLI.run(argv)
 
-    # advanced
-    p.add_argument("--extractor_module", default="taters.audio.extract_whisper_embeddings_subproc",
-                   help="Python module to run for the actual extraction")
-    return p
-
-def main():
-    parser = _build_arg_parser()
-    args = parser.parse_args()
-
-    # Call the same function this module exposes as a class method.
-    # We don't use 'self' internally, so pass None.
-    out = extract_whisper_embeddings(
-        source_wav=args.source_wav,
-        transcript_csv=args.transcript_csv,
-        time_unit=args.time_unit,
-        strategy=args.strategy,
-        window_s=args.window_s,
-        hop_s=args.hop_s,
-        min_seg_s=args.min_seg_s,
-        top_db=args.top_db,
-        aggregate=args.aggregate,
-        output_dir=args.output_dir,
-        overwrite_existing=args.overwrite_existing,
-        model_name=args.model_name,
-        device=args.device,
-        compute_type=args.compute_type,
-        run_in_subprocess=args.run_in_subprocess,
-        verbose=args.verbose,
-        extractor_module=args.extractor_module,
-    )
-    print(str(out))
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

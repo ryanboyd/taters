@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, Union, Sequence, Literal, Dict, Any, Iterable, List, Tuple
+from typing import Callable, Optional, Union, Sequence, Literal, Dict, Any, Iterable, List, Tuple
 import csv
 import re
 import string
@@ -12,10 +12,11 @@ from itertools import islice
 from math import log, sqrt, comb
 from statistics import mean
 
-from ..helpers.text_gather import (
-    csv_to_analysis_ready_csv,
-    txt_folder_to_analysis_ready_csv,
-)
+from ..helpers.atomic import atomic_write
+from ..helpers.doc_text import DOCUMENT_PATTERN
+from ..helpers.provenance import TEXT_GRAIN, TEXT_INPUT, records_settings
+from ..helpers.text_gather import (resolve_analysis_ready)
+from ..helpers.cliargs import CliSpec
 
 # ------------------------------------------------------------------------------
 # Lightweight tokenization (lower, strip digits, strip punctuation)
@@ -185,10 +186,11 @@ def mtld(tokens: List[str], threshold: float = 0.72) -> Optional[float]:
                 wc = 0
                 terms.clear()
         if wc > 0:
-            # partial factor
+            # the leftover bit counts as a partial factor
             factors += (1 - ttr_last) / (1 - thr)
         if factors == 0:
-            # never dipped below threshold: approximate partial factor
+            # we never dipped below the threshold, so we approximate a partial
+            # factor instead
             ttr_overall = len(set(seq)) / len(seq)
             if ttr_overall == 1:
                 factors += 1
@@ -249,9 +251,9 @@ def vocd(tokens: List[str], ntokens: int = 50, within_sample: int = 100,
     rng = random.Random(seed)
     Ds: List[float] = []
 
-    # Preselect D search grid (log-like spread 5..200)
+    # set up our search grid for D (5..200)
     grid: List[float] = []
-    # denser where typical D lives (10..120)
+    # this covers where typical D values live (10..120) with room to spare
     for d in range(5, 201):
         grid.append(float(d))
 
@@ -266,7 +268,7 @@ def vocd(tokens: List[str], ntokens: int = 50, within_sample: int = 100,
             x_vals.append(N)
             y_means.append(mean(ttrs))
 
-        # find D that minimizes squared error
+        # now we find the D that minimizes the squared error
         best_D = None
         best_err = float("inf")
         for D in grid:
@@ -287,16 +289,58 @@ def vocd(tokens: List[str], ntokens: int = 50, within_sample: int = 100,
 # Main API
 # ------------------------------------------------------------------------------
 
+def _richness_of(text: str, params: Dict[str, Any]) -> list:
+    """
+    Every metric's value for one text, in the output's column order (the
+    eleven fixed measures, then the five parameterized ones). One scorer for
+    the inline path and the worker processes, so they cannot drift.
+    """
+    txt = (text or "").strip()
+    toks = _tokenize(txt) if txt else []
+    return [
+        ttr(toks), rttr(toks), cttr(toks), herdan_c(toks), summer_s(toks),
+        dugast(toks), maas(toks), yule_k(toks), yule_i(toks),
+        herdan_vm(toks), simpson_d(toks),
+        msttr(toks, segment_window=params["msttr_window"]),
+        mattr(toks, window_size=params["mattr_window"]),
+        mtld(toks, threshold=params["mtld_threshold"]),
+        hdd(toks, draws=params["hdd_draws"]),
+        vocd(toks, ntokens=params["vocd_ntokens"],
+             within_sample=params["vocd_within_sample"],
+             iterations=params["vocd_iterations"],
+             seed=params["vocd_seed"]),
+    ]
+
+
+#: Per-process state for scoring workers: the parameter dict arrives once
+#: via the initializer, not pickled per text.
+_RICHNESS_WORKER: Dict[str, Any] = {}
+
+
+def _init_richness_worker(params: Dict[str, Any]) -> None:
+    _RICHNESS_WORKER["params"] = dict(params)
+
+
+def _richness_in_worker(pair):
+    _tid, text = pair
+    return _richness_of(text, _RICHNESS_WORKER["params"])
+
+
+@records_settings(binding=TEXT_INPUT, grain=TEXT_GRAIN,
+                  outputs=("out_features_csv",))
 def analyze_lexical_richness(
     *,
     # ----- Input source (exactly one unless analysis_csv is provided) ----------
     csv_path: Optional[Union[str, Path]] = None,
     txt_dir: Optional[Union[str, Path]] = None,
-    analysis_csv: Optional[Union[str, Path]] = None,  # if provided, gathering is skipped
+    analysis_csv: Optional[Union[str, Path]] = None,  # if given, we skip gathering
+    gathered_csv: Optional[Union[str, Path]] = None,
+    on_progress: Optional[Callable[[int, int], None]] = None,
 
     # ----- Output --------------------------------------------------------------
     out_features_csv: Optional[Union[str, Path]] = None,
     overwrite_existing: bool = False,
+    workers: int = 0,
 
     # ====== SHARED I/O OPTIONS ======
     encoding: str = "utf-8-sig",
@@ -314,7 +358,7 @@ def analyze_lexical_richness(
 
     # ====== TXT FOLDER GATHER OPTIONS ======
     recursive: bool = True,
-    pattern: str = "*.txt",
+    pattern: str = DOCUMENT_PATTERN,
     id_from: Literal["stem", "name", "path"] = "stem",
     include_source_path: bool = True,
 
@@ -359,6 +403,27 @@ def analyze_lexical_richness(
     analysis_csv : str or Path, optional
         Existing analysis-ready CSV with columns `text_id,text`. When provided, all
         gathering options are ignored and the file is used as-is.
+    gathered_csv : str or pathlib.Path, optional
+        Where to write the intermediate "analysis-ready" table built from
+        ``csv_path`` or ``txt_dir``.
+
+        By default it lands beside the *source* -- which means analyzing a
+        spreadsheet in someone's Downloads folder writes a file into their
+        Downloads folder. Pass this to keep the intermediate with the rest of a
+        run's output instead. Ignored when ``analysis_csv`` is given, because
+        then no gathering happens.
+    on_progress : callable, optional
+        Called as ``on_progress(done, total, message=None)`` so a UI can show a
+        real bar instead of a spinner.
+
+        ``total`` is the row count of the analysis-ready table, which is fully
+        written before measuring starts, so it is known up front. Until it is,
+        ``total`` is ``None`` and ``done`` is a running tally -- the long silent
+        passes (reading the input, counting its rows) report through the same
+        callback with a ``message`` saying which one is running.
+
+        Injected automatically by the pipeline runner for any step function that
+        declares this parameter.
     out_features_csv : str or Path, optional
         Output CSV path. If omitted, defaults to
         `./features/lexical-richness/<analysis_ready_filename>`.
@@ -383,7 +448,8 @@ def analyze_lexical_richness(
         `["source","speaker"]`). With `mode="concat"`, all texts in a group are joined
         into one blob per group; with `mode="separate"`, they remain separate rows.
     delimiter : str, default ","
-        CSV delimiter used for input and output.
+        Column separator of the *input* spreadsheet. The gathered table and
+        the output are always comma-separated.
     joiner : str, default " "
         String used to join text fields when `mode="concat"`.
     num_buckets : int, default 512
@@ -421,6 +487,13 @@ def analyze_lexical_richness(
         Repeat-estimate count for VOCD. The best-fit D from each repetition is averaged.
     vocd_seed : int, default 42
         Seed for the VOCD random sampler (controls reproducibility across runs).
+
+    pass_through_cols : Sequence[str] or None, optional
+        Extra input columns to copy into the output beside ``text_id``.
+    workers : int, default=0
+        Parallel processes for reading documents. ``0`` means automatic:
+        three-quarters of the logical cores; ``1`` turns parallelism off. Output files are
+        identical whatever the worker count.
 
     Returns
     -------
@@ -515,46 +588,17 @@ def analyze_lexical_richness(
     --------
     analyze_readability : Parallel analyzer producing readability indices.
     """
-    # 1) Accept or produce analysis-ready CSV
-    if analysis_csv is not None:
-        analysis_ready = Path(analysis_csv)
-        if not analysis_ready.exists():
-            raise FileNotFoundError(f"analysis_csv not found: {analysis_ready}")
-    else:
-        if (csv_path is None) == (txt_dir is None):
-            raise ValueError("Provide exactly one of csv_path or txt_dir (or pass analysis_csv).")
+    analysis_ready = resolve_analysis_ready(
+        csv_path=csv_path, txt_dir=txt_dir, analysis_csv=analysis_csv,
+        gathered_csv=gathered_csv, text_cols=text_cols, id_cols=id_cols,
+        mode=mode, group_by=group_by, delimiter=delimiter, encoding=encoding,
+        joiner=joiner, num_buckets=num_buckets,
+        max_open_bucket_files=max_open_bucket_files, tmp_root=tmp_root,
+        recursive=recursive, pattern=pattern, id_from=id_from,
+        include_source_path=include_source_path,
+        overwrite_existing=overwrite_existing, on_progress=on_progress,
+        workers=workers)
 
-        if csv_path is not None:
-            analysis_ready = Path(
-                csv_to_analysis_ready_csv(
-                    csv_path=csv_path,
-                    text_cols=list(text_cols),
-                    id_cols=list(id_cols) if id_cols else None,
-                    mode=mode,
-                    group_by=list(group_by) if group_by else None,
-                    delimiter=delimiter,
-                    encoding=encoding,
-                    joiner=joiner,
-                    num_buckets=num_buckets,
-                    max_open_bucket_files=max_open_bucket_files,
-                    tmp_root=tmp_root,
-                    overwrite_existing=overwrite_existing,
-                )
-            )
-        else:
-            analysis_ready = Path(
-                txt_folder_to_analysis_ready_csv(
-                    root_dir=txt_dir,
-                    recursive=recursive,
-                    pattern=pattern,
-                    encoding=encoding,
-                    id_from=id_from,
-                    include_source_path=include_source_path,
-                    overwrite_existing=overwrite_existing,
-                )
-            )
-
-    # 2) Decide default features path
     if out_features_csv is None:
         out_features_csv = Path.cwd() / "features" / "lexical-richness" / analysis_ready.name
     out_features_csv = Path(out_features_csv)
@@ -564,7 +608,7 @@ def analyze_lexical_richness(
         print(f"Lexical richness output file already exists; returning existing file: {out_features_csv}")
         return out_features_csv
 
-    # 3) Define metric names
+    # 3) name our metrics
     metrics_fixed = [
         "ttr", "rttr", "cttr", "herdan_c", "summer_s", "dugast", "maas",
         "yule_k", "yule_i", "herdan_vm", "simpson_d",
@@ -576,200 +620,83 @@ def analyze_lexical_richness(
     m_vocd  = f"vocd_{vocd_ntokens}"
     metric_names = metrics_fixed + [m_msttr, m_mattr, m_mtld, m_hdd, m_vocd]
 
-    # Small helper to deduplicate while preserving order
-    def _uniq(seq: Iterable[str]) -> List[str]:
-        seen: set[str] = set()
-        out: List[str] = []
-        for s in seq:
-            if s not in seen:
-                seen.add(s)
-                out.append(s)
-        return out
+    # 4) figure out the output's shape from the input's header alone
+    with analysis_ready.open("r", newline="", encoding=encoding) as fin:
+        header_fields = csv.DictReader(fin).fieldnames or []
 
-    # 4) Stream, compute, and write
-    with analysis_ready.open("r", newline="", encoding=encoding) as fin, \
-         out_features_csv.open("w", newline="", encoding=encoding) as fout:
-        reader = csv.DictReader(fin, delimiter=delimiter)
+    if "text_id" not in header_fields or "text" not in header_fields:
+        raise ValueError(
+            f"Expected columns 'text_id' and 'text' in {analysis_ready}; found {header_fields}"
+        )
 
-        if "text_id" not in reader.fieldnames or "text" not in reader.fieldnames:
-            raise ValueError(
-                f"Expected columns 'text_id' and 'text' in {analysis_ready}; found {reader.fieldnames}"
-            )
+    # there's one shared rule for what rides along beside text_id -- see
+    # resolve_passthrough_columns
+    from ..helpers.row_map import resolve_passthrough_columns
 
-        # Decide which columns to pass through (after text_id)
-        requested_pt = list(pass_through_cols or [])
-        # If none explicitly requested, fall back to id_cols; finally to all non-text fields
-        if not requested_pt and id_cols:
-            requested_pt = list(id_cols)
+    passthrough_cols = resolve_passthrough_columns(
+        header_fields, pass_through_cols=pass_through_cols, id_cols=id_cols,
+        group_by=group_by, analysis_ready=analysis_ready)
+    fieldnames = ["text_id", *passthrough_cols, *metric_names]
 
-        if not requested_pt:
-            # backward-compatible: pass through ALL non-text columns (including text_id is handled below)
-            auto = [c for c in (reader.fieldnames or []) if c != "text" and c != "text_id"]
-            requested_pt = auto
+    # 5) scoring is CPU-bound per row and the rows don't depend on each other,
+    #    so we run it on the shared pooled-row driver. that gives us results
+    #    in file order no matter the worker count, plus one live sub-bar per
+    #    document in flight
+    from ..helpers.parallel_map import pool_workers
+    from ..helpers.row_map import map_text_rows
 
-        # Validate that all requested pass-through columns exist
-        fields = set(reader.fieldnames or [])
-        missing = [c for c in requested_pt if c not in fields]
-        if missing:
-            raise ValueError(
-                f"Requested pass-through columns not present in analysis-ready CSV {analysis_ready}: {missing}"
-            )
-
-        passthrough_cols = _uniq(requested_pt)
-        fieldnames = ["text_id", *passthrough_cols, *metric_names]
-        writer = csv.DictWriter(fout, fieldnames=fieldnames, delimiter=delimiter)
+    params = dict(msttr_window=msttr_window, mattr_window=mattr_window,
+                  mtld_threshold=mtld_threshold, hdd_draws=hdd_draws,
+                  vocd_ntokens=vocd_ntokens,
+                  vocd_within_sample=vocd_within_sample,
+                  vocd_iterations=vocd_iterations, vocd_seed=vocd_seed)
+    with atomic_write(out_features_csv, newline="", encoding=encoding) as fout:
+        writer = csv.DictWriter(fout, fieldnames=fieldnames)
         writer.writeheader()
-
-        for row in reader:
-            txt = (row.get("text") or "").strip()
-            toks = _tokenize(txt) if txt else []
-
+        for row, values in map_text_rows(
+                analysis_ready, encoding=encoding,
+                workers=lambda n_rows: pool_workers(workers, n_rows),
+                message="measuring lexical richness", on_progress=on_progress,
+                inline_fn=lambda pair: _richness_of(pair[1], params),
+                pool_fn=_richness_in_worker,
+                initializer=_init_richness_worker, initargs=(params,)):
             out_row: Dict[str, Any] = {
                 "text_id": row.get("text_id"),
                 **{k: row.get(k) for k in passthrough_cols},
+                **dict(zip(metric_names, values)),
             }
-
-            # fixed metrics
-            out_row["ttr"]        = ttr(toks)
-            out_row["rttr"]       = rttr(toks)
-            out_row["cttr"]       = cttr(toks)
-            out_row["herdan_c"]   = herdan_c(toks)
-            out_row["summer_s"]   = summer_s(toks)
-            out_row["dugast"]     = dugast(toks)
-            out_row["maas"]       = maas(toks)
-            out_row["yule_k"]     = yule_k(toks)
-            out_row["yule_i"]     = yule_i(toks)
-            out_row["herdan_vm"]  = herdan_vm(toks)
-            out_row["simpson_d"]  = simpson_d(toks)
-
-            # parameterized metrics
-            out_row[m_msttr] = msttr(toks, segment_window=msttr_window)
-            out_row[m_mattr] = mattr(toks, window_size=mattr_window)
-            out_row[m_mtld]  = mtld(toks, threshold=mtld_threshold)
-            out_row[m_hdd]   = hdd(toks, draws=hdd_draws)
-            out_row[m_vocd]  = vocd(
-                toks,
-                ntokens=vocd_ntokens,
-                within_sample=vocd_within_sample,
-                iterations=vocd_iterations,
-                seed=vocd_seed,
-            )
-
             writer.writerow(out_row)
-
     return out_features_csv
 
 # ------------------------------------------------------------------------------
 # CLI
 # ------------------------------------------------------------------------------
 
-def _build_arg_parser():
-    import argparse
-    p = argparse.ArgumentParser(
-        description="Compute lexical richness/diversity metrics for an analysis-ready CSV."
-    )
 
-    # Input source (choose one)
-    src = p.add_mutually_exclusive_group(required=True)
-    src.add_argument("--csv", dest="csv_path", help="Source CSV to gather from")
-    src.add_argument("--txt-dir", dest="txt_dir", help="Folder of .txt files to gather from")
-    src.add_argument("--analysis-csv", dest="analysis_csv",
-                     help="Use an existing analysis-ready CSV (skip gathering)")
+# ---------------------------------------------------------------------------
+# command line -- we derive this from the function(s) above; see
+# helpers.cliargs.CliSpec. the aliases and legacy flags are the spellings that
+# the old hand-written parser used; we keep them so that every documented
+# invocation still works
+# ---------------------------------------------------------------------------
 
-    # Output
-    p.add_argument("--out", dest="out_features_csv", default=None,
-                   help="Output CSV (default: ./features/lexical-richness/<gathered_name>)")
-    p.add_argument("--overwrite_existing", type=lambda s: str(s).lower() == "true", default=False,
-                   help="Overwrite output if it exists (true/false). Default: false")
+CLI = CliSpec(
+    analyze_lexical_richness,
+    description='Compute lexical richness/diversity metrics for an analysis-ready CSV.',
+    aliases={
+        'csv_path': ['--csv'],
+        'out_features_csv': ['--out'],
+    },
+    legacy={
+        '--no-include-source-path': ['--include-source-path', 'false'],
+        '--no-recursive': ['--recursive', 'false'],
+    },
+)
 
-    # I/O
-    p.add_argument("--encoding", default="utf-8-sig")
-    p.add_argument("--delimiter", default=",")
 
-    # CSV gather options
-    p.add_argument("--text-col", dest="text_cols", action="append",
-                   help="Text column (repeatable). Default: --text-col text")
-    p.add_argument("--id-col", dest="id_cols", action="append",
-                   help="ID column(s) to carry through (repeatable)")
-    p.add_argument("--mode", choices=["concat", "separate"], default="concat")
-    p.add_argument("--group-by", dest="group_by", action="append",
-                   help="Group by column(s) (repeatable)")
-    p.add_argument("--joiner", default=" ")
-    p.add_argument("--num-buckets", type=int, default=512)
-    p.add_argument("--max-open-bucket-files", type=int, default=64)
-    p.add_argument("--tmp-root", default=None)
+def main(argv=None) -> int:
+    return CLI.run(argv)
 
-    # TXT gather options
-    p.add_argument("--recursive", action="store_true", default=True)
-    p.add_argument("--no-recursive", dest="recursive", action="store_false")
-    p.add_argument("--pattern", default="*.txt")
-    p.add_argument("--id-from", choices=["stem", "name", "path"], default="stem")
-    p.add_argument("--include-source-path", action="store_true", default=True)
-    p.add_argument("--no-include-source-path", dest="include_source_path", action="store_false")
-
-    # Metric hyperparameters (optional)
-    p.add_argument("--msttr-window", type=int, default=100)
-    p.add_argument("--mattr-window", type=int, default=100)
-    p.add_argument("--mtld-threshold", type=float, default=0.72)
-    p.add_argument("--hdd-draws", type=int, default=42)
-    p.add_argument("--vocd-ntokens", type=int, default=50)
-    p.add_argument("--vocd-within-sample", type=int, default=100)
-    p.add_argument("--vocd-iterations", type=int, default=3)
-    p.add_argument("--vocd-seed", type=int, default=42)
-
-    return p
-
-def main():
-    """
-    CLI entry point.
-
-    Examples
-    --------
-    # Analysis-ready CSV
-    $ python -m taters.text.analyze_lexical_richness --analysis-csv transcripts_all.csv
-
-    # Gather from a CSV and group by source/speaker first (utterances -> per speaker)
-    $ python -m taters.text.analyze_lexical_richness \\
-        --csv transcripts/session.csv \\
-        --text-col text --id-col source --id-col speaker \\
-        --group-by source --group-by speaker --mode concat
-    """
-    args = _build_arg_parser().parse_args()
-
-    text_cols = args.text_cols if args.text_cols else ["text"]
-    id_cols = args.id_cols if args.id_cols else None
-    group_by = args.group_by if args.group_by else None
-
-    out = analyze_lexical_richness(
-        csv_path=args.csv_path,
-        txt_dir=args.txt_dir,
-        analysis_csv=args.analysis_csv,
-        out_features_csv=args.out_features_csv,
-        overwrite_existing=args.overwrite_existing,
-        encoding=args.encoding,
-        text_cols=text_cols,
-        id_cols=id_cols,
-        mode=args.mode,
-        group_by=group_by,
-        delimiter=args.delimiter,
-        joiner=args.joiner,
-        num_buckets=args.num_buckets,
-        max_open_bucket_files=args.max_open_bucket_files,
-        tmp_root=args.tmp_root,
-        recursive=args.recursive,
-        pattern=args.pattern,
-        id_from=args.id_from,
-        include_source_path=args.include_source_path,
-        msttr_window=args.msttr_window,
-        mattr_window=args.mattr_window,
-        mtld_threshold=args.mtld_threshold,
-        hdd_draws=args.hdd_draws,
-        vocd_ntokens=args.vocd_ntokens,
-        vocd_within_sample=args.vocd_within_sample,
-        vocd_iterations=args.vocd_iterations,
-        vocd_seed=args.vocd_seed,
-    )
-    print(str(out))
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

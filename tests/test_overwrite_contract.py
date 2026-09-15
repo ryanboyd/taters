@@ -23,8 +23,9 @@ import pytest
 
 from taters import Taters
 
-# Functions that write files, as (namespace, method). Kept explicit so adding a
-# feature extractor means consciously adding it here too.
+# the functions that write files, as (namespace, method). we keep this list
+# explicit on purpose: adding a feature extractor means adding it here too, and
+# thinking about it while you do
 WRITERS = [
     ("audio", "convert_to_wav"),
     ("audio", "extract_wavs_from_video"),
@@ -39,14 +40,21 @@ WRITERS = [
     ("text", "analyze_readability"),
     ("text", "analyze_lexical_richness"),
     ("text", "extract_sentence_embeddings"),
+    ("text", "train_word_vectors"),
+    ("text", "apply_word_vectors"),
+    ("text", "import_word_vectors"),
+    ("text", "extract_transformer_embeddings"),
+    ("text", "adapt_encoder"),
+    ("text", "finetune_text_predictor"),
+    ("text", "apply_text_predictor"),
     ("helpers", "txt_folder_to_analysis_ready_csv"),
     ("helpers", "csv_to_analysis_ready_csv"),
     ("helpers", "feature_gather"),
 ]
 
-# `extract_wavs_from_video` still accepts the old `overwrite` spelling, but only
-# as a deprecated alias — the real parameter is `overwrite_existing` like
-# everywhere else.
+# `extract_wavs_from_video` still takes the old `overwrite` spelling, but only
+# as a deprecated alias. the real parameter is `overwrite_existing`, same as
+# everywhere else
 DEPRECATED_ALIASES = {("audio", "extract_wavs_from_video"): "overwrite"}
 
 
@@ -70,7 +78,7 @@ def underlying(namespace: str, method: str):
 
 
 # ---------------------------------------------------------------------------
-# Structural
+# structural
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("namespace,method", WRITERS, ids=lambda v: str(v))
@@ -101,7 +109,7 @@ def test_deprecated_aliases_are_keyword_only_and_default_to_none(key, alias):
 
 
 # ---------------------------------------------------------------------------
-# Behavioral — the writers that need no optional dependencies
+# behavioral: the writers that don't need any optional dependencies
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
@@ -120,14 +128,27 @@ def rows_in(path) -> int:
 
 
 def test_gather_preserves_then_rebuilds(source_csv, tmp_path):
+    """A gathered table made this way is preserved; asked to, it is rebuilt.
+    A file with no record of how it was made is *not* preserved -- a gather
+    takes seconds, and a stale one from another pipeline in the same folder
+    sank a real run -- so the thing preserved here is a real gathered table
+    with its record, not a hand-written sentinel."""
     t = Taters()
     out = tmp_path / "gathered.csv"
-    out.write_text("sentinel\n", encoding="utf-8")
+    t.helpers.csv_to_analysis_ready_csv(
+        csv_path=source_csv, out_csv=out, text_cols=["text"])
+    stamp = out.read_bytes()
 
     t.helpers.csv_to_analysis_ready_csv(
         csv_path=source_csv, out_csv=out, text_cols=["text"]
     )
-    assert out.read_text(encoding="utf-8") == "sentinel\n"
+    assert out.read_bytes() == stamp
+
+    out.write_text("sentinel\n", encoding="utf-8")    # no record of it, so redone
+    t.helpers.csv_to_analysis_ready_csv(
+        csv_path=source_csv, out_csv=out, text_cols=["text"]
+    )
+    assert rows_in(out) == 2
 
     t.helpers.csv_to_analysis_ready_csv(
         csv_path=source_csv, out_csv=out, text_cols=["text"], overwrite_existing=True
@@ -184,10 +205,15 @@ def test_txt_folder_gather_preserves_then_rebuilds(tmp_path):
     (corpus / "a.txt").write_text("first document", encoding="utf-8")
 
     out = tmp_path / "gathered.csv"
-    out.write_text("sentinel\n", encoding="utf-8")
+    t.helpers.txt_folder_to_analysis_ready_csv(root_dir=corpus, out_csv=out)
+    stamp = out.read_bytes()
 
     t.helpers.txt_folder_to_analysis_ready_csv(root_dir=corpus, out_csv=out)
-    assert out.read_text(encoding="utf-8") == "sentinel\n"
+    assert out.read_bytes() == stamp                 # same call, so left alone
+
+    out.write_text("sentinel\n", encoding="utf-8")    # no record of it, so redone
+    t.helpers.txt_folder_to_analysis_ready_csv(root_dir=corpus, out_csv=out)
+    assert rows_in(out) == 1
 
     t.helpers.txt_folder_to_analysis_ready_csv(
         root_dir=corpus, out_csv=out, overwrite_existing=True

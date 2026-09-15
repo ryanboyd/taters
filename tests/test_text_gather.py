@@ -64,7 +64,7 @@ def test_concat_without_ids_emits_text_id_and_text(utterances_csv, tmp_path):
 
     rows = read_csv(out)
     assert len(rows) == 3
-    # Without id_cols, ids are synthetic and 1-based in file order.
+    # without id_cols, the ids are made up for us: 1-based, in file order
     assert [r["text_id"] for r in rows] == ["row_1", "row_2", "row_3"]
     assert rows[0]["text"] == "first thing alice said"
 
@@ -128,7 +128,7 @@ def test_group_by_concatenates_within_group_and_counts_pieces(utterances_csv, tm
     )
     assert header_of(out) == ["text_id", "speaker", "text", "group_count"]
 
-    # Bucket order is hash-based, so index by speaker rather than by position.
+    # bucket order is hash-based, so we index by speaker rather than by position
     by_speaker = {r["speaker"]: r for r in read_csv(out)}
     assert set(by_speaker) == {"alice", "bob"}
 
@@ -233,11 +233,32 @@ def test_invalid_mode_raises(utterances_csv, tmp_path, bad_mode):
         )
 
 
-def test_empty_text_cols_raises(utterances_csv, tmp_path):
-    with pytest.raises(ValueError, match="text_cols"):
+def test_no_text_cols_wrangles_without_a_text_column(utterances_csv, tmp_path):
+    """A spreadsheet without text (or whose text the user does not want) can
+    still be combined and summarized; the output simply has no text column."""
+    out = csv_to_analysis_ready_csv(
+        csv_path=utterances_csv, out_csv=tmp_path / "out.csv", text_cols=[],
+        group_by=["speaker"], verbose=False)
+    rows = {r["text_id"]: r for r in read_csv(out)}
+    assert "text" not in header_of(out)
+    assert rows["alice"]["group_count"] == "2"
+    assert rows["bob"]["group_count"] == "1"
+
+
+def test_no_text_cols_without_grouping_copies_every_row(utterances_csv, tmp_path):
+    out = csv_to_analysis_ready_csv(
+        csv_path=utterances_csv, out_csv=tmp_path / "out.csv", text_cols=None,
+        id_cols=["speaker"], verbose=False)
+    rows = read_csv(out)
+    assert "text" not in header_of(out)
+    assert len(rows) == 3 and rows[0]["speaker"] == "alice"
+
+
+def test_no_text_cols_with_separate_mode_is_refused(utterances_csv, tmp_path):
+    with pytest.raises(ValueError, match="separate"):
         csv_to_analysis_ready_csv(
-            csv_path=utterances_csv, out_csv=tmp_path / "out.csv", text_cols=[]
-        )
+            csv_path=utterances_csv, out_csv=tmp_path / "out.csv",
+            text_cols=[], mode="separate", verbose=False)
 
 
 # ---------------------------------------------------------------------------
@@ -259,15 +280,22 @@ def test_default_output_path_notes_the_grouping(utterances_csv):
 
 
 def test_existing_output_is_left_alone_by_default(utterances_csv, tmp_path):
+    """The resume contract, for a gathered table: an existing output that
+    was made *this way* is handed back untouched. A file with no record of
+    how it was made is not trusted -- a gather takes seconds, and a stale
+    one from another pipeline in the same folder sank a real run -- so the
+    sentinel here is a real gathered table with its record beside it."""
     out_path = tmp_path / "out.csv"
-    out_path.write_text("sentinel\n", encoding="utf-8")
+    csv_to_analysis_ready_csv(csv_path=utterances_csv, out_csv=out_path,
+                              text_cols=["text"])
+    stamp = out_path.read_bytes()
 
     returned = csv_to_analysis_ready_csv(
         csv_path=utterances_csv, out_csv=out_path, text_cols=["text"]
     )
 
     assert Path(returned) == out_path
-    assert out_path.read_text(encoding="utf-8") == "sentinel\n"
+    assert out_path.read_bytes() == stamp
 
 
 def test_overwrite_existing_rebuilds_from_the_current_source(utterances_csv, tmp_path):
@@ -341,7 +369,539 @@ def test_txt_folder_id_from_controls_the_id(txt_tree, tmp_path, id_from, expecte
 
 
 def test_txt_folder_existing_output_is_left_alone_by_default(txt_tree, tmp_path):
+    """Same contract as the spreadsheet gather: reused when its record says
+    it was made this way, rebuilt when there is no record to say so."""
     out_path = tmp_path / "out.csv"
-    out_path.write_text("sentinel\n", encoding="utf-8")
     txt_folder_to_analysis_ready_csv(root_dir=txt_tree, out_csv=out_path)
-    assert out_path.read_text(encoding="utf-8") == "sentinel\n"
+    stamp = out_path.read_bytes()
+    txt_folder_to_analysis_ready_csv(root_dir=txt_tree, out_csv=out_path)
+    assert out_path.read_bytes() == stamp
+
+    out_path.write_text("sentinel\n", encoding="utf-8")   # no record: redone
+    txt_folder_to_analysis_ready_csv(root_dir=txt_tree, out_csv=out_path)
+    assert out_path.read_text(encoding="utf-8") != "sentinel\n"
+
+
+# ---------------------------------------------------------------------------
+# carry_cols — columns that survive the gather
+#
+# every text analyzer offers `pass_through_cols`, but it gets applied when the
+# analysis-ready CSV is read back, not when it's written. since the writer only
+# ever emitted `text_id` and `text`, every column we asked for showed up
+# present-but-empty, and an aggregation grouping on one of them collapsed into
+# a single meaningless bucket without ever failing
+# ---------------------------------------------------------------------------
+
+def test_a_carried_column_reaches_the_output(utterances_csv, tmp_path):
+    out = csv_to_analysis_ready_csv(
+        csv_path=utterances_csv, out_csv=tmp_path / "out.csv",
+        text_cols=["text"], carry_cols=["speaker"],
+    )
+    assert header_of(out) == ["text_id", "speaker", "text"]
+    assert [r["speaker"] for r in read_csv(out)] == ["alice", "bob", "alice"]
+
+
+def test_a_carried_column_is_not_an_id_column(utterances_csv, tmp_path):
+    """
+    The distinction the old code had no way to express. `id_cols` *composes*
+    `text_id`, so carrying `speaker` that way would give both of alice's
+    utterances the same id -- which is the one thing text_id must not do.
+    """
+    out = csv_to_analysis_ready_csv(
+        csv_path=utterances_csv, out_csv=tmp_path / "out.csv",
+        text_cols=["text"], carry_cols=["speaker"],
+    )
+    rows = read_csv(out)
+    ids = [r["text_id"] for r in rows]
+    assert len(set(ids)) == len(ids)
+    # and the column really is carried along, not just left out of the id
+    assert [r["speaker"] for r in rows] == ["alice", "bob", "alice"]
+
+
+def test_carried_columns_survive_separate_mode(utterances_csv, tmp_path):
+    out = csv_to_analysis_ready_csv(
+        csv_path=utterances_csv, out_csv=tmp_path / "out.csv",
+        text_cols=["text", "note"], mode="separate", carry_cols=["speaker"],
+    )
+    rows = read_csv(out)
+    assert len(rows) == 6                       # three rows x two text columns
+    assert all(r["speaker"] in {"alice", "bob"} for r in rows)
+
+
+def test_a_carried_column_survives_grouping_when_the_group_agrees(utterances_csv, tmp_path):
+    out = csv_to_analysis_ready_csv(
+        csv_path=utterances_csv, out_csv=tmp_path / "out.csv",
+        text_cols=["text"], group_by=["speaker"], carry_cols=["session"],
+    )
+    rows = read_csv(out)
+    assert {r["session"] for r in rows} == {"s1"}
+
+
+def test_a_carried_column_is_blank_where_the_group_disagrees(tmp_path):
+    """
+    Two sessions collapsed into one speaker row have no single session. Writing
+    the first one seen would be a guess indistinguishable from a fact once it is
+    in a published CSV, so the cell is left empty instead.
+    """
+    src = tmp_path / "in.csv"
+    src.write_text(
+        "speaker,session,text\n"
+        "alice,s1,one\n"
+        "alice,s2,two\n",
+        encoding="utf-8",
+    )
+    out = csv_to_analysis_ready_csv(
+        csv_path=src, out_csv=tmp_path / "out.csv",
+        text_cols=["text"], group_by=["speaker"], carry_cols=["session"],
+    )
+    assert [r["session"] for r in read_csv(out)] == [""]
+
+
+def test_a_column_asked_for_twice_is_written_once(utterances_csv, tmp_path):
+    """`speaker` is a reasonable thing to group by *and* to carry."""
+    out = csv_to_analysis_ready_csv(
+        csv_path=utterances_csv, out_csv=tmp_path / "out.csv",
+        text_cols=["text"], group_by=["speaker"], carry_cols=["speaker"],
+    )
+    header = header_of(out)
+    assert header.count("speaker") == 1
+    assert "speaker" in header
+    assert {r["speaker"] for r in read_csv(out)} == {"alice", "bob"}
+
+
+def test_a_carried_column_the_input_lacks_is_dropped_with_a_warning(
+    utterances_csv, tmp_path, capsys
+):
+    """
+    Not an error, unlike a missing `text_cols`: half the presets asking for
+    `speaker` run over essays that never had one. But it must be said out loud,
+    because the alternative -- a column of blanks -- is what this whole feature
+    exists to stop.
+    """
+    out = csv_to_analysis_ready_csv(
+        csv_path=utterances_csv, out_csv=tmp_path / "out.csv",
+        text_cols=["text"], carry_cols=["speaker", "nonesuch"],
+    )
+    assert "nonesuch" in capsys.readouterr().out
+    assert header_of(out) == ["text_id", "speaker", "text"]
+
+
+# ---------------------------------------------------------------------------
+# malformed dictionaries fail with their name on (a run of ours died like this)
+# ---------------------------------------------------------------------------
+
+
+def test_a_headerless_dic_is_named_and_explained(tmp_path):
+    """
+    A bare word list saved as `.dic` -- no %...% category block -- made
+    contentcoder die with a bare "list index out of range": no file name, no
+    hint, an empty features folder. Real case: an invective word list from a
+    shared dictionary library.
+    """
+    import pytest
+
+    from taters.text.dictionary_analyzers.multi_dict_analyzer import _load_coders
+
+    bad = tmp_path / "invective words.dic"
+    bad.write_text("abnormal\nabusive\nafraid\n", encoding="utf-8")
+
+    with pytest.raises(ValueError) as err:
+        _load_coders([bad])
+    msg = str(err.value)
+    assert "invective words.dic" in msg
+    assert "category header" in msg
+
+
+def test_an_empty_dic_is_named_too(tmp_path):
+    import pytest
+
+    from taters.text.dictionary_analyzers.multi_dict_analyzer import _load_coders
+
+    empty = tmp_path / "hollow.dic"
+    empty.write_text("", encoding="utf-8")
+
+    with pytest.raises(ValueError) as err:
+        _load_coders([empty])
+    assert "hollow.dic" in str(err.value) and "empty" in str(err.value)
+
+
+def test_a_valid_dic_still_loads(tmp_path):
+    from taters.text.dictionary_analyzers.multi_dict_analyzer import _load_coders
+
+    good = tmp_path / "moods.dic"
+    good.write_text("%\n1\tAnimals\n2\tCats\n%\ncat\t1\t2\ndog\t1\n",
+                    encoding="utf-8")
+
+    coders = _load_coders([good])
+    assert len(coders) == 1 and coders[0][0] == "moods"
+
+
+def test_one_bad_dictionary_costs_only_itself(tmp_path):
+    """
+    From the user's second failed run: a single headerless .dic zeroed the
+    whole content-coding step -- no features from the seven good dictionaries
+    either. A broken file is now skipped with a warning naming it; only when
+    NOTHING loads does the step fail.
+    """
+    import warnings
+
+    from taters.text.dictionary_analyzers.multi_dict_analyzer import _load_coders
+
+    good = tmp_path / "moods.dic"
+    good.write_text("%\n1\tCats\n%\ncat\t1\n", encoding="utf-8")
+    bad = tmp_path / "invectives.dic"
+    bad.write_text("abnormal\nabusive\n", encoding="utf-8")
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        coders = _load_coders([good, bad])
+
+    assert [prefix for prefix, _ in coders] == ["moods"]
+    messages = [str(w.message) for w in caught]
+    assert any("invectives.dic" in m and "Skipped" in m for m in messages)
+
+
+def test_when_no_dictionary_loads_the_step_still_fails(tmp_path):
+    """With nothing loaded there is no result to stand behind."""
+    import pytest
+
+    from taters.text.dictionary_analyzers.multi_dict_analyzer import _load_coders
+
+    bad = tmp_path / "invectives.dic"
+    bad.write_text("abnormal\n", encoding="utf-8")
+
+    with pytest.raises(ValueError) as err:
+        _load_coders([bad])
+    assert "none of the dictionaries" in str(err.value)
+    assert "invectives.dic" in str(err.value)
+
+
+def test_an_id_column_named_text_id_is_not_duplicated(tmp_path):
+    """
+    From a real run: the analyzer writes `text_id` explicitly as the first
+    column AND injected id_cols right after it -- so an id column actually
+    called `text_id` (the obvious name for one) came out twice, identical.
+    Readability and lexical richness already filtered it; dictionaries had not.
+    """
+    import csv as _csv
+
+    from taters.text.analyze_with_dictionaries import analyze_with_dictionaries
+
+    dic = tmp_path / "cats.dic"
+    dic.write_text("%\n1\tCats\n%\ncat\t1\ncats\t1\n", encoding="utf-8")
+    src = tmp_path / "texts.csv"
+    src.write_text("text_id,text\na.txt,cats are angry\nb.txt,a calm cat\n",
+                   encoding="utf-8")
+
+    out = analyze_with_dictionaries(
+        csv_path=src, text_cols=["text"], id_cols=["text_id"], mode="concat",
+        gathered_csv=tmp_path / "gathered.csv",
+        out_features_csv=tmp_path / "dictionary.csv",
+        dict_paths=[dic], overwrite_existing=True)
+
+    with open(out, encoding="utf-8-sig", newline="") as f:
+        rows = list(_csv.reader(f))
+    assert rows[0].count("text_id") == 1
+    assert rows[1][0] == "a.txt"
+
+
+def test_a_differently_named_id_column_still_passes_through(tmp_path):
+    """Two id columns compose text_id together, so each is a real part of the
+    identity and rides along right after text_id -- once. A lone id column
+    IS text_id, and is not repeated beside it (resolve_passthrough_columns)."""
+    import csv as _csv
+
+    from taters.text.analyze_with_dictionaries import analyze_with_dictionaries
+
+    dic = tmp_path / "cats.dic"
+    dic.write_text("%\n1\tCats\n%\ncat\t1\n", encoding="utf-8")
+    src = tmp_path / "texts.csv"
+    src.write_text("speaker,turn,text\nA,1,one cat\nB,2,no animals\n",
+                   encoding="utf-8")
+
+    out = analyze_with_dictionaries(
+        csv_path=src, text_cols=["text"], id_cols=["speaker", "turn"],
+        mode="concat", gathered_csv=tmp_path / "gathered.csv",
+        out_features_csv=tmp_path / "dictionary.csv",
+        dict_paths=[dic], overwrite_existing=True)
+    with open(out, encoding="utf-8-sig", newline="") as f:
+        rows = list(_csv.reader(f))
+    assert rows[0][:3] == ["text_id", "speaker", "turn"]
+    assert rows[0].count("speaker") == 1
+
+    alone = analyze_with_dictionaries(
+        csv_path=src, text_cols=["text"], id_cols=["speaker"], mode="concat",
+        gathered_csv=tmp_path / "g1.csv",
+        out_features_csv=tmp_path / "d1.csv",
+        dict_paths=[dic], overwrite_existing=True)
+    with open(alone, encoding="utf-8-sig", newline="") as f:
+        header = next(_csv.reader(f))
+    assert "speaker" not in header, "the lone identity column was carried twice"
+
+
+def test_archetypes_do_not_duplicate_a_text_id_id_column(tmp_path, monkeypatch):
+    """
+    Same defect, same fix, in the archetype analyzer -- proven without loading
+    a sentence-transformer by capturing what the middle layer is handed.
+    """
+    from taters.text import analyze_with_archetypes as awa
+    from taters.text.dictionary_analyzers import multi_archetype_analyzer as maa
+
+    seen = {}
+
+    def capture(*, items, pass_through_cols, **kwargs):
+        seen["pass_through_cols"] = list(pass_through_cols)
+        seen["metas"] = [meta for _tid, _txt, meta in items]
+
+    monkeypatch.setattr(maa, "analyze_texts_to_csv", capture)
+
+    src = tmp_path / "texts.csv"
+    src.write_text("text_id,speaker,text\na.txt,A,hello there\n",
+                   encoding="utf-8")
+    # only checked for existence up-front, never read: the stub stands in for
+    # the model-loading middle layer
+    arche = tmp_path / "themes.csv"
+    arche.write_text("archetype,prompt\ncalm,a calm scene\n", encoding="utf-8")
+    awa.analyze_with_archetypes(
+        csv_path=src, text_cols=["text"], id_cols=["text_id", "speaker"],
+        mode="concat", gathered_csv=tmp_path / "gathered.csv",
+        out_features_csv=tmp_path / "archetypes.csv",
+        archetype_csvs=[arche])
+
+    assert seen["pass_through_cols"] == ["speaker"]
+    assert seen["metas"] == [{"speaker": "A"}]
+
+
+def test_the_dictionary_analyzer_names_the_row_it_is_scoring(tmp_path):
+    """The tick carries the text_id, so a document that takes minutes shows
+    *which* document is taking minutes."""
+    from taters.text.analyze_with_dictionaries import analyze_with_dictionaries
+
+    dic = tmp_path / "cats.dic"
+    dic.write_text("%\n1\tCats\n%\ncat\t1\n", encoding="utf-8")
+    src = tmp_path / "texts.csv"
+    src.write_text("text_id,text\nslowpoke,the cat sat\n", encoding="utf-8")
+
+    calls = []
+    analyze_with_dictionaries(
+        csv_path=src, text_cols=["text"], id_cols=["text_id"],
+        gathered_csv=tmp_path / "g.csv", out_features_csv=tmp_path / "f.csv",
+        dict_paths=[dic], overwrite_existing=True,
+        on_progress=lambda done, total, message=None, unit=None, **extra:
+            calls.append((message, extra.get("inflight"))))
+    assert any(m == "scoring documents" for m, _f in calls)
+    assert any(f and "slowpoke" in f for _m, f in calls)
+
+
+def test_parallel_dictionary_scoring_is_byte_identical_to_serial(tmp_path):
+    """One worker or three, the feature CSV is the same file: rows are scored
+    by one shared function and written in input order."""
+    from taters.text.analyze_with_dictionaries import analyze_with_dictionaries
+
+    dic = tmp_path / "cats.dic"
+    dic.write_text("%\n1\tCats\n%\ncat\t1\ncats\t1\n", encoding="utf-8")
+    src = tmp_path / "texts.csv"
+    with src.open("w", newline="", encoding="utf-8") as f:
+        import csv as _csv
+        w = _csv.writer(f)
+        w.writerow(["text_id", "text"])
+        for i in range(12):
+            w.writerow([f"d{i}", f"cats appear {i} times in text {i} " * (i + 1)])
+
+    outs = {}
+    for n in (1, 3):
+        out = analyze_with_dictionaries(
+            csv_path=src, text_cols=["text"], id_cols=["text_id"],
+            gathered_csv=tmp_path / f"g{n}.csv",
+            out_features_csv=tmp_path / f"f{n}.csv",
+            dict_paths=[dic], overwrite_existing=True, workers=n)
+        outs[n] = Path(out).read_bytes()
+    assert outs[1] == outs[3]
+
+
+def test_a_quiet_dictionary_run_prints_nothing_over_the_display(tmp_path, capfd):
+    """
+    contentcoder prints "Dictionary loaded." per construction -- and worker
+    processes print to the inherited file descriptor, straight past the live
+    display's stdout redirection. A quiet run (one driven by a progress sink)
+    must reach stdout not at all, parent or child. capfd, not capsys: only
+    descriptor capture sees what children write.
+    """
+    from taters.text.analyze_with_dictionaries import analyze_with_dictionaries
+
+    dic = tmp_path / "cats.dic"
+    dic.write_text("%\n1\tCats\n%\ncat\t1\n", encoding="utf-8")
+    src = tmp_path / "texts.csv"
+    import csv as _csv
+    with src.open("w", newline="", encoding="utf-8") as f:
+        w = _csv.writer(f)
+        w.writerow(["text_id", "text"])
+        for i in range(6):
+            w.writerow([f"d{i}", f"the cat sat {i}"])
+
+    analyze_with_dictionaries(
+        csv_path=src, text_cols=["text"], id_cols=["text_id"],
+        gathered_csv=tmp_path / "g.csv", out_features_csv=tmp_path / "f.csv",
+        dict_paths=[dic], overwrite_existing=True, workers=2,
+        on_progress=lambda *a, **k: None)
+
+    out = capfd.readouterr().out
+    assert "Dictionary loaded" not in out
+
+
+# ---------------------------------------------------------------------------
+# csv_to_analysis_ready_csv — per-group summaries (agg_cols)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def scored_csv(tmp_path) -> Path:
+    """Posts with a numeric score column -- one value unparseable, one blank."""
+    p = tmp_path / "scored.csv"
+    p.write_text(
+        "user,score,age,text\n"
+        "alice,3,30,meow one\n"
+        "alice,4,,meow two\n"
+        "bob,oops,41,purr\n",
+        encoding="utf-8",
+    )
+    return p
+
+
+def test_agg_cols_average_numbers_per_group(scored_csv, tmp_path):
+    out = csv_to_analysis_ready_csv(
+        csv_path=scored_csv, out_csv=tmp_path / "o.csv", text_cols=["text"],
+        group_by=["user"], agg_cols={"score": "mean", "age": "mean"},
+        verbose=False)
+    rows = {r["text_id"]: r for r in read_csv(out)}
+    assert rows["alice"]["score_mean"] == "3.5"
+    # blank cells get skipped, not counted as zero: alice's mean age is 30
+    # (one value, one blank), not 15, and the n column says so
+    assert rows["alice"]["age_mean"] == "30"
+    assert rows["alice"]["age_n"] == "1"
+    assert rows["alice"]["score_n"] == "2"
+    # an unparseable value isn't a number, so bob's only score is no score
+    assert rows["bob"]["score_mean"] == ""
+    assert rows["bob"]["score_n"] == "0"
+    assert rows["bob"]["age_mean"] == "41"
+    # the summaries live in their own columns after group_count, each statistic
+    # followed by its n
+    hdr = header_of(out)
+    assert hdr.index("score_mean") > hdr.index("group_count")
+    assert hdr.index("score_n") == hdr.index("score_mean") + 1
+
+
+def test_agg_cols_as_a_bare_list_means_the_mean(scored_csv, tmp_path):
+    out = csv_to_analysis_ready_csv(
+        csv_path=scored_csv, out_csv=tmp_path / "o.csv", text_cols=["text"],
+        group_by=["user"], agg_cols=["score"], verbose=False)
+    assert {r["text_id"]: r["score_mean"] for r in read_csv(out)} == {
+        "alice": "3.5", "bob": ""}
+
+
+def test_agg_cols_sum_min_and_max(scored_csv, tmp_path):
+    out = csv_to_analysis_ready_csv(
+        csv_path=scored_csv, out_csv=tmp_path / "o.csv", text_cols=["text"],
+        group_by=["user"], agg_cols={"score": "sum", "age": "min"},
+        verbose=False)
+    rows = {r["text_id"]: r for r in read_csv(out)}
+    assert rows["alice"]["score_sum"] == "7"
+    assert rows["alice"]["age_min"] == "30"
+
+    out = csv_to_analysis_ready_csv(
+        csv_path=scored_csv, out_csv=tmp_path / "o2.csv", text_cols=["text"],
+        group_by=["user"], agg_cols={"score": "max"}, verbose=False)
+    assert {r["text_id"]: r["score_max"] for r in read_csv(out)} == {
+        "alice": "4", "bob": ""}
+
+
+def test_agg_cols_without_groups_is_refused(scored_csv, tmp_path):
+    """No groups means nothing to summarize over -- silently ignoring the ask
+    would hide a real mistake."""
+    with pytest.raises(ValueError, match="group_by"):
+        csv_to_analysis_ready_csv(
+            csv_path=scored_csv, out_csv=tmp_path / "o.csv",
+            text_cols=["text"], agg_cols=["score"], verbose=False)
+
+
+def test_agg_cols_with_an_unknown_statistic_is_refused(scored_csv, tmp_path):
+    with pytest.raises(ValueError, match="median"):
+        csv_to_analysis_ready_csv(
+            csv_path=scored_csv, out_csv=tmp_path / "o.csv",
+            text_cols=["text"], group_by=["user"],
+            agg_cols={"score": "median"}, verbose=False)
+
+
+def test_agg_cols_missing_from_the_source_raise(scored_csv, tmp_path):
+    """A summary is an explicit computation, not a convenience like carry_cols:
+    a misspelled column must not vanish into a silently absent output column."""
+    with pytest.raises(ValueError, match="karma"):
+        csv_to_analysis_ready_csv(
+            csv_path=scored_csv, out_csv=tmp_path / "o.csv",
+            text_cols=["text"], group_by=["user"], agg_cols=["karma"],
+            verbose=False)
+
+
+# ---------------------------------------------------------------------------
+# csv_to_analysis_ready_csv — progress reporting
+# ---------------------------------------------------------------------------
+
+def test_the_csv_gather_names_its_phases(utterances_csv, tmp_path):
+    """A silent spinner over a big file reads as a hang: the gather must say
+    what it is doing -- counting, sorting into groups, combining them."""
+    heard = []
+
+    def sink(done, total, message=None, **_):
+        heard.append((done, total, message))
+
+    csv_to_analysis_ready_csv(
+        csv_path=utterances_csv, out_csv=tmp_path / "o.csv",
+        text_cols=["text"], group_by=["speaker"], verbose=False,
+        on_progress=sink)
+
+    messages = {m for _, _, m in heard if m}
+    assert "counting rows" in messages
+    assert "sorting rows into groups (pass 1 of 2)" in messages
+    assert "combining the groups (pass 2 of 2)" in messages
+    # the sort pass has a real denominator: three utterances to sort
+    assert (3, 3, "sorting rows into groups (pass 1 of 2)") in heard
+
+
+def test_the_ungrouped_csv_gather_reports_rows_too(utterances_csv, tmp_path):
+    heard = []
+
+    def sink(done, total, message=None, **_):
+        heard.append((done, total, message))
+
+    csv_to_analysis_ready_csv(
+        csv_path=utterances_csv, out_csv=tmp_path / "o.csv",
+        text_cols=["text"], verbose=False, on_progress=sink)
+
+    assert (3, 3, "copying rows") in heard
+
+
+def test_summaries_run_over_textless_rows_too(tmp_path):
+    """
+    The audit question that prompted this: a user with rows whose text cell
+    is empty. group_count follows the text (those rows are not joined), but
+    the numeric summary follows the numbers -- every row of the group counts,
+    and the <col>_n column shows the resulting N so the two denominators are
+    never confused.
+    """
+    src = tmp_path / "posts.csv"
+    src.write_text(
+        "user,score,text\n"
+        "alice,3,meow one\n"
+        "alice,4,meow two\n"
+        "alice,5,\n"          # no text: not joined, not counted, but still scored
+        "bob,10,purr\n",
+        encoding="utf-8",
+    )
+    out = csv_to_analysis_ready_csv(
+        csv_path=src, out_csv=tmp_path / "o.csv", text_cols=["text"],
+        group_by=["user"], agg_cols=["score"], verbose=False)
+
+    rows = {r["text_id"]: r for r in read_csv(out)}
+    assert rows["alice"]["group_count"] == "2", "two rows had text to join"
+    assert rows["alice"]["text"] == "meow one meow two"
+    assert rows["alice"]["score_mean"] == "4", "the mean of 3, 4 and 5"
+    assert rows["alice"]["score_n"] == "3", "all three scores counted"

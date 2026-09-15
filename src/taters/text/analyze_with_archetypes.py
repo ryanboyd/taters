@@ -1,25 +1,32 @@
 from pathlib import Path
-from typing import Optional, Literal, Union, Sequence, Iterable, Tuple
+from typing import Callable, Optional, Literal, Union, Sequence, Iterable, Tuple
 import csv
 
-from .dictionary_analyzers import multi_archetype_analyzer as maa
 from ..helpers.find_files import find_files
 from ..helpers.nltk_data import ensure_punkt
-from ..helpers.text_gather import (
-    csv_to_analysis_ready_csv,
-    txt_folder_to_analysis_ready_csv,
-)
+from ..helpers.progress import Ticker, count_rows
+from ..helpers.doc_text import DOCUMENT_PATTERN
+from ..helpers.text_gather import (resolve_analysis_ready)
+from ..helpers.provenance import TEXT_GRAIN, TEXT_INPUT, records_settings
+from ..helpers.cliargs import CliSpec
 
+@records_settings(binding=TEXT_INPUT, grain=TEXT_GRAIN,
+                  outputs=("out_features_csv",),
+                  bookkeeping=("WC",),
+                  assets={"archetype_csvs": "archetypes"})
 def analyze_with_archetypes(
     *,
-    # ----- Input source (choose exactly one, OR pass analysis_csv to skip gathering) -----
+    # ----- Input source (choose exactly one, or pass analysis_csv directly) -----
     csv_path: Optional[Union[str, Path]] = None,
     txt_dir: Optional[Union[str, Path]] = None,
-    analysis_csv: Optional[Union[str, Path]] = None,   # <- NEW: skip gathering if provided
+    analysis_csv: Optional[Union[str, Path]] = None,   # if given, we skip gathering
+    gathered_csv: Optional[Union[str, Path]] = None,
+    on_progress: Optional[Callable[[int, int], None]] = None,
 
     # ----- Output -----
     out_features_csv: Optional[Union[str, Path]] = None,
-    overwrite_existing: bool = False,  # if the file already exists, let's not overwrite by default
+    overwrite_existing: bool = False,
+    workers: int = 0,  # if the file already exists, let's not overwrite by default
 
     # ----- Archetype CSVs (one or more) -----
     archetype_csvs: Sequence[Union[str, Path]],
@@ -40,12 +47,13 @@ def analyze_with_archetypes(
 
     # ====== TXT FOLDER GATHER OPTIONS (when txt_dir is provided) ======
     recursive: bool = True,
-    pattern: str = "*.txt",
+    pattern: str = DOCUMENT_PATTERN,
     id_from: Literal["stem", "name", "path"] = "stem",
     include_source_path: bool = True,
 
     # ====== Archetyper scoring options ======
     model_name: str = "sentence-transformers/all-roberta-large-v1",
+    device: Optional[str] = "auto",
     mean_center_vectors: bool = True,
     fisher_z_transform: bool = False,
     rounding: int = 4,
@@ -72,6 +80,20 @@ def analyze_with_archetypes(
         Folder of ``.txt`` files to gather from. Mutually exclusive with the other input modes.
     analysis_csv : str or pathlib.Path, optional
         Precomputed analysis-ready CSV containing exactly the columns ``text_id`` and ``text``.
+    gathered_csv : str or pathlib.Path, optional
+        Where to write the intermediate "analysis-ready" table built from
+        ``csv_path`` or ``txt_dir``.
+
+        By default it lands beside the *source* -- which means analyzing a
+        spreadsheet in someone's Downloads folder writes a file into their
+        Downloads folder. Pass this to keep the intermediate with the rest of a
+        run's output instead. Ignored when ``analysis_csv`` is given, because
+        then no gathering happens.
+    on_progress : callable, optional
+        Called as ``on_progress(done, total, message=None)`` so a UI can show a
+        real bar instead of a spinner. Injected automatically by the pipeline
+        runner for any step function that declares this parameter. See
+        :mod:`taters.helpers.progress` for the contract.
     out_features_csv : str or pathlib.Path, optional
         Output path for the features CSV. If ``None``, defaults to
         ``./features/archetypes/<analysis_ready_filename>``.
@@ -112,12 +134,20 @@ def analyze_with_archetypes(
         How to derive the ``text_id`` when gathering from a text folder.
     include_source_path : bool, default=True
         Whether to include the absolute source path as an additional column when gathering from a text folder.
+    device : {"auto", "cuda", "cpu"} | None, default "auto"
+        Where to run the embedding model. "auto" uses the GPU when torch reports
+        one that works and falls back to the CPU when it does not; "cuda"
+        insists and raises if it cannot; "cpu" never touches the GPU.
     model_name : str, default="sentence-transformers/all-roberta-large-v1"
         Sentence-Transformers model used to embed text for archetype scoring.
     mean_center_vectors : bool, default=True
         If ``True``, mean-center embedding vectors prior to scoring.
     fisher_z_transform : bool, default=False
         If ``True``, apply the Fisher z-transform to correlations.
+    workers : int, default=0
+        Parallel processes for reading documents. ``0`` means automatic:
+        three-quarters of the logical cores; ``1`` turns parallelism off. Output files are
+        identical whatever the worker count.
     rounding : int, default=4
         Number of decimal places to round numeric outputs. Use ``None`` to disable rounding.
 
@@ -156,51 +186,22 @@ def analyze_with_archetypes(
     """
 
 
-    # archetyper splits text with nltk.sent_tokenize, which needs data NLTK does
-    # not ship. Fetch it up front rather than failing mid-pipeline with a wall
-    # of asterisks after the expensive steps have already run.
+    # archetyper splits text with nltk.sent_tokenize, which needs data that NLTK
+    # doesn't ship. we grab it up front so that we don't fail mid-pipeline with
+    # a wall of asterisks after the expensive steps have already run
     ensure_punkt(verbose=True)
 
-    # 1) Use analysis-ready CSV if given; otherwise gather from csv_path or txt_dir
-    if analysis_csv is not None:
-        analysis_ready = Path(analysis_csv)
-        if not analysis_ready.exists():
-            raise FileNotFoundError(f"analysis_csv not found: {analysis_ready}")
-    else:
-        if (csv_path is None) == (txt_dir is None):
-            raise ValueError("Provide exactly one of csv_path or txt_dir (or pass analysis_csv).")
-        if csv_path is not None:
-            analysis_ready = Path(
-                csv_to_analysis_ready_csv(
-                    csv_path=csv_path,
-                    text_cols=list(text_cols),
-                    id_cols=list(id_cols) if id_cols else None,
-                    mode=mode,
-                    group_by=list(group_by) if group_by else None,
-                    delimiter=delimiter,
-                    encoding=encoding,
-                    joiner=joiner,
-                    num_buckets=num_buckets,
-                    max_open_bucket_files=max_open_bucket_files,
-                    tmp_root=tmp_root,
-                    overwrite_existing=overwrite_existing,
-                )
-            )
-        else:
-            analysis_ready = Path(
-                txt_folder_to_analysis_ready_csv(
-                    root_dir=txt_dir,
-                    recursive=recursive,
-                    pattern=pattern,
-                    encoding=encoding,
-                    id_from=id_from,
-                    include_source_path=include_source_path,
-                    overwrite_existing=overwrite_existing,
-                )
-            )
+    analysis_ready = resolve_analysis_ready(
+        csv_path=csv_path, txt_dir=txt_dir, analysis_csv=analysis_csv,
+        gathered_csv=gathered_csv, text_cols=text_cols, id_cols=id_cols,
+        mode=mode, group_by=group_by, delimiter=delimiter, encoding=encoding,
+        joiner=joiner, num_buckets=num_buckets,
+        max_open_bucket_files=max_open_bucket_files, tmp_root=tmp_root,
+        recursive=recursive, pattern=pattern, id_from=id_from,
+        include_source_path=include_source_path,
+        overwrite_existing=overwrite_existing, on_progress=on_progress,
+        workers=workers)
 
-    # 1b) Decide default features path if not provided:
-    #     <analysis_ready_dir>/features/archetypes/<analysis_ready_filename>
     if out_features_csv is None:
         out_features_csv = Path.cwd() / "features" / "archetypes" / analysis_ready.name
     out_features_csv = Path(out_features_csv)
@@ -211,14 +212,14 @@ def analyze_with_archetypes(
         return out_features_csv
 
 
-    # 2) Resolve/validate archetype CSVs
-    # Allow passing either:
+    # 2) resolve/validate the archetype CSVs
+    # we allow passing either:
     #   • one or more CSV files, or
     #   • one or more directories containing CSVs (recursively).
     #
-    # We lean on the shared find_files helper to avoid redundancy.
+    # we lean on the shared find_files helper so we're not reinventing it here
 
-    # 2) Resolve/validate archetype CSVs
+    # 2) resolve/validate the archetype CSVs
     resolved_archetype_csvs: list[Path] = []
 
     for src in archetype_csvs:
@@ -236,7 +237,7 @@ def analyze_with_archetypes(
         else:
             resolved_archetype_csvs.append(src_path)
 
-    # De-dup, normalize, and sort
+    # de-dup, normalize, and sort
     archetype_csvs = sorted({p.resolve() for p in resolved_archetype_csvs})
 
     if not archetype_csvs:
@@ -249,7 +250,7 @@ def analyze_with_archetypes(
 
 
 
-        # 3) Stream (text_id, text, meta) → middle layer → features CSV
+        # 3) stream (text_id, text, meta) → middle layer → features CSV
     def _iter_items_from_csv_with_meta(
         path: Path,
         *,
@@ -280,20 +281,48 @@ def analyze_with_archetypes(
                 tid = str(row.get(id_col, "") or "")
                 txt = str(row.get(text_col, "") or "")
                 meta = {c: str(row.get(c, "") or "") for c in wanted}
+                # we name each tick because these rows are wildly uneven: one
+                # book-sized document can take minutes where its neighbors
+                # take milliseconds, and an unnamed pause that long looks
+                # like a hang
+                _ticker.tick(message=f"scoring {tid}")
                 yield tid, txt, meta
 
+
+    # the middle layer pulls the generator above lazily and writes as it goes,
+    # so one yield is one row's worth of work handed over
+    _ticker = Ticker(on_progress, count_rows(analysis_ready, on_progress=on_progress))
+
+    # we import this late for the same reason the analyzer defers `archetypes`:
+    # this module gets imported to read its signature far more often than it
+    # actually runs
+    from .dictionary_analyzers import multi_archetype_analyzer as maa
+
+    # there's one shared rule for what rides along beside text_id -- see
+    # resolve_passthrough_columns: same order of preference that every per-row
+    # analyzer uses, and the same two columns that never get carried
+    from ..helpers.row_map import resolve_passthrough_columns
+
+    with analysis_ready.open("r", newline="", encoding=encoding) as _fh:
+        _header = csv.DictReader(_fh).fieldnames or []
+    passthrough = resolve_passthrough_columns(
+        _header, id_cols=id_cols, group_by=group_by,
+        analysis_ready=analysis_ready)
+
     maa.analyze_texts_to_csv(
-        items=_iter_items_from_csv_with_meta(analysis_ready, wanted=id_cols or []),
+        items=_iter_items_from_csv_with_meta(analysis_ready, wanted=passthrough),
         archetype_csvs=archetype_csvs,
         out_csv=out_features_csv,
         model_name=model_name,
+        device=device,
         mean_center_vectors=mean_center_vectors,
         fisher_z_transform=fisher_z_transform,
         rounding=rounding,
         encoding=encoding,
         delimiter=delimiter,
         id_col_name="text_id",
-        pass_through_cols=list(id_cols or []),  # ← inject id_cols right after text_id
+        pass_through_cols=passthrough,  # these land right after text_id
+        verbose=on_progress is None,
     )
 
     return out_features_csv
@@ -301,131 +330,34 @@ def analyze_with_archetypes(
 
 
 # --- CLI ------------------------------------------------------------
-def _build_arg_parser():
-    """
-    Create and configure an ``argparse.ArgumentParser`` for the archetype CLI.
-
-    The parser exposes three mutually exclusive input modes (``--csv``, ``--txt-dir``,
-    ``--analysis-csv``), output and overwrite flags, repeatable ``--archetype`` paths,
-    I/O parameters, gathering options for CSV/TXT inputs, and archetype scoring options.
-
-    Returns
-    -------
-    argparse.ArgumentParser
-        A parser with subcommands/flags matching the function parameters of
-        :func:`analyze_with_archetypes`.
-    """
-
-    import argparse
-    from ..helpers.cliargs import add_bool_argument
-    p = argparse.ArgumentParser(
-        description="Archetype scoring into a single CSV (globals once + per-archetype blocks)."
-    )
-
-    # Input source (choose one)
-    src = p.add_mutually_exclusive_group(required=True)
-    src.add_argument("--csv", dest="csv_path", help="Source CSV to gather from")
-    src.add_argument("--txt-dir", dest="txt_dir", help="Folder of .txt files to gather from")
-    src.add_argument("--analysis-csv", dest="analysis_csv",
-                     help="Use an existing analysis-ready CSV (skip gathering)")
-
-    # Output
-    p.add_argument("--out", dest="out_features_csv", default=None,
-                   help="Output CSV (default: ./features/archetypes/<gathered_name>)")
-    add_bool_argument(p, "--overwrite_existing", default=False,
-                      help="Do you want to overwrite the output file if it already exists?")
-
-    # Archetype CSVs (repeatable)
-    p.add_argument("--archetype", dest="archetype_csvs", action="append", required=True,
-                   help="Path to an archetype CSV (repeat for multiple)")
-
-    # I/O
-    p.add_argument("--encoding", default="utf-8-sig")
-    p.add_argument("--delimiter", default=",")
-
-    # CSV gather options
-    p.add_argument("--text-col", dest="text_cols", action="append",
-                   help="Text column (repeatable). Default: --text-col text")
-    p.add_argument("--id-col", dest="id_cols", action="append",
-                   help="ID column(s) (repeatable)")
-    p.add_argument("--mode", choices=["concat", "separate"], default="concat")
-    p.add_argument("--group-by", dest="group_by", action="append",
-                   help="Group by column(s) (repeatable)")
-    p.add_argument("--joiner", default=" ")
-    p.add_argument("--num-buckets", type=int, default=512)
-    p.add_argument("--max-open-bucket-files", type=int, default=64)
-    p.add_argument("--tmp-root", default=None)
-
-    # TXT gather options
-    p.add_argument("--recursive", action="store_true", default=True)
-    p.add_argument("--no-recursive", dest="recursive", action="store_false")
-    p.add_argument("--pattern", default="*.txt")
-    p.add_argument("--id-from", choices=["stem", "name", "path"], default="stem")
-    p.add_argument("--include-source-path", action="store_true", default=True)
-    p.add_argument("--no-include-source-path", dest="include_source_path", action="store_false")
-
-    # Archetyper scoring options
-    p.add_argument("--model-name", default="sentence-transformers/all-roberta-large-v1")
-    p.add_argument("--mean-center-vectors", action="store_true", default=True)
-    p.add_argument("--no-mean-center-vectors", dest="mean_center_vectors", action="store_false")
-    p.add_argument("--fisher-z-transform", action="store_true", default=False)
-    p.add_argument("--rounding", type=int, default=4)
-
-    return p
 
 
-def main():
-    """
-    Command-line entry point for archetype scoring.
+# ---------------------------------------------------------------------------
+# command line -- we derive this from the function(s) above; see
+# helpers.cliargs.CliSpec. the aliases and legacy flags are the spellings that
+# the old hand-written parser used; we keep them so that every documented
+# invocation still works
+# ---------------------------------------------------------------------------
 
-    Parses arguments using :func:`_build_arg_parser`, normalizes list-like defaults,
-    invokes :func:`analyze_with_archetypes`, and prints the resulting output path.
+CLI = CliSpec(
+    analyze_with_archetypes,
+    description='Archetype scoring into a single CSV (globals once + per-archetype blocks).',
+    aliases={
+        'archetype_csvs': ['--archetype'],
+        'csv_path': ['--csv'],
+        'out_features_csv': ['--out'],
+    },
+    legacy={
+        '--no-include-source-path': ['--include-source-path', 'false'],
+        '--no-mean-center-vectors': ['--mean-center-vectors', 'false'],
+        '--no-recursive': ['--recursive', 'false'],
+    },
+)
 
-    Notes
-    -----
-    This function is executed when the module is run as a script:
 
-        python -m taters.text.analyze_with_archetypes \
-            --analysis-csv transcripts/X/X.csv \
-            --archetype dictionaries/archetypes \
-            --model-name sentence-transformers/all-roberta-large-v1
-    """
-
-    args = _build_arg_parser().parse_args()
-
-    # Defaults for list-ish args
-    text_cols = args.text_cols if args.text_cols else ["text"]
-    id_cols = args.id_cols if args.id_cols else None
-    group_by = args.group_by if args.group_by else None
-
-    out = analyze_with_archetypes(
-        csv_path=args.csv_path,
-        txt_dir=args.txt_dir,
-        analysis_csv=args.analysis_csv,
-        out_features_csv=args.out_features_csv,
-        overwrite_existing=args.overwrite_existing,
-        archetype_csvs=args.archetype_csvs,
-        encoding=args.encoding,
-        delimiter=args.delimiter,
-        text_cols=text_cols,
-        id_cols=id_cols,
-        mode=args.mode,
-        group_by=group_by,
-        joiner=args.joiner,
-        num_buckets=args.num_buckets,
-        max_open_bucket_files=args.max_open_bucket_files,
-        tmp_root=args.tmp_root,
-        recursive=args.recursive,
-        pattern=args.pattern,
-        id_from=args.id_from,
-        include_source_path=args.include_source_path,
-        model_name=args.model_name,
-        mean_center_vectors=args.mean_center_vectors,
-        fisher_z_transform=args.fisher_z_transform,
-        rounding=args.rounding,
-    )
-    print(str(out))
+def main(argv=None) -> int:
+    return CLI.run(argv)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

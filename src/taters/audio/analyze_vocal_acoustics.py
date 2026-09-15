@@ -53,15 +53,17 @@ python -m taters.audio.analyze_acoustics \
 """
 from __future__ import annotations
 
-import math
 import soundfile as sf
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple, Union, Dict, Literal
+from typing import Callable, Dict, List, Literal, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
+
+from ..helpers.atomic import atomic_write
+from ..helpers.progress import announce
 
 try:
     import parselmouth  # Praat-Python bridge
@@ -88,7 +90,7 @@ def _pydub_resample(sig: "AudioSegment", sr: int) -> "AudioSegment":
     return sig.set_frame_rate(sr)
 
 def _pydub_remove_dc(sig: "AudioSegment") -> "AudioSegment":
-    # pydub exposes DC offset helpers on WAV/MP3; handle mono vs stereo
+    # pydub gives us DC offset helpers on WAV/MP3; we handle mono and stereo
     try:
         if sig.channels == 1:
             off = sig.get_dc_offset(channel=1)
@@ -102,14 +104,14 @@ def _pydub_remove_dc(sig: "AudioSegment") -> "AudioSegment":
             if off_r:
                 sig = sig.remove_dc_offset(channel=2, offset=off_r)
     except Exception:
-        # Some formats/backends may not report DC; just skip silently
+        # some formats/backends don't report DC at all; we just move along quietly
         pass
     return sig
 
 def _pydub_normalize(sig: "AudioSegment", target_dbfs: float = -20.0) -> "AudioSegment":
-    # Make sure we don’t clip: cap gain increase by available headroom to 0 dBFS peak
+    # make sure we don't clip: we cap the gain at whatever headroom is left to 0 dBFS
     try:
-        headroom = -sig.max_dBFS  # how much we can raise before clipping (positive number)
+        headroom = -sig.max_dBFS  # how far we can push it before clipping (positive)
         gain = target_dbfs - sig.dBFS
         if gain > headroom:
             gain = headroom
@@ -118,13 +120,13 @@ def _pydub_normalize(sig: "AudioSegment", target_dbfs: float = -20.0) -> "AudioS
         return sig
 
 def _pydub_to_float_mono(sig: "AudioSegment") -> tuple[np.ndarray, int]:
-    # Convert to mono float32 in [-1,1]; keep target sample rate
+    # convert to mono float32 in [-1,1]; we keep the target sample rate
     if sig.channels > 1:
         sig = sig.set_channels(1)
     sr = sig.frame_rate
-    # get_array_of_samples returns int PCM; normalize by sample width
+    # get_array_of_samples hands back int PCM, so we normalize by the sample width
     arr = np.array(sig.get_array_of_samples())
-    # infer scale from sample width
+    # the scale falls out of the sample width
     max_int = float(1 << (8 * sig.sample_width - 1))
     y = (arr.astype(np.float32) / max_int).copy()
     return y, sr
@@ -155,11 +157,12 @@ def _pad_sound_to_min_duration(snd: parselmouth.Sound, min_dur_s: float) -> pars
     pad_left = parselmouth.Sound(values=np.zeros((1, left), dtype=np.float64), sampling_frequency=sr)
     pad_right = parselmouth.Sound(values=np.zeros((1, right), dtype=np.float64), sampling_frequency=sr)
 
-    # IMPORTANT: use the class-level concatenator so the result is a brand new, longer Sound
+    # IMPORTANT: we use the class-level concatenator so we get a brand new, longer
+    # Sound back
     try:
         concatenated = parselmouth.Sound.concatenate([pad_left, snd, pad_right])
     except Exception:
-        # Fallback via Praat "Concatenate"
+        # if that's not there, we go through Praat's "Concatenate" instead
         concatenated = parselmouth.praat.call([pad_left, snd, pad_right], "Concatenate")
     return concatenated
 
@@ -204,21 +207,9 @@ def _ensure_mono_sound(sound: parselmouth.Sound) -> parselmouth.Sound:
     """Convert to mono if stereo, keeping Praat-native Sound object."""
     if sound.get_number_of_channels() == 1:
         return sound
-    # Average channels (Praat's Mix)
+    # average the channels together (Praat's Mix)
     return praat_call(sound, "Convert to mono")
 
-
-def _load_sound(wav_path: Union[str, Path], target_sr: Optional[int] = None) -> Tuple[parselmouth.Sound, int]:
-    """
-    Load WAV as a Praat Sound. If target_sr is provided, resample with librosa
-    (parselmouth will happily ingest what librosa writes back to disk, but for speed
-    we resample in-memory and construct Sound from the float array).
-    """
-    wav_path = Path(wav_path)
-    y, sr = librosa.load(str(wav_path), sr=target_sr, mono=True)  # mono=True to avoid channel headaches
-    # Praat Sound expects samples in seconds:
-    snd = parselmouth.Sound(y, sr)
-    return snd, sr
 
 def _load_audio(
     wav_path: Union[str, Path],
@@ -242,25 +233,24 @@ def _load_audio(
             sig = AudioSegment.from_file(str(wav_path), format=fmt)
             # 1) resample
             sig = _pydub_resample(sig, target_sr)
-            # 2) DC offset
+            # 2) knock out the DC offset
             if remove_dc:
                 sig = _pydub_remove_dc(sig)
             # 3) loudness normalization
             sig = _pydub_normalize(sig, target_dbfs=target_dbfs)
-            # → numpy mono float
+            # then over to a numpy mono float
             y, sr = _pydub_to_float_mono(sig)
-            # Praat Sound from numpy
+            # and a Praat Sound built from that same numpy
             snd = parselmouth.Sound(y, sr)
             return y, sr, snd
         except Exception as e:
             warnings.warn(f"[acoustics] pydub preprocessing failed ({e}); falling back to librosa.")
-            # fall through to librosa path
+            # fall through to the librosa path below
 
-    # Fallback: librosa load (no DC removal / volume normalization)
+    # fallback: plain librosa load (so no DC removal or volume normalization)
     y, sr = librosa.load(str(wav_path), sr=target_sr if preprocess else None, mono=True)
     snd = parselmouth.Sound(y, sr)
     return y, sr, snd
-
 
 
 def _framewise_tracks(
@@ -272,23 +262,23 @@ def _framewise_tracks(
     formant_max: float = 5500.0,
     formant_n: int = 4,
 ) -> FramewiseTracks:
-    # Fixed hop (10 ms default)
+    # fixed hop (10 ms unless told otherwise)
     ts = 0.01 if (time_step is None or time_step <= 0) else float(time_step)
 
-    # Pitch defines frame centers
+    # pitch is what decides where the frame centers land
     pitch = snd.to_pitch(time_step=ts, pitch_floor=f0_min, pitch_ceiling=f0_max)
     times = pitch.xs()
     f0_vals = pitch.selected_array["frequency"]  # Hz (0 = unvoiced)
 
-    # Intensity (loudness) aligned to same hop
+    # intensity (loudness), lined up on the same hop
     intensity = snd.to_intensity(time_step=ts)
     loudness_db = np.interp(times, intensity.xs(), intensity.values[0])
 
-    # Harmonicity (cc) → HNR (dB)
+    # harmonicity (cc) -> HNR in dB
     harm = snd.to_harmonicity_cc(time_step=ts, minimum_pitch=f0_min)
     hnr_db = np.interp(times, harm.xs(), harm.values[0])  # may include -inf
 
-    # Formants via Burg (note: kw is max_number_of_formants)
+    # formants via Burg (note that the kwarg is max_number_of_formants)
     max_formants = int(max(1, min(formant_n, 5)))
     formant = snd.to_formant_burg(
         time_step=ts,
@@ -306,7 +296,7 @@ def _framewise_tracks(
             vals[i] = np.nan if (v is None or np.isnan(v) or v <= 0) else v
         return vals
 
-    # Always return f1..f4 arrays; fill missing ones with NaN
+    # we always hand back f1..f4; any we didn't ask for get filled with NaN
     f1 = _sample_formant(1) if max_formants >= 1 else np.full_like(times, np.nan)
     f2 = _sample_formant(2) if max_formants >= 2 else np.full_like(times, np.nan)
     f3 = _sample_formant(3) if max_formants >= 3 else np.full_like(times, np.nan)
@@ -342,15 +332,16 @@ def _segments_from_mask(times: np.ndarray, mask: np.ndarray) -> List[Tuple[float
 
     segs: List[Tuple[float, float]] = []
     cur_on: Optional[float] = None
-    # Use a stable hop estimate for end padding
+    # a stable hop estimate, for padding out the end
     hop = float(np.median(np.diff(times))) if len(times) > 1 else 0.01
 
     for i, on in enumerate(mask):
         if on and cur_on is None:
-            # start a new segment
+            # voicing just switched on: start a new segment
             cur_on = float(times[i])
         elif (not on) and cur_on is not None:
-            # end current segment midway between frames i-1 and i (if possible)
+            # voicing switched off: end the segment midway between frames i-1
+            # and i (if we can)
             if i > 0:
                 t_end = float(0.5 * (times[i - 1] + times[i]))
             else:
@@ -359,12 +350,11 @@ def _segments_from_mask(times: np.ndarray, mask: np.ndarray) -> List[Tuple[float
                 segs.append((cur_on, t_end))
             cur_on = None
 
-    # Close any open segment at the tail
+    # if we're still inside a segment at the tail, close it off
     if cur_on is not None:
         segs.append((cur_on, float(times[-1]) + 0.5 * hop))
 
     return segs
-
 
 
 def _stats_on_segments(values: np.ndarray, times: np.ndarray, segments: List[Tuple[float, float]]) -> Tuple[float,float,float]:
@@ -394,14 +384,14 @@ def _summarize_framewise(
     duration >= threshold; otherwise compute on all frames for loudness/HNR/formants,
     and on f0>0 for f0 summaries.
     """
-    # Voiced mask from f0
+    # first thing's first: which frames are voiced, going by f0
     voiced_mask = _voiced_mask_from_f0(tr.f0)
     voiced_segments = _segments_from_mask(tr.times, voiced_mask)
 
     if voiced_only_longer_than is not None:
         voiced_segments = [(a,b) for (a,b) in voiced_segments if (b-a) >= voiced_only_longer_than]
 
-    # Helper: pick segment-aware or global stats
+    # little helper: segment-aware stats or plain global ones
     def stat_block(vals: np.ndarray, voiced_only=False) -> Dict[str, float]:
         if voiced_only:
             m, s, r = _stats_on_segments(vals, tr.times, voiced_segments)
@@ -414,15 +404,17 @@ def _summarize_framewise(
         return {"mean": m, "std": s, "range": r}
 
     out: Dict[str, float] = {}
-    # f0 stats: only on voiced frames (and segment-length threshold if requested)
+    # f0 stats only make sense on voiced frames (plus the segment-length
+    # threshold, if one was asked for)
     out.update({f"f0_{k}": v for k, v in stat_block(tr.f0, voiced_only=True).items()})
 
-    # Formants, loudness, HNR: OpenWillis summarizes on same segments when requested
+    # formants, loudness, HNR: OpenWillis summarizes these on the same segments
+    # when asked, so we do too
     for name, arr in [("f1", tr.f1), ("f2", tr.f2), ("f3", tr.f3), ("f4", tr.f4),
                       ("loudness", tr.loudness_db), ("hnr", tr.hnr_db)]:
         out.update({f"{name}_{k}": v for k, v in stat_block(arr, voiced_only=(voiced_only_longer_than is not None)).items()})
 
-    # Silence ratio: % of frames unvoiced
+    # silence ratio: what fraction of frames are unvoiced
     out["silence_ratio"] = float(np.mean(~voiced_mask)) if tr.f0.size else np.nan
     return out
 
@@ -459,13 +451,13 @@ def _pause_metrics(
     -------
     dict with SPIR, DurMED, DurMAD
     """
-    # Non-silent speech intervals
+    # find the stretches that aren't silent
     non_silent = librosa.effects.split(
         y, top_db=top_db, frame_length=frame_length, hop_length=hop_length
     )
     duration_s = len(y) / sr
 
-    # Build pause intervals as complement of speech
+    # the pauses are just whatever's left over between the speech
     speech_segments = [(start / sr, end / sr) for start, end in non_silent]
     pauses: List[Tuple[float, float]] = []
     if not speech_segments:
@@ -479,7 +471,7 @@ def _pause_metrics(
         if t < duration_s:
             pauses.append((t, duration_s))
 
-    # Keep pauses within [min_pause_ms, max_pause_s]
+    # only keep pauses that fall within [min_pause_ms, max_pause_s]
     min_pause_s = min_pause_ms / 1000.0
     pauses = [(a, b) for (a, b) in pauses if (b - a) >= min_pause_s and (b - a) <= max_pause_s]
 
@@ -494,23 +486,22 @@ def _pause_metrics(
     return {"SPIR": float(spir), "DurMED": dur_med, "DurMAD": dur_mad}
 
 
-
 def _phonation_metrics(snd: parselmouth.Sound, f0_min: float = 75.0, f0_max: float = 500.0) -> Dict[str, float]:
     """
     Jitter/shimmer family + GNE from Praat via parselmouth.
     Uses argument signatures compatible with common Praat builds.
     Period bounds are derived from the f0 range to avoid out-of-range artifacts.
     """
-    # Build a PointProcess (foundation for jitter/shimmer)
+    # first we need a PointProcess; everything jitter/shimmer builds on it
     point_process = praat_call(snd, "To PointProcess (periodic, cc)", f0_min, f0_max)
 
-    # Convert f0 bounds (Hz) to period bounds (seconds)
+    # turn the f0 bounds (Hz) into period bounds (seconds)
     minPeriod = 1.0 / float(f0_max)  # shortest plausible cycle
     maxPeriod = 1.0 / float(f0_min)  # longest plausible cycle
-    maxPeriodFactor = 1.3            # Praat’s standard factor
+    maxPeriodFactor = 1.3            # Praat's standard factor
 
     # ----- JITTER -----
-    # Many Praat builds use the 5-arg form:
+    # most Praat builds want the 5-arg form:
     # (from_time, to_time, minimumPeriod, maximumPeriod, maximumPeriodFactor)
     def _jit(method: str) -> float:
         return float(praat_call(point_process, method, 0, 0, minPeriod, maxPeriod, maxPeriodFactor))
@@ -521,17 +512,21 @@ def _phonation_metrics(snd: parselmouth.Sound, f0_min: float = 75.0, f0_max: flo
     jitter_ddp   = _jit("Get jitter (ddp)")
 
     # ----- SHIMMER -----
-    # Praat signatures vary across versions. We try a 6-arg variant first:
-    # (from_time, to_time, minimumPeriod, maximumPeriod, maximumAmplitudeFactor, maximumPeriodFactor)
-    # If that fails, we retry with an 8-arg variant that includes silenceThreshold/periodsPerWindow.
+    # Praat's signatures move around between versions. we try the 6-arg flavor
+    # first:
+    # (from_time, to_time, minimumPeriod, maximumPeriod, maximumAmplitudeFactor,
+    #  maximumPeriodFactor)
+    # and if that blows up, we retry with the 8-arg flavor that adds
+    # silenceThreshold/periodsPerWindow.
     def _shim(method: str) -> float:
-        # Try 6-arg flavor
+        # 6-arg flavor
         try:
             return float(praat_call([snd, point_process], method,
                                     0, 0, minPeriod, maxPeriod, 1.3, 1.6))
         except Exception:
-            # Fallback: 8-arg flavor
-            # (from, to, minPeriod, maxPeriod, maxAmplitudeFactor, silenceThreshold, periodsPerWindow, maxPeriodFactor)
+            # 8-arg flavor:
+            # (from, to, minPeriod, maxPeriod, maxAmplitudeFactor, silenceThreshold,
+            #  periodsPerWindow, maxPeriodFactor)
             return float(praat_call([snd, point_process], method,
                                     0, 0, minPeriod, maxPeriod, 1.3, 0.03, 1.0, 1.6))
 
@@ -542,7 +537,7 @@ def _phonation_metrics(snd: parselmouth.Sound, f0_min: float = 75.0, f0_max: flo
     shimmer_apq11     = _shim("Get shimmer (apq11)")
     shimmer_dda       = _shim("Get shimmer (dda)")
 
-    # ----- GNE (optional; not all Praat builds expose it) -----
+    # ----- GNE (optional; not every Praat build has it) -----
     gne = np.nan
     try:
         harm_gne = praat_call(snd, "To Harmonicity (gne)", f0_min, 0.01, 2.0)  # (min pitch, time step, periods/window)
@@ -566,7 +561,6 @@ def _phonation_metrics(snd: parselmouth.Sound, f0_min: float = 75.0, f0_max: flo
     }
 
 
-
 def _mfcc_stats(y: np.ndarray, sr: int, n_mfcc: int = 14) -> Dict[str, float]:
     """
     MFCC mean/variance (1..n_mfcc) over the whole signal (or segment).
@@ -586,7 +580,8 @@ def _cpps_via_praat(snd: parselmouth.Sound, f0_min: float = 75.0) -> Dict[str, f
     If unavailable in your build, we skip gracefully.
     """
     try:
-        # Default parameters are chosen to be robust; you can expose them if needed
+        # these defaults are meant to be robust; we can expose them as knobs if
+        # anyone ever needs to
         pcep = praat_call(snd, "To PowerCepstrogram", 0.01, f0_min, 0.0, 0.05, 50.0)  # (time step, f0min, qlow, qhigh, fast)
         cpps = float(praat_call(pcep, "Get CPPS", 0, 0, f0_min, 0.05, "Straight"))   # (t1,t2,f0min, ceiling, "Straight")
         return {"cpps": cpps}
@@ -602,21 +597,22 @@ def _tremor_metrics_via_script(snd: parselmouth.Sound, tremor_script: Optional[U
     to the Praat environment and we read values back.
     """
     if not tremor_script:
-        return {}  # user didn't request tremor
+        return {}  # the user didn't ask for tremor
     try:
         tremor_script = str(tremor_script)
-        # Many tremor scripts expect the selection to be the current sound
-        # We pass arguments as needed; here we rely on defaults.
-        # A common pattern is: run script → returns a Table object → read columns.
-        result = parselmouth.praat.run_file(tremor_script, -20, 2, "no")  # args are script-specific; placeholder
-        # If the script returns nothing usable, skip silently.
-        # In practice, you would parse the "result" or capture "praat info".
-        return {}  # to keep stable until a specific script contract is defined
+        # most tremor scripts expect the current sound to be the selection.
+        # we pass arguments where needed; here we just lean on the defaults.
+        # the usual pattern is: run script -> get a Table back -> read columns.
+        # we call this for its side effect and throw the return value away:
+        # what a tremor script hands back is script-specific and we don't
+        # have an agreed contract to parse yet. binding it to `result` made
+        # it look like one was coming, and left a variable nothing ever read.
+        parselmouth.praat.run_file(tremor_script, -20, 2, "no")
+        return {}  # stays empty until we pin down a specific script contract
     except Exception:
         warnings.warn("Tremor script execution failed; skipping tremor metrics")
         return {k: np.nan for k in ("FCoM","FTrC","FMoN","FTrF","FTrI","FTrP","FTrCIP","FTrPS","FCoHNR",
                                     "ACoM","ATrC","AMoN","ATrF","ATrI","ATrP","ATrCIP","ATrPS","ACoHNR")}
-
 
 
 def _glottal_features_via_disvoice(y: np.ndarray, sr: int) -> Dict[str, float]:
@@ -628,9 +624,10 @@ def _glottal_features_via_disvoice(y: np.ndarray, sr: int) -> Dict[str, float]:
         from disvoice.glottal import Glottal
         gl = Glottal()
         feats = gl.extract_features(y, sr)
-        # DisVoice returns a dict or array; we summarize key ones if present.
+        # DisVoice gives us a dict or an array; we summarize the key ones if
+        # they're there.
         out: Dict[str, float] = {}
-        # Names depend on version; we probe common keys:
+        # the names depend on the version, so we just probe the common keys:
         for key in ["HRF", "NAQ", "OQ"]:
             vals = feats.get(key)
             if vals is not None and len(vals) > 0:
@@ -660,7 +657,7 @@ def _analyze_clip(
     target_sr: int = 44100,
     target_dbfs: float = -20.0,
     remove_dc: bool = True,
-    # NEW: VAD/“pause” tuning
+    # VAD / pause tuning
     pause_top_db: int = 30,
     pause_frame_length: int = 2048,
     pause_hop_length: int = 512,
@@ -678,9 +675,8 @@ def _analyze_clip(
     )
     snd = _ensure_mono_sound(snd)
 
-    # --- Ensure the signal is long enough for Praat’s pitch/intensity windows ---
-    # Praat rule-of-thumb: at least 6.4 / f0_min seconds (e.g., 64 ms at 100 Hz).
-    # --- Ensure the signal is long enough for Praat’s pitch/intensity windows ---
+    # --- make sure the signal is long enough for Praat's pitch/intensity windows ---
+    # Praat's rule of thumb: at least 6.4 / f0_min seconds (e.g., 64 ms at 100 Hz).
     min_dur_s = _min_required_duration_s(f0_min)
 
     if (len(y) / sr) < min_dur_s:
@@ -688,24 +684,25 @@ def _analyze_clip(
         snd = _pad_sound_to_min_duration(snd, min_dur_s)
 
 
-    # Defensive: if intensity still throws a duration error (rare edge rounding), pad and retry inside tracks
+    # belt and braces: if intensity still throws a duration error (rare edge
+    # rounding), we pad a little more and retry inside the tracks call
     def _safe_framewise_tracks(snd_obj: parselmouth.Sound, **kwargs) -> FramewiseTracks:
         try:
             return _framewise_tracks(snd_obj, **kwargs)
         except Exception as e:
-            # Only intercept window-length / intensity errors
+            # we only want to catch the window-length / intensity errors here
             msg = str(e)
             if "shorter than window length" in msg or "intensity analysis not performed" in msg:
-                # Pad to the same min_dur_s (or +1 frame margin) and retry
-                extra = 0.005  # 5 ms safety
+                # pad out to the same min_dur_s (plus a hair of margin) and retry
+                extra = 0.005  # 5 ms of safety
                 snd_padded = _pad_sound_to_min_duration(snd_obj, min_dur_s + extra)
                 return _framewise_tracks(snd_padded, **kwargs)
             raise
 
-    # Use the safe wrapper instead of calling _framewise_tracks directly
+    # we go through the safe wrapper rather than calling _framewise_tracks directly
     tracks = _safe_framewise_tracks(snd, f0_min=f0_min, f0_max=f0_max)
 
-    # Framewise DataFrame (optional)
+    # the framewise DataFrame (only if asked for)
     frame_df: Optional[pd.DataFrame] = None
     if include_framewise:
         frame_df = pd.DataFrame({
@@ -719,11 +716,11 @@ def _analyze_clip(
             "hnr_db": tracks.hnr_db,
         })
 
-    # Summary of framewise series
+    # now we summarize the framewise series
     voiced_th = (summarize_on_voiced_segments_ms / 1000.0) if summarize_on_voiced_segments_ms is not None else None
     summary: Dict[str, float] = _summarize_framewise(tracks, voiced_only_longer_than=voiced_th)
 
-    # Pause metrics and MFCC on the *preprocessed* y,sr used everywhere else
+    # pause metrics and MFCCs, on the same *preprocessed* y,sr we use everywhere else
     summary.update(_pause_metrics(
         y, sr,
         top_db=pause_top_db,
@@ -735,10 +732,10 @@ def _analyze_clip(
     # CPPS
     summary.update(_cpps_via_praat(snd, f0_min=f0_min))
 
-    # Phonation (jitter/shimmer/GNE)
+    # phonation (jitter/shimmer/GNE)
     summary.update(_phonation_metrics(snd, f0_min=f0_min, f0_max=f0_max))
 
-    # Mode extensions
+    # lastly, whatever extras the mode calls for
     if mode in ("tremor", "advanced"):
         summary.update(_tremor_metrics_via_script(snd, tremor_script))
     if mode == "advanced":
@@ -747,16 +744,9 @@ def _analyze_clip(
     return frame_df, summary
 
 
-
 # -------------------------
 # Per-turn/per-speaker analysis
 # -------------------------
-
-def _slice_wav(y: np.ndarray, sr: int, start_s: float, end_s: float) -> np.ndarray:
-    """Return y[start:end] in samples with frame safety."""
-    a = max(0, int(round(start_s * sr)))
-    b = min(len(y), int(round(end_s * sr)))
-    return y[a:b]
 
 
 def _analyze_turns(
@@ -773,7 +763,7 @@ def _analyze_turns(
     summarize_on_voiced_segments_ms: Optional[int] = 100,
     include_framewise: bool = False,  # framewise can be huge
     tremor_script: Optional[Union[str, Path]] = None,
-    # ensure top-level knobs propagate
+    # the top-level knobs, so they make it all the way down
     f0_min: float = 75.0,
     f0_max: float = 500.0,
     n_mfcc: int = 14,
@@ -785,6 +775,7 @@ def _analyze_turns(
     pause_top_db: int = 30,
     pause_frame_length: int = 2048,
     pause_hop_length: int = 512,
+    on_progress: Optional[Callable[..., None]] = None,
 ) -> Tuple[Optional[pd.DataFrame], pd.DataFrame]:
     """
     Analyze a single WAV guided by a transcript CSV (utterance-level rows).
@@ -798,8 +789,8 @@ def _analyze_turns(
     """
     wav_path = Path(wav_path)
 
-    # Load once for slicing; analysis happens on per-turn WAV slices
-    # Load once, preprocessed, then slice y for each turn
+    # we load (and preprocess) once, then slice y up for each turn; the actual
+    # analysis runs on the per-turn WAV slices
     y, sr, _snd = _load_audio(
         wav_path,
         preprocess=preprocess,
@@ -808,13 +799,13 @@ def _analyze_turns(
         remove_dc=remove_dc,
     )
 
-    # Read transcript and sanity-check timing columns
+    # read the transcript and make sure the timing columns are actually there
     df = pd.read_csv(transcript_csv)
     missing = [c for c in (start_col, end_col) if c not in df.columns]
     if missing:
         raise ValueError(f"Transcript must have {missing} columns")
 
-    # Normalize times → seconds
+    # get the times into seconds
     factor = 0.001 if time_unit == "ms" else 1.0
     df["_start_s"] = pd.to_numeric(df[start_col], errors="coerce") * factor
     df["_end_s"]   = pd.to_numeric(df[end_col],   errors="coerce") * factor
@@ -824,30 +815,35 @@ def _analyze_turns(
     rows: List[Dict[str, object]] = []
     framewise_rows: List[pd.DataFrame] = []
 
+    announce(on_progress, "measuring turns")
+    done = 0
     with TemporaryDirectory(prefix=".tmp_acoustic_slices_") as tmpdir:
         tmpdir_path = Path(tmpdir)
 
         for i, r in df.iterrows():
+            done += 1
+            if on_progress is not None:
+                on_progress(done, len(df), "measuring turns")
             start_s = float(r["_start_s"])
             end_s   = float(r["_end_s"])
 
-            # Clip to audio bounds and skip invalid/very short regions
+            # clamp to the audio bounds, and skip anything bogus or very short
             start_s = max(0.0, min(start_s, len(y) / sr))
             end_s   = max(0.0, min(end_s,   len(y) / sr))
             if not (end_s > start_s):
                 continue
-            if (end_s - start_s) < 0.020:  # <20 ms → too short
+            if (end_s - start_s) < 0.020:  # under 20 ms is too short to bother with
                 continue
 
             s_idx = int(round(start_s * sr))
             e_idx = int(round(end_s * sr))
             ys = y[s_idx:e_idx]
 
-            # Write the slice (16-bit PCM WAV)
+            # write the slice out as a 16-bit PCM WAV
             slice_path = tmpdir_path / f"slice_{i:06d}.wav"
             sf.write(str(slice_path), ys, sr, subtype="PCM_16")
 
-            # Analyze the slice
+            # and analyze it
             fdf, summ = _analyze_clip(
                 slice_path,
                 mode=mode,
@@ -857,7 +853,7 @@ def _analyze_turns(
                 f0_min=f0_min,
                 f0_max=f0_max,
                 n_mfcc=n_mfcc,
-                preprocess=False,          # slice already preprocessed
+                preprocess=False,          # the slice was already preprocessed above
                 target_sr=sr,
                 target_dbfs=target_dbfs,
                 remove_dc=False,
@@ -866,26 +862,26 @@ def _analyze_turns(
                 pause_hop_length=pause_hop_length,
             )
 
-            # Attach IDs/timing
+            # tack on the IDs and timing
             summ["start_s"] = start_s
             summ["end_s"]   = end_s
             summ["segment_index"] = int(i)
 
-            # Attach utterance text if present
+            # and the utterance text, if we've got it
             if text_col in df.columns:
                 try:
                     summ["utterance_text"] = None if pd.isna(r[text_col]) else str(r[text_col])
                 except Exception:
                     summ["utterance_text"] = None
 
-            # Extra ID columns (from transcript row) if present
+            # any extra ID columns from the transcript row, if they're there
             for c in extra_id_cols:
                 if c in r:
                     summ[c] = r[c]
 
             rows.append(summ)
 
-            # Framewise rows (no text by default to avoid bloat)
+            # framewise rows (no text on these, or they'd balloon)
             if include_framewise and fdf is not None and len(fdf):
                 fdf = fdf.copy()
                 fdf["segment_index"] = int(i)
@@ -896,14 +892,14 @@ def _analyze_turns(
                         fdf[c] = r[c]
                 framewise_rows.append(fdf)
 
-    # Build per-turn summary DataFrame
+    # build the per-turn summary DataFrame
     summary_df = pd.DataFrame(rows)
 
-    # Optional aggregation by group (e.g., per speaker)
+    # aggregate by group if asked (e.g., per speaker)
     if group_by:
         group_by = list(group_by)
         if not summary_df.empty:
-            # Drop utterance_text before aggregation (not aggregable/meaningful)
+            # utterance_text has to go first; there's no meaningful way to aggregate it
             if "utterance_text" in summary_df.columns:
                 summary_df = summary_df.drop(columns=["utterance_text"])
             num_cols = summary_df.select_dtypes(include=[np.number]).columns
@@ -918,8 +914,6 @@ def _analyze_turns(
         framewise_df = pd.concat(framewise_rows, axis=0, ignore_index=True)
 
     return framewise_df, summary_df
-
-
 
 
 # -------------------------
@@ -940,7 +934,7 @@ def analyze_acoustics(
     out_framewise_csv: Optional[Union[str, Path]] = None,
     out_summary_csv: Optional[Union[str, Path]] = None,
     overwrite_existing: bool = False,
-    include_framewise: bool = True,              # ← default ON now
+    include_framewise: bool = True,
     # Analysis options
     mode: Mode = "simple",
     summarize_on_voiced_segments_ms: Optional[int] = 100,
@@ -957,6 +951,8 @@ def analyze_acoustics(
     pause_top_db: int = 30,
     pause_frame_length: int = 2048,
     pause_hop_length: int = 512,
+    verbose: bool = True,
+    on_progress: Optional[Callable[..., None]] = None,
 ) -> Dict[str, Optional[Path]]:
     """
     Extract acoustic features and write a summary CSV and (by default) a framewise CSV.
@@ -1054,6 +1050,14 @@ def analyze_acoustics(
         Frame length (samples) for pause detection.
     pause_hop_length : int, default 512
         Hop length (samples) for pause detection.
+    verbose : bool, default True
+        Print what the step is doing. The pipeline runner turns this off
+        under its live display; without the parameter the skip-path message
+        landed in the middle of that display.
+    on_progress : callable, optional
+        ``on_progress(done, total, message)``. Per-turn analysis is the
+        longest CPU-only step in a conversation pipeline, and it reported
+        nothing while it ran; now every measured turn ticks.
 
     Returns
     -------
@@ -1118,6 +1122,16 @@ def analyze_acoustics(
     ... )
     """
 
+    if mode in ("tremor", "advanced") and not tremor_script:
+        # we check this before touching any audio. the docstring has always
+        # said the script is required for these modes, but the per-clip code
+        # used to quietly return the simple set instead: someone who picked
+        # "tremor" got no tremor columns and not a word about it, after the
+        # whole run.
+        raise ValueError(
+            f"mode={mode!r} needs tremor_script=<path to a Praat tremor "
+            f"script>; without one there are no tremor metrics to compute. "
+            f"Use mode='simple' or supply the script.")
     if wav_path is None:
         raise ValueError("wav_path is required")
 
@@ -1127,7 +1141,7 @@ def analyze_acoustics(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Default output paths
+    # default output paths
     stem = wav_path.stem
     if out_framewise_csv is None:
         out_framewise_csv = out_dir / f"{stem}_framewise.csv"
@@ -1140,13 +1154,15 @@ def analyze_acoustics(
     else:
         out_summary_csv = Path(out_summary_csv)
 
-    # Respect overwrite_existing
+    # if it's already there and we weren't told to overwrite, we're done
     if (not overwrite_existing) and out_summary_csv.exists():
-        print(f"[acoustics] Summary output already exists; returning existing file: {out_summary_csv}")
+        if verbose:
+            print(f"[acoustics] Summary output already exists; returning "
+                  f"existing file: {out_summary_csv}")
         return {"framewise_csv": out_framewise_csv if out_framewise_csv.exists() else None,
                 "summary_csv": out_summary_csv}
 
-    # Run
+    # this is where the magic happens
     if transcript_csv:
         framewise_df, summary_df = _analyze_turns(
             wav_path=wav_path,
@@ -1168,8 +1184,10 @@ def analyze_acoustics(
             pause_top_db=pause_top_db,
             pause_frame_length=pause_frame_length,
             pause_hop_length=pause_hop_length,
+            on_progress=on_progress,
         )
     else:
+        announce(on_progress, "measuring the recording")
         fdf, summ = _analyze_clip(
             wav_path,
             mode=mode,
@@ -1187,17 +1205,24 @@ def analyze_acoustics(
             pause_frame_length=pause_frame_length,
             pause_hop_length=pause_hop_length,
         )
-        # Build summary DF; carry extra_id_cols if user offered any via filename context later
+        # build the summary DF; extra_id_cols could ride along here later if we
+        # ever pull them out of the filename
         summary_df = pd.DataFrame([summ])
         framewise_df = fdf
 
-    # Write outputs
+    # write the outputs -- atomically, like every other skip-if-exists table: a
+    # Ctrl-C mid-write used to leave a truncated summary behind that the next
+    # run then handed back as finished.
     frame_path_out: Optional[Path] = None
     if include_framewise and framewise_df is not None:
-        framewise_df.to_csv(out_framewise_csv, index=False, encoding="utf-8-sig")
+        with atomic_write(out_framewise_csv, mode="w", newline="",
+                          encoding="utf-8-sig") as fh:
+            framewise_df.to_csv(fh, index=False)
         frame_path_out = out_framewise_csv
 
-    summary_df.to_csv(out_summary_csv, index=False, encoding="utf-8-sig")
+    with atomic_write(out_summary_csv, mode="w", newline="",
+                      encoding="utf-8-sig") as fh:
+        summary_df.to_csv(fh, index=False)
 
     return {"framewise_csv": frame_path_out, "summary_csv": out_summary_csv}
 
@@ -1254,8 +1279,6 @@ def main():
                     help="Hop length (samples) for VAD. Default: 512")
 
 
-
-    # NEW: default is True (write framewise CSV). Users can pass --no-framewise to disable.
     ap.add_argument(
         "--framewise",
         action=BoolOpt,
@@ -1276,10 +1299,10 @@ def main():
         group_by=args.group_by,
         extra_id_cols=args.extra_id_cols,
         out_dir=args.out_dir,
-        out_framewise_csv=args.out_framewise_csv,  # respected if provided
+        out_framewise_csv=args.out_framewise_csv,  # honored if given
         out_summary_csv=args.out_summary_csv,
         overwrite_existing=args.overwrite_existing,
-        include_framewise=args.framewise,          # ← honor on/off toggle
+        include_framewise=args.framewise,          # the on/off toggle
         mode=args.mode,
         summarize_on_voiced_segments_ms=summarize_ms,
         f0_min=args.f0_min,

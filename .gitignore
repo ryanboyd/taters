@@ -31,6 +31,8 @@ MANIFEST
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+# ...but packaging/taters.spec is hand-written source, not generated.
+!packaging/taters.spec
 
 # Installer logs
 pip-log.txt
@@ -143,11 +145,6 @@ venv.bak/
 # Rope project settings
 .ropeproject
 
-# mkdocs documentation
-/site
-/docs
-mkdocs.yml
-
 # mypy
 .mypy_cache/
 .dmypy.json
@@ -190,8 +187,22 @@ install-instructions.txt
 
 # custom test script
 runme.py
-test_vids/
+test_data/
+venv/
 
 # other stuff to omit
 taters.png
+CODE_REVIEW.md
 _dependencies/
+reference/
+planning/
+# no direct provision of dicx files, primarily for tidiness
+src/taters/data/library/dictionaries/*.dicx
+
+# Output of trying the wizard from the repo root (the pipeline folder it
+# writes, and the runner manifest); neither is source.
+my_pipeline/
+run_manifest.json
+
+# mkdocs build output
+/site

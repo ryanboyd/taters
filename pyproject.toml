@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "taters"
-version = "0.2.1"
+version = "0.7.1"
 authors = [{ name = "Ryan L. Boyd", email = "ryan@ryanboyd.io" }]
 description = "Analyze, process, and extract from many types of input data. Highly modular/customizable."
 
@@ -23,6 +23,11 @@ dependencies = [
   "contentcoder",
   "archetyper",
   "nltk",
+  # Document readers for the folder source: Word and PDF text extraction
+  # (no OCR). Small pure wheels, so they live in the base install -- a
+  # folder of documents is a core input, not a feature extra.
+  "python-docx>=1.1",
+  "pypdf>=4.0",
   # <6 keeps transformers on 4.x, which the diarization extra (nemo-toolkit 2.x)
   # also requires. sentence-transformers 6 needs transformers>=5 and the two
   # cannot coexist.
@@ -31,7 +36,44 @@ dependencies = [
   # runner, so they belong here rather than in an extra.
   "numpy",
   "pandas",
+  # Draws the word clouds (taters/figures). Small pure wheels everywhere;
+  # >=10.1 is where text measuring settled on `getbbox`, so one code path
+  # serves every version we accept.
+  "pillow>=10.1",
+  # The stats stage's distribution machinery (F, t, studentized range for
+  # Tukey/Games-Howell). Already guaranteed present transitively -- both
+  # librosa and sentence-transformers require it -- so declaring it adds no
+  # install weight; it just makes the reliance honest instead of accidental.
+  "scipy",
   "PyYAML",
+  # The setup wizard (`taters`) is the front door for people who do not write
+  # code, so it has to work straight after `pip install taters`. Both are small,
+  # pure Python, and freeze cleanly under PyInstaller.
+  # 200 KB of pure Python, and it is what "Readability scores" needs -- the
+  # most-picked item in the setup wizard. Small enough that making people
+  # discover an extra to get it costs more than shipping it.
+  #
+  # Held to 0.7.x on purpose, which is the series we actually test against --
+  # textstat has published no 0.8 or 0.9, so if one appears it arrives
+  # untested and this keeps it out until somebody looks. The known danger is
+  # 1.0, whose entire public surface is three classes (Text, Sentence, Word):
+  # every module-level function we call is gone. `analyze_readability` looks
+  # each metric up with getattr and records None when it is missing, so under
+  # 1.0 nothing would raise -- every readability column would come back empty,
+  # for every row, and the run would report success. See
+  # tests/test_text_analyzers.py, which fails loudly if that ever happens.
+  "textstat>=0.7,<0.8",
+  # VADER sentiment: one pure-Python module and two lexicons, ~125 KB, and it
+  # needs no model and no download. Its only dependency is `requests`, which
+  # transformers already brings, so it costs the wheel and nothing else --
+  # cheap enough that making people find an extra would cost more.
+  "vaderSentiment>=3.3.2",
+  "questionary>=2.0",
+  "rich>=13",
+  # Declared directly, not left to questionary to drag in: taters.ui.live
+  # imports prompt_toolkit itself to wrap a question's layout, and depending on
+  # another package's dependency is how you get broken by its next release.
+  "prompt_toolkit>=3.0",
   # NOTE TO SELF:
   # Do NOT list torch/torchaudio here;
   # users must install the right CUDA wheel themselves
@@ -39,6 +81,13 @@ dependencies = [
 
 classifiers = [
   "Programming Language :: Python :: 3",
+  # per-minor rows, because that is what shields.io reads for the "python"
+  # badge -- and 3.14 is deliberately absent: gensim and the diarization
+  # stack have no wheels for it yet, which the install guide also says.
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "License :: OSI Approved :: MIT License",
   "Operating System :: OS Independent",
   "Topic :: Multimedia :: Sound/Audio :: Analysis",
@@ -50,38 +99,145 @@ Homepage = "https://github.com/ryanboyd/taters"
 Issues   = "https://github.com/ryanboyd/taters/issues"
 
 [project.optional-dependencies]
-# Full diarization pipeline (large downloads)
 
-# All of the below, merged into one
+# Everything except diarization -- which is to say, everything that installs
+# from wheels and nothing else.
+#
+# This exists because `all` is a trap for most people. It pulls NeMo, whose
+# dependency tree is large enough that pip will backtrack through half a dozen
+# NeMo releases on a Python version it cannot satisfy, and old enough NeMo
+# releases pin `ctc_segmentation`, which has no wheels on PyPI at all and so
+# must be compiled with Cython. On a machine with Windows Application Control,
+# or without a compiler, that fails -- and it fails for someone who only wanted
+# readability scores.
+#
+# `standard` is the answer to "give me everything that will just work".
+# Glottal features (HRF, NAQ, OQ) -- its own extra, and deliberately not part
+# of `standard` or `all`.
+#
+# `disvoice` is genuinely optional at runtime: `analyze_vocal_acoustics` imports
+# it inside a try/except, only in `mode="advanced"`, and warns and carries on
+# without it. Three features out of dozens.
+#
+# It is separate because of what installing it costs. `disvoice` requires
+# `phonet`, which publishes no wheels and no static metadata, so pip has to
+# build every candidate version just to read its dependencies -- and then
+# backtracks the rest of the resolution around whatever it finds. On Python
+# 3.14 that walk ends at a source-only `contourpy`, which needs Visual Studio
+# to compile, and the install fails with an error naming contourpy. Nothing in
+# it mentions disvoice, and the three features nobody asked for take the whole
+# environment down with them.
+glottal = ["disvoice>=0.1.10"]
+
+# The neural NLP engine the n-gram/POS tools can use instead of NLTK
+# (engine="stanza"). Ships wheels; its language models download separately on
+# first use.
+stanza = ["stanza>=1.7"]
+
+# Training word vectors (word2vec, fastText) and reading their binary
+# formats. Applying a saved model needs numpy alone, so this stays optional:
+# the wizard greys the training step out and names the extra.
+#
+# the marker is the same story as NeMo's. gensim ships wheels up to Python
+# 3.13 and nothing for 3.14, so on 3.14 pip tries to compile it and dies on
+# "Microsoft Visual C++ 14.0 or greater is required" -- 700 lines into the
+# output, after taters itself built fine. with the marker, 3.14 simply doesn't
+# ask for it: the install succeeds, the training step is greyed out, and
+# "Check my setup" says "not available for Python 3.14" instead of "not
+# installed". drop the marker when gensim publishes 3.14 wheels.
+vectors = ["gensim>=4.3.3; python_version < '3.14'"]
+
+standard = [
+  "gensim>=4.3.3; python_version < '3.14'",
+  "nvidia-cudnn-cu12",
+  "praat-parselmouth>=0.4.6",
+  "soundfile",
+  "stanza>=1.7",
+]
+
+# As much as pip can install from wheels, merged into one. Deliberately not
+# literally everything: the diarization git installs follow separately, and the
+# `glottal` extra is left out because it cannot be installed without a C
+# compiler. See docs/install-guide.md.
 all = [
   # <3 is required: NeMo 3.0 removed nemo.collections.asr.models.msdd_models,
   # which the vendored whisper-diarization code imports.
-  "nemo-toolkit[asr]>=2.3.0,<3.0",
+  #
+  # >=2.7 is required for a different reason, and it is a floor rather than a
+  # preference. NeMo 2.6's `[asr]` extra pins `numpy<2.0.0` and requires
+  # `ctc_segmentation`, which is source-only. On a Python new enough that no
+  # `numpy<2` wheel exists for it -- 3.14 and up -- pip resolves that by trying
+  # to *build* numpy 1.26.4, which needs a C toolchain, and reports the failure
+  # as a problem with numpy. Nothing in the message mentions NeMo, and the
+  # install has by then spent minutes backtracking through six NeMo versions to
+  # arrive there. 2.7's `[asr]` extra drops both pins.
+  #
+  # The marker is the other half. Every 2.7.x `[asr]` requires
+  # `nv-one-logger-pytorch-lightning-integration`, which declares
+  # `Requires-Python: >=3.9,<3.14` -- so on 3.14 there is no installable NeMo
+  # at all: 2.7 is capped out by that package and 2.6 by `numpy<2`. Without the
+  # marker pip finds this the long way and ends in `ResolutionImpossible`,
+  # taking the whole install down with it -- including the two thirds of Taters
+  # that have nothing to do with diarization.
+  #
+  # With it, everything else installs and diarization is simply absent, which
+  # `Check my setup` reports by name and with the reason. Drop the marker when
+  # NVIDIA lifts that cap.
+  "nemo-toolkit[asr]>=2.7,<3.0; python_version < '3.14'",
+  "gensim>=4.3.3; python_version < '3.14'",
   "nvidia-cudnn-cu12",
-  "textstat>=0.7,<0.8",
   "praat-parselmouth>=0.4.6",
   "soundfile",
-  "disvoice>=0.1.10"
+  "stanza>=1.7",
+  # `disvoice` is not here either -- see the `glottal` extra. `all` is "as much
+  # as can be installed from wheels", which is what makes it usable; it has
+  # never been literally everything (the diarization git installs are not here
+  # either).
 ]
 
 diarization = [
   # <3 is required: NeMo 3.0 removed nemo.collections.asr.models.msdd_models,
   # which the vendored whisper-diarization code imports.
-  "nemo-toolkit[asr]>=2.3.0,<3.0",
+  #
+  # >=2.7 is required for a different reason, and it is a floor rather than a
+  # preference. NeMo 2.6's `[asr]` extra pins `numpy<2.0.0` and requires
+  # `ctc_segmentation`, which is source-only. On a Python new enough that no
+  # `numpy<2` wheel exists for it -- 3.14 and up -- pip resolves that by trying
+  # to *build* numpy 1.26.4, which needs a C toolchain, and reports the failure
+  # as a problem with numpy. Nothing in the message mentions NeMo, and the
+  # install has by then spent minutes backtracking through six NeMo versions to
+  # arrive there. 2.7's `[asr]` extra drops both pins.
+  #
+  # The marker is the other half. Every 2.7.x `[asr]` requires
+  # `nv-one-logger-pytorch-lightning-integration`, which declares
+  # `Requires-Python: >=3.9,<3.14` -- so on 3.14 there is no installable NeMo
+  # at all: 2.7 is capped out by that package and 2.6 by `numpy<2`. Without the
+  # marker pip finds this the long way and ends in `ResolutionImpossible`,
+  # taking the whole install down with it -- including the two thirds of Taters
+  # that have nothing to do with diarization.
+  #
+  # With it, everything else installs and diarization is simply absent, which
+  # `Check my setup` reports by name and with the reason. Drop the marker when
+  # NVIDIA lifts that cap.
+  "nemo-toolkit[asr]>=2.7,<3.0; python_version < '3.14'",
 ]
 # User-space cuDNN libs for CUDA 12 (handy on many systems)
 cuda = [
   "nvidia-cudnn-cu12",
 ]
-# Readability
-readability = [
-  "textstat>=0.7,<0.8",   # pin to a stable minor window 
-]
+# Kept as an empty alias. textstat moved into the base install, but
+# `pip install "taters[readability]"` appears in older docs and in people's
+# notes, and an unknown extra is a warning rather than a silent no-op.
+readability = []
 
-vocalacoustics = [  
+vocalacoustics = [
   # soundfile is imported at module level by analyze_vocal_acoustics; without it
   # the extra installs but the module cannot be imported.
-  "praat-parselmouth>=0.4.6", "soundfile", "disvoice>=0.1.10"
+  #
+  # `disvoice` is deliberately *not* here -- see the `glottal` extra. It is used
+  # by one optional code path that already degrades gracefully, and requiring it
+  # made a working acoustics install impossible on Python 3.14.
+  "praat-parselmouth>=0.4.6", "soundfile",
 ]
 
 # Everything needed to run the test suite (pip install -e ".[dev]")
@@ -94,6 +250,15 @@ dev = [
 package-dir = {"" = "src"}
 include-package-data = true
 zip-safe = false
+# Ours plus the components under other terms (see THIRD_PARTY_LICENSES.md):
+# a CC BY-NC-SA tokenizer, a BSD-2 diarizer and the Bitstream Vera-licensed
+# font the word clouds use.
+license-files = [
+  "LICENSE",
+  "THIRD_PARTY_LICENSES.md",
+  "src/taters/audio/diarizer/whisper-diarization/LICENSE",
+  "src/taters/figures/fonts/LICENSE",
+]
 
 
 # find packages
@@ -101,6 +266,17 @@ packages = { find = { where = ["src"], include = ["taters*"] } }
 
 
 [tool.setuptools.package-data]
+# Built-in library assets (dictionaries etc.) seeded into ~/.taters/library on
+# first use; see taters/helpers/library.py.
+"taters" = ["data/library/**/*", "text/*.md",
+            # The vendored diarizer's own license travels with its code, and
+            # so must the NeMo config its scripts open at run time -- it was
+            # never listed, so an installed wheel had the code and not the
+            # file it reads.
+            "audio/diarizer/whisper-diarization/LICENSE",
+            "audio/diarizer/whisper-diarization/diarization/msdd/*.yaml",
+            # The one font the word clouds are drawn in, with its licence.
+            "figures/fonts/*"]
 # Because I vendored the diarizer repo under taters/audio/diarizer/whisper-diarization/
 "taters.audio.diarizer" = [
   "whisper-diarization/**/*.yaml",
@@ -117,6 +293,8 @@ packages = { find = { where = ["src"], include = ["taters*"] } }
 # Entry points must target a callable, not __main__
 taters-embeddings = "taters.audio.extract_whisper_embeddings:main"
 taters-transcribe = "taters.audio.transcribe_with_whisper:main"
+# The interactive setup wizard. Bare `taters` is the first thing a new user runs.
+taters = "taters.ui.wizard:main"
 
 
 [tool.pytest.ini_options]
@@ -131,6 +309,18 @@ pythonpath = ["src"]
 # -m "not slow"  : skip the heavy tests by default; `pytest -m slow` runs only those,
 #                  and `pytest -m ""` runs absolutely everything.
 addopts = "-ra --strict-markers -m 'not slow'"
+
+# A single test that runs longer than this has hung, not slowed down: the
+# slowest honest test in the default selection is a couple of seconds. On a
+# hang pytest dumps every thread's traceback -- so the run names the test that
+# stopped instead of sitting silent -- and then exits. This is what stops a
+# suite that should take minutes from quietly running for an hour.
+#
+# It uses the `faulthandler` module in the standard library, so it costs no
+# new dependency. Runs of the heavy tests (`pytest -m slow`) can legitimately
+# exceed it: turn it off for those with `-o faulthandler_timeout=0`.
+faulthandler_timeout = 300
+faulthandler_exit_on_timeout = true
 
 markers = [
   "slow: needs real media, ML models, or minutes of runtime (deselected by default)",
