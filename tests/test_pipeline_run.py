@@ -669,8 +669,12 @@ def test_the_resolved_dial_feeds_the_var_templates_too(tmp_path):
         run_preset(preset, out_manifest=tmp_path / "m.json")
         assert seen["workers"] == 2, "vars.workers must reach the step"
         seen.clear()
-        run_preset(preset, workers=5, out_manifest=tmp_path / "m.json")
-        assert seen["workers"] == 5, "--workers must override vars.workers"
+        # 1, not 5: the dial is capped at the core count, so on a two-core
+        # CI runner asking for 5 resolves to 4 and this read as a bug in the
+        # override. one can never be capped, and still differs from the 2 in
+        # `vars`, which is the whole thing being tested.
+        run_preset(preset, workers=1, out_manifest=tmp_path / "m.json")
+        assert seen["workers"] == 1, "--workers must override vars.workers"
     finally:
         rp.resolve_call = orig
 

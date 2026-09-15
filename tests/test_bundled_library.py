@@ -26,8 +26,21 @@ CITATIONS = ROOT / "docs" / "guides" / "bundled-dictionaries.md"
 
 
 def _shipped(kind_id: str) -> list[Path]:
+    """
+    What ships for this kind, or nothing at all.
+
+    The folder can be missing entirely rather than merely empty: the .dicx
+    files are gitignored, git does not track empty directories, and so a fresh
+    clone has no `dictionaries/` at all. `iterdir()` raises on that and
+    `glob()` does not, which is why CI failed here and the local tree never
+    did. `kind_dir()` already treats a missing shipped folder as "nothing to
+    seed", so this agrees with it.
+    """
     kind = lib.KINDS[kind_id]
-    return sorted(f for f in (SHIPPED / kind_id).iterdir()
+    folder = SHIPPED / kind_id
+    if not folder.is_dir():
+        return []
+    return sorted(f for f in folder.iterdir()
                   if f.is_file() and f.suffix.lower() in kind.suffixes)
 
 

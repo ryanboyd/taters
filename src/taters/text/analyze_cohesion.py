@@ -73,6 +73,22 @@ CLASS_ORDER = ("all", "cw", "fw", "noun", "verb", "adj", "adv",
                "pronoun", "argument")
 
 
+#: Whether the WordNet download has been attempted this process. The answer
+#: cannot change mid-run, and `_adverb_is_content` is called once per adverb
+#: per sentence -- asking the filesystem every time would be thousands of
+#: pointless stats on a long corpus.
+_WORDNET: Dict[str, bool] = {}
+
+
+def _wordnet_ready(ensure) -> bool:
+    if "ok" not in _WORDNET:
+        try:
+            _WORDNET["ok"] = bool(ensure(verbose=False))
+        except Exception:
+            _WORDNET["ok"] = False
+    return _WORDNET["ok"]
+
+
 def _adverb_is_content(word: str, lemma: str) -> bool:
     """
     Deadjectival adverbs ("quickly", "happily") count as content words;
@@ -84,7 +100,15 @@ def _adverb_is_content(word: str, lemma: str) -> bool:
     """
     if not word.endswith("ly") or len(word) <= 3:
         return False
+    # WordNet has to be *there* before we ask it anything. without this the
+    # lookup below raises LookupError, the except swallows it, and every
+    # deadjectival adverb silently becomes a function word -- wrong numbers,
+    # no error, on any machine that has never downloaded the corpus.
+    from ..helpers.nltk_data import ensure_wordnet
     from nltk.corpus import wordnet
+
+    if not _wordnet_ready(ensure_wordnet):
+        return False
 
     stem = word[:-2]
     candidates = [stem]

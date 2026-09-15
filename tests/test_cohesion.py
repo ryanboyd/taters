@@ -484,3 +484,55 @@ def test_the_stanza_model_load_announces_itself(monkeypatch):
     measuring_idx = next(i for i, e in enumerate(events)
                          if e == "measuring cohesion")
     assert stanza_idx < measuring_idx
+
+
+def test_cohesion_asks_for_the_wordnet_data_before_it_uses_wordnet():
+    """
+    `_adverb_is_content` decides whether an `-ly` adverb came from an
+    adjective by asking WordNet. On a machine that has never downloaded the
+    corpus that lookup raises LookupError, the `except Exception` around it
+    swallows the error, and **every deadjectival adverb silently becomes a
+    function word** -- wrong cohesion numbers, no warning, no failure. CI found
+    it; no local run could, because a developer machine has the corpus.
+
+    So the module has to ask for the data first, the way `nltk_data`'s own
+    docstring says anything needing WordNet should. This asserts the ask
+    happens, which is the part that cannot be observed from the output.
+    """
+    from taters.text import analyze_cohesion as ac
+
+    asked = []
+    real = ac._wordnet_ready
+    ac._WORDNET.clear()
+    try:
+        ac._wordnet_ready = lambda ensure: asked.append(ensure) or True
+        ac.classify_sentence([("quickly", "quickly", "RB")])
+    finally:
+        ac._wordnet_ready = real
+        ac._WORDNET.clear()
+
+    assert asked, "the WordNet data was used without ever being ensured"
+    assert asked[0].__name__ == "ensure_wordnet", asked[0]
+
+
+def test_a_missing_wordnet_does_not_pretend_every_adverb_is_a_function_word():
+    """
+    The fallback still has to be safe -- we cannot download on a machine with
+    no network -- but it must be reached by *deciding*, not by an exception
+    escaping from a lookup nobody guarded.
+    """
+    from taters.text import analyze_cohesion as ac
+
+    real = ac._wordnet_ready
+    ac._WORDNET.clear()
+    try:
+        ac._wordnet_ready = lambda ensure: False       # the corpus is not there
+        classes = ac.classify_sentence([("quickly", "quickly", "RB"),
+                                        ("cats", "cat", "NNS")])
+    finally:
+        ac._wordnet_ready = real
+        ac._WORDNET.clear()
+
+    assert classes["adv"] == ["quickly"], "it is still an adverb"
+    assert "quickly" not in classes["cw"], "without WordNet we cannot claim it is content"
+    assert classes["noun"] == ["cat"], "the rest of the sentence is unaffected"

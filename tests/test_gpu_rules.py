@@ -215,13 +215,29 @@ def test_a_probe_failure_on_an_explicit_cuda_is_raised(monkeypatch):
         gpu.resolve_device("cuda", probe=broken)
 
 
-def test_a_probe_failure_on_the_cpu_is_raised_too():
-    """There is nowhere left to fall back to, so it has to be reported."""
-    def broken():
-        raise RuntimeError("nope")
+def test_asking_for_the_cpu_never_runs_the_probe():
+    """
+    This used to assert the opposite -- "there is nowhere left to fall back
+    to, so it has to be reported" -- and the intent was right but the probe is
+    not what that intent assumed. Every caller's probe is a *CUDA* probe
+    (`torch.zeros(1, device="cuda")`); there is no such thing as a CPU probe
+    in this codebase. So running it after resolving to the CPU asks a question
+    about hardware nobody is about to use, and on a CPU-only build of torch it
+    does not return an answer at all -- it raises "Torch not compiled with
+    CUDA enabled" and takes the run down.
 
-    with pytest.raises(RuntimeError):
-        gpu.resolve_device("cpu", probe=broken)
+    It survived because the old test passed a probe that raised whatever it
+    was asked, and because a machine whose torch has CUDA never notices. CI on
+    a CPU-only runner failed about thirty tests on it.
+    """
+    called = []
+
+    def probe():
+        called.append(True)
+        raise RuntimeError("a CUDA probe, on a machine with no CUDA")
+
+    assert gpu.resolve_device("cpu", probe=probe) == ("cpu", None)
+    assert not called, "the CPU answer does not depend on the GPU working"
 
 
 def test_the_two_backends_are_asked_separately(monkeypatch):

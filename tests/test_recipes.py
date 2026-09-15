@@ -13,6 +13,8 @@ user finding out mid-run.
 
 from __future__ import annotations
 
+import importlib.util
+
 import pytest
 from preset_checks import templates_in, underlying
 
@@ -662,6 +664,8 @@ def test_a_gather_scans_exactly_where_its_producer_writes(recipe):
         )
 
 
+@pytest.mark.skipif(importlib.util.find_spec("parselmouth") is None,
+                    reason="needs praat-parselmouth (pip install taters[vocalacoustics])")
 def test_the_acoustics_mode_description_offers_only_real_modes():
     """Round-2 cut list: the description offered "full", which the analyzer's
     Mode literal does not contain -- it silently behaved as "simple", the
@@ -678,6 +682,21 @@ def test_the_acoustics_mode_description_offers_only_real_modes():
     assert offered <= real, f"description offers {offered - real} which do not exist"
 
 
+def _skip_if_target_needs_something_missing(recipe):
+    """
+    Some targets import an optional package at module scope -- acoustics needs
+    parselmouth -- so loading them to read their parameters fails where that
+    package is not installed. That is a fact about the environment, not about
+    the recipe, so the test steps aside rather than failing.
+    """
+    from taters.ui.wizard import EXTRA_PROBES
+
+    for extra, probes in EXTRA_PROBES.items():
+        if extra in recipe.extras and any(
+                importlib.util.find_spec(m) is None for m in probes):
+            pytest.skip(f"{recipe.id} needs pip install \"taters[{extra}]\"")
+
+
 def test_every_offered_setting_explains_itself(recipe):
     """
     Reported: "most of the parameters don't seem to have a description
@@ -687,6 +706,7 @@ def test_every_offered_setting_explains_itself(recipe):
     """
     from taters.ui.wizard import describe, is_wired, load_target
 
+    _skip_if_target_needs_something_missing(recipe)
     spec = describe(load_target(recipe.target))
     bare = [p.name for p in spec.params
             if not p.desc and not p.required and not is_wired(recipe, p.name)]

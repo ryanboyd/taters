@@ -182,8 +182,13 @@ def resolve_device(
         )
 
     if asked == "cpu":
-        if probe is not None:
-            probe()             # nowhere left to fall back to, so let it raise
+        # no probe. the probe exists to find out whether the GPU really works,
+        # and somebody who asked for the CPU has said they do not care -- every
+        # caller hands us a *CUDA* probe, so running it here asks a question
+        # nobody wanted the answer to. on a CPU-only build of torch it does not
+        # merely waste time, it raises "Torch not compiled with CUDA enabled"
+        # and takes the run down. found by CI; invisible on a machine whose
+        # torch happens to have CUDA in it, which is why it survived this long.
         return "cpu", None
 
     if asked == "cuda":

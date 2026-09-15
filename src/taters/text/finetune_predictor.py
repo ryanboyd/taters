@@ -1223,7 +1223,16 @@ def _outcome_lines(doc: dict, tasks, results, figures: Dict[str, Path], root: Pa
 
 def _methods_paragraph(doc: dict, tasks) -> str:
     t, e = doc["training"], doc["encoder"]
-    kinds = [f"{n} ({'regression' if s['task'] == 'regression' else f'{len(s['classes'])}-class classification'})"
+    # built in two steps rather than one nested f-string: reusing the same
+    # quote inside a replacement field only became legal in 3.12 (PEP 701),
+    # and this file has to import on 3.11. CI caught it as a SyntaxError at
+    # collection, which takes the whole run down rather than one test.
+    def _kind(spec) -> str:
+        if spec["task"] == "regression":
+            return "regression"
+        return f"{len(spec['classes'])}-class classification"
+
+    kinds = [f"{n} ({_kind(s)})"
              for n, s in tasks.items()]
     multi = len(tasks) > 1
     return (

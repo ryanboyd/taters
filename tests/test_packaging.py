@@ -586,3 +586,38 @@ def test_the_renderer_does_not_import_pillow_at_module_scope():
     a machine without it still runs every analysis and is told, once, that
     the figures were skipped."""
     assert "PIL" not in top_level_imports(SRC / "figures" / "render.py")
+
+
+def test_no_source_file_needs_a_python_newer_than_we_claim():
+    """
+    `finetune_predictor` carried an f-string that reused the same quote inside
+    a replacement field. That only became legal in 3.12 (PEP 701), so on 3.11
+    it was a SyntaxError at import -- which takes the whole test run down at
+    collection rather than failing one test, and which nothing local caught
+    because the developer's Python is newer than the floor we advertise.
+
+    `ast.parse(feature_version=...)` does NOT catch it: feature_version tunes
+    only a handful of grammar decisions and f-string quoting is not one of
+    them. So this reads the declared floor out of pyproject and refuses the
+    construct textually.
+    """
+    import re
+
+    floor = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"]["requires-python"]
+    lowest = tuple(int(n) for n in re.search(r"(\d+)\.(\d+)", floor).groups())
+    if lowest >= (3, 12):
+        pytest.skip(f"requires-python is {floor}; nested f-string quotes are legal")
+
+    offenders = []
+    for path in SRC.rglob("*.py"):
+        if "diarizer" in path.parts:          # vendored, not ours to restyle
+            continue
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            for quote in ("'", '"'):
+                # an f-string opened with `quote` whose replacement field uses
+                # the same `quote` again before the string closes
+                if re.search(rf"f{quote}[^{quote}]*\{{[^}}]*{quote}", line):
+                    offenders.append(f"{path.relative_to(PROJECT_ROOT)}:{number}")
+    assert not offenders, (
+        f"these reuse a quote inside an f-string, which needs 3.12 but "
+        f"requires-python says {floor}: {offenders}")

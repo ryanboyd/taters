@@ -52,4 +52,29 @@ jobs:
       - name: Tests
         # test_hashbrowns is the demo's own suite and is not part of the
         # contract the rest of the code keeps.
-        run: pytest -q --ignore=tests/test_hashbrowns.py
+        #
+        # the counts go to the run summary as well as the log: the README
+        # badge can only ever say pass or fail, so without this "is it one
+        # test or forty?" means opening the log and scrolling.
+        run: |
+          set -o pipefail
+          pytest -q --ignore=tests/test_hashbrowns.py 2>&1 | tee pytest.out
+        continue-on-error: false
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Python ${{ matrix.python }}"
+            echo
+            tail -1 pytest.out || echo "pytest produced no output"
+            echo
+            if grep -q '^FAILED\|^ERROR' pytest.out; then
+              echo "<details><summary>What failed</summary>"
+              echo
+              echo '```'
+              grep '^FAILED\|^ERROR' pytest.out | head -40
+              echo '```'
+              echo "</details>"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
