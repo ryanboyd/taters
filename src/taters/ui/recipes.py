@@ -60,6 +60,8 @@ CAPABILITIES: Dict[str, str] = {
     "stats_metadata_csv": "your spreadsheet's grouping/outcome columns, one row per analyzed text",
     "analysis_table_csv": "one wide table joining every feature table with your metadata",
     "mem_loadings_csv": "the topic model's term-by-theme loadings",
+    "lda_loadings_csv": "the LDA topic model's term-by-topic loadings",
+    "nmf_loadings_csv": "the NMF topic model's term-by-factor loadings",
     "transformer_embeddings_csv": "row-level transformer embeddings",
     "adapted_encoder_json": "a text encoder adapted to the corpus",
     "text_predictor_json": "a fine-tuned text predictor",
@@ -327,6 +329,11 @@ class Recipe:
     requires: FrozenSet[str] = frozenset()
     produces: FrozenSet[str] = frozenset()
     auto_with: Tuple[str, ...] = ()
+    #: What the options screen calls a setting *in this step*, when the shared
+    #: wording in `SETTING_LABELS` would be wrong here. `topic_count_sweep`
+    #: needs it: its `engine` is which topic model to fit, not who tags.
+    labels: Dict[str, str] = field(default_factory=dict)
+
     extras: Tuple[str, ...] = ()
     needs_ffmpeg: bool = False
     gpu_use: Optional[str] = None       # None -> inferred; see `resolved_gpu_use`
@@ -541,6 +548,43 @@ _LEMMATIZE_VAR = {
             "before any stop list.",
 }
 
+#: The settings that decide what a topic model's *vocabulary* is, named per
+#: model rather than shared.
+#:
+#: These used to be shared with the document-term-matrix step, and had to be:
+#: the model scanned a matrix somebody else built, and a recorded setting that
+#: disagreed with that matrix would have been a lie. Each model builds its own
+#: matrix now, so nothing can disagree -- and sharing them actively gets in the
+#: way, because the whole reason each model has its own matrix is that they
+#: want different ones. One study can reasonably want LDA over lemmatized
+#: unigrams and NMF over raw bigrams.
+#:
+#: The tokenizer settings (`engine`, `tokenizer`, `stanza_lang`) stay shared:
+#: which toolkit splits and tags the text is a decision about the corpus and
+#: the machine, not about any one model, and Stanza's download is shared anyway.
+def _vocab_vars(prefix: str) -> Dict[str, dict]:
+    return {
+        f"{prefix}_lemmatize": dict(_LEMMATIZE_VAR),
+        f"{prefix}_pos_tagged": dict(_POS_TAGGED_VAR),
+        f"{prefix}_keep_punctuation": dict(_KEEP_PUNCTUATION_VAR),
+        f"{prefix}_ngram_n": {
+            "default": 1,
+            "desc": "Longest phrase to consider as a term: 1 for single "
+                    "words, 2 to let two-word phrases compete with them. "
+                    "Per model, so one can use phrases and another not.",
+        },
+    }
+
+
+def _vocab_with(prefix: str) -> Dict[str, object]:
+    return {
+        "lemmatize": f"{{{{var:{prefix}_lemmatize}}}}",
+        "pos_tagged": f"{{{{var:{prefix}_pos_tagged}}}}",
+        "keep_punctuation": f"{{{{var:{prefix}_keep_punctuation}}}}",
+        "ngram_n": f"{{{{var:{prefix}_ngram_n}}}}",
+    }
+
+
 #: What an untouched pipeline applies, and what the stoplist picker opens
 #: with: punctuation characters and English. Never all 22 languages -- see
 #: the recipe's comment.
@@ -566,6 +610,37 @@ _KEEP_PUNCTUATION_VAR = {
     "desc": "Count punctuation (and emoticons) as terms. Off: only tokens "
             "with a letter or digit are counted.",
 }
+
+#: What the options screen calls a setting, when the parameter's own name is a
+#: programmer's word for it.
+#:
+#: The API keeps its names and the wizard gets these, and that split is the
+#: right way round rather than a compromise: somebody reading ``engine`` in a
+#: docstring is writing code and has the signature in front of them, and
+#: somebody meeting it on the options screen is not.
+#:
+#: Renaming the parameters instead would break every saved pipeline that names
+#: one -- loudly for a ``with:`` key, and *silently* for a shared variable,
+#: where the old name would simply go unread and somebody's setting be lost.
+#:
+#: Only names that genuinely do not say what they are belong here. `encoding`,
+#: `workers` and `rounding` already mean what they look like.
+SETTING_LABELS: Dict[str, str] = {
+    "engine": "tagging engine",
+    "stoplist_paths": "stop word lists",
+    "tokenizer": "word splitter",
+    "stanza_lang": "stanza language",
+    "joiner": "text joiner",
+    "pattern": "which files to read",
+    "weighting": "how cells are counted",
+    "pca": "reduce to components",
+    "zscore": "standardize predictors",
+    "stratify": "balance the folds",
+    "pooling": "how tokens become one vector",
+    "precision": "number precision",
+    "layers": "which encoder layers",
+}
+
 
 #: Shared for the same reason as lemmatize: every text-preparing step in a
 #: pipeline must read text the same way, or a vocabulary built by one step is
@@ -1701,6 +1776,13 @@ RECIPES: List[Recipe] = [
     ),
     Recipe(
         id="topic_model_mem",
+        # the same stop lists the n-gram step applies, and for the same
+        # reason: left unfiltered, the most frequent words in any corpus are
+        # function words, and every topic comes out as "the, and, of". this
+        # step builds its own frequency list, so it has to ask for them
+        # itself -- it used to inherit them from a shared n-gram step.
+        library={"stoplist_paths": "stoplists"},
+        library_defaults={"stoplist_paths": _DEFAULT_STOPLISTS},
         feature_table=True,
         vars={
             **_FEATURES_DIR_VAR,
@@ -1708,11 +1790,8 @@ RECIPES: List[Recipe] = [
             # with the matrix step. the model file records these settings so
             # the themes can be re-applied to new texts later, and a recorded
             # setting that disagrees with the matrix would be a lie.
-            "lemmatize": _LEMMATIZE_VAR,
-            "keep_punctuation": _KEEP_PUNCTUATION_VAR,
-            "pos_tagged": _POS_TAGGED_VAR,
+            **_vocab_vars("mem"),
             **_ENGINE_VARS,
-            **_MATRIX_SHAPE_VARS,
             "mem_components": {
                 "default": 0,
                 "desc": "How many themes to keep. 0 decides by the rule "
@@ -1729,11 +1808,16 @@ RECIPES: List[Recipe] = [
                         "real corpus gave 101 themes).",
             },
         },
-        # the fit itself is pure linear algebra over the matrix file -- no
-        # tokenizer and no model runs here (the engine vars get recorded, not
-        # exercised), so we neither offer nor store `device`.
-        gpu_use="cpu",
-        param_when={"stanza_lang": ("engine", "stanza"),
+        # the fit is pure linear algebra, but the step is not: it builds its
+        # own frequency list and matrix now, which means it tokenizes -- and
+        # with engine="stanza" that loads a model that can sit on the GPU. this
+        # said "cpu" for a while after the matrix moved in here, which was a
+        # leftover from when somebody else did the tokenizing. same declaration
+        # as `ngram_frequencies` and `doc_term_matrix`, because it now does
+        # exactly what they do.
+        gpu_use="gpu_one_model",
+        # `device` only means anything under stanza, same as every other step
+        param_when={**_ENGINE_PARAM_WHEN,
                     # the rule decides nothing once a count is given.
                     "retain": ("n_components", 0)},
         label="Topic model: meaning extraction method",
@@ -1747,39 +1831,48 @@ RECIPES: List[Recipe] = [
         target="taters.text.topic_model_mem:topic_model_mem",
         scope="global",
         save_as="mem_topics",
-        requires=frozenset({"doc_term_matrix_csv", "ngram_freq_csv"}),
+        requires=frozenset({"unified_transcripts_csv"}),
         produces=frozenset({"mem_loadings_csv"}),
         auto_with=("topic_model_mem_wordclouds",),
-        sources=("media", "txt_dir", "csv"),
-        # only reads the matrix and frequency-list artifacts -- never the
-        # transcript table -- so we must not rewrite its input binding for
-        # text sources.
-        text_input=False,
+        # it reads the corpus and builds its own frequency list and matrix,
+        # into a `<stem>_matrix` folder beside its results. it used to be wired to a
+        # shared matrix step, which is wrong as soon as there is more than one
+        # topic model: LDA needs counts, NMF wants tf-idf, MEM takes either,
+        # and the shared matrix's filename carried only the weighting -- so two
+        # of them asking for different vocabularies rebuilt over each other.
+        **_TEXT_STEP,
         with_={
-            "dtm_csv": "{{doc_term_matrix}}",
-            "freq_list_csv": "{{ngram_freqs}}",
-            "out_features_csv": "{{var:features_dir}}/topic_model_mem.csv",
+            **_TEXT_INPUT_WITH,
+            "out_features_csv": "{{var:features_dir}}/topic_model_mem/topic_model_mem.csv",
             # named here rather than left to the analyzer's default, because
             # the record needs to know where the fitted model went: a ridge
             # fitted on these themes carries that file so it can score a
             # corpus the themes were never fitted on.
             "out_model_json":
-                "{{var:features_dir}}/topic_model_mem_model.json",
+                "{{var:features_dir}}/topic_model_mem/topic_model_mem_model.json",
             # named for the same reason: a step of its own draws the theme
             # word clouds from this file.
             "out_loadings_csv":
-                "{{var:features_dir}}/topic_model_mem_loadings.csv",
+                "{{var:features_dir}}/topic_model_mem/topic_model_mem_loadings.csv",
             "n_components": "{{var:mem_components}}",
             "retain": "{{var:mem_retain}}",
             "encoding": "utf-8-sig",
             "overwrite_existing": "{{var:overwrite_existing}}",
-            "lemmatize": "{{var:lemmatize}}",
-            "keep_punctuation": "{{var:keep_punctuation}}",
-            "pos_tagged": "{{var:pos_tagged}}",
+            **_vocab_with("mem"),
             "engine": "{{var:engine}}",
             "tokenizer": "{{var:tokenizer}}",
             "stanza_lang": "{{var:stanza_lang}}",
-            **_MATRIX_SHAPE_WITH,
+            # the step declares `gpu_one_model` because it tokenizes, so it has
+            # to be told where to run -- without this it took "auto" whatever
+            # the shared device setting said.
+            "device": "{{var:device}}",
+            # deliberately *not* `_MATRIX_SHAPE_WITH`: those variables are
+            # the document-term-matrix step's, and MEM shared them back when it
+            # scanned the matrix that step built. It builds its own now, so
+            # sharing them only means changing one screen changes the other's
+            # model -- and it would override this step's own defaults, which
+            # differ on purpose (a topic model ranks its vocabulary by how many
+            # documents use a term, a feature table by raw count).
         },
     ),
     Recipe(
@@ -1808,7 +1901,7 @@ RECIPES: List[Recipe] = [
             "model_json": "",
             "device": "{{var:device}}",
             "out_features_csv":
-                "{{var:features_dir}}/topic_model_mem_applied.csv",
+                "{{var:features_dir}}/topic_model_mem/topic_model_mem_applied.csv",
         },
     ),
     Recipe(
@@ -1826,13 +1919,287 @@ RECIPES: List[Recipe] = [
         sources=("media", "txt_dir", "csv"),
         gpu_use="cpu",
         with_={
-            "loadings_csv": "{{var:features_dir}}/topic_model_mem_loadings.csv",
+            "loadings_csv": "{{var:features_dir}}/topic_model_mem/topic_model_mem_loadings.csv",
             "out_dir": "{{var:features_dir}}/figures/wordclouds/topic_model_mem",
             "enabled": "{{var:wordclouds}}",
             "overwrite_existing": "{{var:overwrite_existing}}",
         },
         hidden=("loadings_csv", "out_dir"),
         vars={**_FEATURES_DIR_VAR, **_WORDCLOUD_VARS},
+    ),
+    Recipe(
+        id="topic_model_lda",
+        # the same stop lists the n-gram step applies, and for the same
+        # reason: left unfiltered, the most frequent words in any corpus are
+        # function words, and every topic comes out as "the, and, of". this
+        # step builds its own frequency list, so it has to ask for them
+        # itself -- it used to inherit them from a shared n-gram step.
+        library={"stoplist_paths": "stoplists"},
+        library_defaults={"stoplist_paths": _DEFAULT_STOPLISTS},
+        feature_table=True,
+        vars={
+            **_FEATURES_DIR_VAR,
+            # the same settings the matrix is built from, because this step
+            # builds it -- and the model records them so the topics can be
+            # applied to another corpus later.
+            **_vocab_vars("lda"),
+            **_ENGINE_VARS,
+            "lda_topics": {
+                "default": 20,
+                "desc": "How many topics to fit. There is no right answer -- "
+                        "more topics means narrower ones. Fit a few and read "
+                        "the words before settling.",
+            },
+            "lda_passes": {
+                "default": 10,
+                "desc": "How many times to go over the corpus. More is "
+                        "steadier and slower; 10 is plenty for most corpora.",
+            },
+        },
+        # it tokenizes to build its own matrix, and under engine="stanza" that
+        # is a model that can sit on the GPU -- same as the n-gram family.
+        gpu_use="gpu_one_model",
+        param_when={"stanza_lang": ("engine", "stanza")},
+        label="Topic model: latent Dirichlet allocation",
+        help="Topics from the corpus (LDA, the topic model most papers mean): a share of each topic per speaker, the words behind each topic, and a saved model.",
+        text_help="Topics from the corpus (LDA, the topic model most papers mean): a share of each topic per text, the words behind each topic, and a saved model.",
+        call="potato.text.topic_model_lda",
+        target="taters.text.topic_model_lda:topic_model_lda",
+        scope="global",
+        save_as="lda_topics",
+        requires=frozenset({"unified_transcripts_csv"}),
+        produces=frozenset({"lda_loadings_csv"}),
+        auto_with=("topic_model_lda_wordclouds",),
+        **_TEXT_STEP,
+        with_={
+            **_TEXT_INPUT_WITH,
+            "out_features_csv": "{{var:features_dir}}/topic_model_lda/topic_model_lda.csv",
+            # named rather than defaulted: the record has to know where the
+            # fitted model went, so a ridge trained on these columns can carry
+            # it and score a corpus the topics were never fitted on.
+            "out_model_json": "{{var:features_dir}}/topic_model_lda/topic_model_lda_model.json",
+            # named for the same reason: the word-cloud step reads this file.
+            "out_loadings_csv": "{{var:features_dir}}/topic_model_lda/topic_model_lda_loadings.csv",
+            "n_topics": "{{var:lda_topics}}",
+            "passes": "{{var:lda_passes}}",
+            "encoding": "utf-8-sig",
+            "overwrite_existing": "{{var:overwrite_existing}}",
+            **_vocab_with("lda"),
+            "engine": "{{var:engine}}",
+            "tokenizer": "{{var:tokenizer}}",
+            "stanza_lang": "{{var:stanza_lang}}",
+            "device": "{{var:device}}",
+        },
+    ),
+    Recipe(
+        id="topic_model_lda_apply",
+        feature_table=True,
+        label="Score texts with saved LDA topics",
+        help="Measure a new corpus with topics fitted somewhere else.",
+        call="potato.text.apply_lda_model",
+        target="taters.text.topic_model_lda:apply_lda_model",
+        scope="global",
+        save_as="lda_topics_applied",
+        user_facing=False,
+        requires=frozenset({"unified_transcripts_csv"}),
+        gpu_use="gpu_one_model",
+        library={"model_json": "models"},
+        **_TEXT_STEP,
+        with_={
+            **_TEXT_INPUT_WITH,
+            "model_json": "",
+            "out_features_csv": "{{var:features_dir}}/topic_model_lda/topic_model_lda_applied.csv",
+            "encoding": "utf-8-sig",
+            "overwrite_existing": "{{var:overwrite_existing}}",
+            "device": "{{var:device}}",
+        },
+        vars={**_FEATURES_DIR_VAR},
+    ),
+    Recipe(
+        id="topic_model_lda_wordclouds",
+        label="Word clouds of the topics",
+        help="One word cloud per LDA topic: the words that make it up, sized by how much they belong to it",
+        call="potato.figures.theme_wordclouds",
+        target="taters.figures.wordclouds:theme_wordclouds",
+        scope="global",
+        save_as="lda_topics_wordclouds",
+        user_facing=False,
+        requires=frozenset({"lda_loadings_csv"}),
+        sources=("media", "txt_dir", "csv"),
+        gpu_use="cpu",
+        with_={
+            "loadings_csv": "{{var:features_dir}}/topic_model_lda/topic_model_lda_loadings.csv",
+            "out_dir": "{{var:features_dir}}/figures/wordclouds/topic_model_lda",
+            "enabled": "{{var:wordclouds}}",
+            "overwrite_existing": "{{var:overwrite_existing}}",
+        },
+        hidden=("loadings_csv", "out_dir"),
+        vars={**_FEATURES_DIR_VAR, **_WORDCLOUD_VARS},
+    ),
+    Recipe(
+        id="topic_model_nmf",
+        # the same stop lists the n-gram step applies, and for the same
+        # reason: left unfiltered, the most frequent words in any corpus are
+        # function words, and every topic comes out as "the, and, of". this
+        # step builds its own frequency list, so it has to ask for them
+        # itself -- it used to inherit them from a shared n-gram step.
+        library={"stoplist_paths": "stoplists"},
+        library_defaults={"stoplist_paths": _DEFAULT_STOPLISTS},
+        feature_table=True,
+        vars={
+            **_FEATURES_DIR_VAR,
+            # the same settings the matrix is built from, because this step
+            # builds it -- and the model records them so the topics can be
+            # applied to another corpus later.
+            **_vocab_vars("nmf"),
+            **_ENGINE_VARS,
+            "nmf_factors": {
+                "default": 20,
+                "desc": "How many factors to fit. Same trade-off as any topic "
+                        "model: more factors means narrower ones.",
+            },
+        },
+        # it tokenizes to build its own matrix, and under engine="stanza" that
+        # is a model that can sit on the GPU -- same as the n-gram family.
+        gpu_use="gpu_one_model",
+        param_when={"stanza_lang": ("engine", "stanza")},
+        label="Topic model: non-negative matrix factorization",
+        help="Topics from the corpus (NMF, often sharper on short texts): a weight for each factor per speaker, the words behind each topic, and a saved model.",
+        text_help="Topics from the corpus (NMF, often sharper on short texts): a weight for each factor per text, the words behind each topic, and a saved model.",
+        call="potato.text.topic_model_nmf",
+        target="taters.text.topic_model_nmf:topic_model_nmf",
+        scope="global",
+        save_as="nmf_topics",
+        requires=frozenset({"unified_transcripts_csv"}),
+        produces=frozenset({"nmf_loadings_csv"}),
+        auto_with=("topic_model_nmf_wordclouds",),
+        **_TEXT_STEP,
+        with_={
+            **_TEXT_INPUT_WITH,
+            "out_features_csv": "{{var:features_dir}}/topic_model_nmf/topic_model_nmf.csv",
+            # named rather than defaulted: the record has to know where the
+            # fitted model went, so a ridge trained on these columns can carry
+            # it and score a corpus the topics were never fitted on.
+            "out_model_json": "{{var:features_dir}}/topic_model_nmf/topic_model_nmf_model.json",
+            # named for the same reason: the word-cloud step reads this file.
+            "out_loadings_csv": "{{var:features_dir}}/topic_model_nmf/topic_model_nmf_loadings.csv",
+            "n_topics": "{{var:nmf_factors}}",
+            "encoding": "utf-8-sig",
+            "overwrite_existing": "{{var:overwrite_existing}}",
+            **_vocab_with("nmf"),
+            "engine": "{{var:engine}}",
+            "tokenizer": "{{var:tokenizer}}",
+            "stanza_lang": "{{var:stanza_lang}}",
+            "device": "{{var:device}}",
+        },
+    ),
+    Recipe(
+        id="topic_model_nmf_apply",
+        feature_table=True,
+        label="Score texts with saved NMF topics",
+        help="Measure a new corpus with topics fitted somewhere else.",
+        call="potato.text.apply_nmf_model",
+        target="taters.text.topic_model_nmf:apply_nmf_model",
+        scope="global",
+        save_as="nmf_topics_applied",
+        user_facing=False,
+        requires=frozenset({"unified_transcripts_csv"}),
+        gpu_use="gpu_one_model",
+        library={"model_json": "models"},
+        **_TEXT_STEP,
+        with_={
+            **_TEXT_INPUT_WITH,
+            "model_json": "",
+            "out_features_csv": "{{var:features_dir}}/topic_model_nmf/topic_model_nmf_applied.csv",
+            "encoding": "utf-8-sig",
+            "overwrite_existing": "{{var:overwrite_existing}}",
+            "device": "{{var:device}}",
+        },
+        vars={**_FEATURES_DIR_VAR},
+    ),
+    Recipe(
+        id="topic_model_nmf_wordclouds",
+        label="Word clouds of the factors",
+        help="One word cloud per NMF factor: the words that make it up, sized by their weight",
+        call="potato.figures.theme_wordclouds",
+        target="taters.figures.wordclouds:theme_wordclouds",
+        scope="global",
+        save_as="nmf_topics_wordclouds",
+        user_facing=False,
+        requires=frozenset({"nmf_loadings_csv"}),
+        sources=("media", "txt_dir", "csv"),
+        gpu_use="cpu",
+        with_={
+            "loadings_csv": "{{var:features_dir}}/topic_model_nmf/topic_model_nmf_loadings.csv",
+            "out_dir": "{{var:features_dir}}/figures/wordclouds/topic_model_nmf",
+            "enabled": "{{var:wordclouds}}",
+            "overwrite_existing": "{{var:overwrite_existing}}",
+        },
+        hidden=("loadings_csv", "out_dir"),
+        vars={**_FEATURES_DIR_VAR, **_WORDCLOUD_VARS},
+    ),
+    Recipe(
+        id="topic_count_sweep",
+        # the same stop lists the n-gram step applies, and for the same
+        # reason: left unfiltered, the most frequent words in any corpus are
+        # function words, and every topic comes out as "the, and, of". this
+        # step builds its own frequency list, so it has to ask for them
+        # itself -- it used to inherit them from a shared n-gram step.
+        library={"stoplist_paths": "stoplists"},
+        library_defaults={"stoplist_paths": _DEFAULT_STOPLISTS},
+        label="Topic model: how many topics?",
+        help="Fit a topic model at several topic counts and score how well "
+             "each one's topics hang together, so you can pick a number by "
+             "looking at a curve and the words rather than by guessing.",
+        text_help="Fit a topic model at several topic counts and score how "
+                  "well each one's topics hang together, so you can pick a "
+                  "number by looking at a curve and the words.",
+        call="potato.text.sweep_topic_count",
+        target="taters.text.topic_count_sweep:sweep_topic_count",
+        scope="global",
+        save_as="topic_sweep",
+        requires=frozenset({"unified_transcripts_csv"}),
+        # it tokenizes to build its one shared matrix, same as the models it
+        # is choosing a setting for
+        gpu_use="gpu_one_model",
+        # `engine` here is which topic model to fit, not who does the tagging
+        # -- the shared label would describe the wrong setting entirely.
+        labels={"engine": "which topic model", "engine_nlp": "tagging engine"},
+        param_when={"stanza_lang": ("engine_nlp", "stanza"),
+                    "beta_loss": ("engine", "nmf"),
+                    "passes": ("engine", "lda"),
+                    "seed": ("engine", "lda")},
+        **_TEXT_STEP,
+        with_={
+            **_TEXT_INPUT_WITH,
+            "out_csv": "{{var:features_dir}}/topic_count_sweep/topic_count_sweep.csv",
+            "encoding": "utf-8-sig",
+            "overwrite_existing": "{{var:overwrite_existing}}",
+            "engine": "{{var:sweep_engine}}",
+            "k_values": "{{var:sweep_k_values}}",
+            **_vocab_with("sweep"),
+            "engine_nlp": "{{var:engine}}",
+            "tokenizer": "{{var:tokenizer}}",
+            "stanza_lang": "{{var:stanza_lang}}",
+            "device": "{{var:device}}",
+        },
+        vars={
+            **_FEATURES_DIR_VAR,
+            **_vocab_vars("sweep"),
+            **_ENGINE_VARS,
+            "sweep_engine": {
+                "default": "lda",
+                "desc": "Which topic model to try: lda or nmf. Whichever you "
+                        "mean to fit for real -- the number that suits one "
+                        "does not have to suit the other.",
+            },
+            "sweep_k_values": {
+                "default": "5,10,20,40",
+                "desc": "The topic counts to try, separated by commas. Spread "
+                        "them out rather than packing them close together; "
+                        "the point is to see the shape of the curve.",
+            },
+        },
     ),
     Recipe(
         id="word_vectors_train",

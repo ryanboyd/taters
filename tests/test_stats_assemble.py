@@ -136,8 +136,8 @@ def test_colliding_columns_are_renamed_in_every_file_that_has_them(tmp_path):
         feature_csvs=[read, coh], metadata_csv=meta,
         out_dir=tmp_path / "stats_results", verbose=False)
     header = _read_table(out)[0].keys()
-    assert "readability.word_count" in header
-    assert "cohesion.word_count" in header
+    assert "readability__word_count" in header
+    assert "cohesion__word_count" in header
     assert "word_count" not in header
     assert "flesch" in header and "overlap" in header
 
@@ -152,7 +152,7 @@ def test_a_feature_column_clashing_with_metadata_is_renamed(tmp_path):
         out_dir=tmp_path / "out", verbose=False)
     row = {r["text_id"]: r for r in _read_table(out)}["d1"]
     assert row["score"] == "1", "the metadata column keeps its name"
-    assert row["f.score"] == "9"
+    assert row["f__score"] == "9"
 
 
 def test_non_numeric_feature_columns_are_dropped_and_noted(tmp_path):
@@ -220,7 +220,7 @@ def _filtered(tmp_path, filters):
 
 
 def test_ordering_filters_keep_only_matching_rows(tmp_path):
-    kept, manifest = _filtered(tmp_path, [["readability.word_count", ">=", 25]])
+    kept, manifest = _filtered(tmp_path, [["readability__word_count", ">=", 25]])
     assert kept == {"d1", "d4"}, "d2 has word_count 10"
     assert manifest["filters"][0]["removed"] == 1
 
@@ -246,7 +246,7 @@ def test_numbers_compare_numerically_not_textually(tmp_path):
     # ALL three rows go. that trips the empty-table guard, and its accounting
     # is what proves the point
     with pytest.raises(ValueError, match="removed 3"):
-        _filtered(tmp_path, [["readability.word_count", "<", 9]])
+        _filtered(tmp_path, [["readability__word_count", "<", 9]])
 
 
 def test_bad_filters_are_refused_before_any_work(tmp_path):
@@ -293,8 +293,8 @@ def test_the_sidecar_maps_sets_to_post_rename_columns(tmp_path):
                       .read_text("utf-8"))
     assert sets["key"] == ["text_id"]
     assert sets["metadata"] == ["condition", "openness"]
-    assert sets["sets"]["readability"] == ["readability.word_count", "flesch"]
-    assert sets["sets"]["cohesion"] == ["cohesion.word_count", "overlap"]
+    assert sets["sets"]["readability"] == ["readability__word_count", "flesch"]
+    assert sets["sets"]["cohesion"] == ["cohesion__word_count", "overlap"]
 
 
 def test_feature_sets_resolution_covers_every_accepted_form(tmp_path):
@@ -302,8 +302,8 @@ def test_feature_sets_resolution_covers_every_accepted_form(tmp_path):
     table = assemble_analysis_table(
         feature_csvs=[read, coh], metadata_csv=meta,
         out_dir=tmp_path / "stats_results", verbose=False)
-    feature_cols = ["readability.word_count", "flesch",
-                    "cohesion.word_count", "overlap"]
+    feature_cols = ["readability__word_count", "flesch",
+                    "cohesion__word_count", "overlap"]
 
     combined = resolve_feature_sets(None, table_csv=table,
                                     feature_cols=feature_cols)
@@ -356,7 +356,7 @@ def test_the_assemble_section_carries_the_row_accounting(tmp_path):
     stats_dir = tmp_path / "stats_results"
     assemble_analysis_table(
         feature_csvs=[read, coh], metadata_csv=meta,
-        filters=[["readability.word_count", ">=", 25]],
+        filters=[["readability__word_count", ">=", 25]],
         out_dir=stats_dir, verbose=False)
     out = write_stats_report(stats_dir=stats_dir, verbose=False)
     text = Path(out).read_text("utf-8")

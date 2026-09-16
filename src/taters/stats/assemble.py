@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Callable, List, Literal, Mapping, Optional, Sequence, Union
 
 from ..helpers.atomic import atomic_write
+from ..helpers.feature_columns import SEPARATOR
 from ..helpers.progress import announce
 from ._common import (looks_numeric, name_a_few, taters_version,
                       write_section, reusable)
@@ -375,9 +376,23 @@ def assemble_analysis_table(
     # ---------------------------------------------------------- collisions
     # here, we deal with name clashes. any feature column used by two feature
     # tables (or clashing with a key/metadata name) gets renamed
-    # "<stem>.<col>" in EVERY feature table that has it -- all the colliders,
+    # "<stem>__<col>" in EVERY feature table that has it -- all the colliders,
     # not just the later ones, so that the outcome doesn't depend on file
     # order. keys and metadata keep their names.
+    #
+    # this is the safety net, not the plan. the measures Taters ships declare
+    # their column names up front and a build test refuses any two that could
+    # agree (see helpers/feature_columns.py), because a rename that only
+    # happens when something else is in the run makes a column's name depend on
+    # the rest of the pipeline -- the same model, two studies, two names. what
+    # is left for this to catch is what we cannot declare: the user's own
+    # spreadsheet columns, their dictionary categories, two runs of one
+    # instrument.
+    #
+    # `__` rather than `.`, both because the rest of the codebase already uses
+    # it (score_model, _concept_dicts, feature_gather) and because a dot in a
+    # column name has to be quoted in an R or patsy formula, which is exactly
+    # where these tables end up.
     reserved = set(feature_key) | set(meta_kept)
     counts: dict = {}
     for _, df, _is_feature in frames:
@@ -396,7 +411,7 @@ def assemble_analysis_table(
     sources: dict = {}
     renamed_frames = []
     for stem, df, is_feature in frames:
-        renames = {c: f"{stem}.{c}" for c in df.columns
+        renames = {c: f"{stem}{SEPARATOR}{c}" for c in df.columns
                    if c not in feature_key and c in colliding}
         if renames:
             df = df.rename(columns=renames)

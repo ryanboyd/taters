@@ -89,3 +89,21 @@
       members_order: alphabetical
       show_source: true
       show_root_heading: true
+
+::: taters.text.topic_model_lda
+    options:
+      members_order: source
+      show_source: true
+      show_root_heading: true
+
+::: taters.text.topic_model_nmf
+    options:
+      members_order: source
+      show_source: true
+      show_root_heading: true
+
+::: taters.text.topic_count_sweep
+    options:
+      members_order: source
+      show_source: true
+      show_root_heading: true

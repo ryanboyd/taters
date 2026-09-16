@@ -210,6 +210,175 @@ Each theme is also drawn as a word cloud under `features/figures/wordclouds/topi
 
 ---
 
+
+## Topic modeling: LDA and NMF
+
+MEM is not the only way to find topics, and the other two answer a different
+question. All three read your corpus, build their own vocabulary from it, and
+give you a score per document per topic plus a word cloud of each topic — so
+you can run any of them, or all three, the same way.
+
+**LDA** (latent Dirichlet allocation) is what most papers mean by "topic
+model". It tells a story about how the corpus got written: every document is a
+mixture of topics, every topic a distribution over words, and fitting runs that
+story backwards. You get the *proportion* of each document belonging to each
+topic, and those proportions add up to one — which reads naturally ("this
+interview was mostly about work") and has one consequence worth knowing about
+before you analyze them; see below.
+
+**NMF** (non-negative matrix factorization) asks something simpler: split the
+matrix into two non-negative pieces whose product is close to it. No
+probabilities, nothing that has to sum to one. On short texts — tweets,
+open-ended survey answers, single utterances — LDA often struggles because
+there is not enough of each document to infer a mixture from, and NMF's topics
+come out sharper. Its weights are just weights, which makes them more
+straightforward to use as predictors.
+
+**MEM** finds the dimensions along which word use *co-varies*, and a document
+scores positive or negative on each. MEM's themes are contrasts; LDA's topics
+are ingredients. A study reporting both is not doing the same thing twice.
+
+### If you have used MALLET
+
+LDA in DLATK runs through MALLET, which is a Java program driven by a gensim
+wrapper that gensim removed in version 4. Nothing here shells out to Java, and
+nothing here needs a JDK. Taters uses variational Bayes, the same family
+scikit-learn and gensim's own `LdaModel` use — comparable topics, but not the
+same algorithm as MALLET's Gibbs sampling, so the numbers will not match and
+you should not report them as though they do.
+
+### Each model builds its own matrix
+
+LDA is only defined over word *counts*; give it anything else and it would fit
+happily and mean nothing, so it refuses. NMF wants **tf-idf**, because without
+it the first factor goes to whatever words are merely common. MEM takes either,
+plus one-hot. Since they genuinely want different matrices — and often
+different vocabulary sizes — each builds its own, in a folder named after its
+results file (`topic_model_lda_matrix/` beside `topic_model_lda.csv`). You can
+look at it: it is the vocabulary your topics came out of.
+
+### Which words get to be in the vocabulary
+
+A topic model does not look at every word in your corpus — it takes a
+vocabulary off the top of a frequency list, and `vocab_top_n` decides how many.
+What it ranks by matters more than it sounds.
+
+Topic models here rank by **share of documents**, not raw count. A word one
+transcript repeats four hundred times tops the frequency ranking and can tell
+you nothing, because it only ever describes that one transcript. A word used
+once each by half your participants is what a topic is actually made of. You
+can switch back with `vocab rank by`, and the standalone document-term matrix
+still ranks by frequency, because a feature table generally does want the
+commonest terms.
+
+The other lever is the stop list. Function words are the most frequent words in
+any corpus by a wide margin, so without one every topic comes out as "the, and,
+of". Punctuation and English stop words are applied by default; the picker is
+the same one the n-gram step uses, and you can manage the lists under Settings.
+
+### How many topics?
+
+The one setting with no sensible default. Ask for five and you get broad
+topics; ask for fifty on the same corpus and you get narrow ones. Neither is
+wrong — they are different questions.
+
+The **topic-count sweep** fits at several counts, scores how well each one's
+topics hang together (topic coherence), and writes a curve, a table, and the
+top words of every fit. Read the words. Coherence measures whether a topic's
+words turn up in the same documents, which is *related to* whether a topic is
+meaningful and is not the same thing — a model can score well and still cut the
+corpus somewhere useless. The curve is good for ruling out counts that are
+clearly too few or too many; the choice among what is left is yours.
+
+Worth knowing: the curve is usually much sharper for LDA than for NMF. NMF
+merges topics in the tail rather than the head, so its top words stay coherent
+even when the count is wrong, and a flat NMF curve means "coherence cannot
+separate these" rather than "any of these is fine".
+
+### Using topic proportions in an analysis
+
+LDA's proportions sum to one for every document, so the last topic is just
+one minus all the others — it carries nothing the rest do not. Two things
+follow, and the standard answers to both are already how Taters works.
+
+**Do not put all of them in one model at once.** With every topic in a single
+regression there is no unique answer: many different sets of coefficients fit
+identically. Schwartz et al. (2013), the open-vocabulary paper that put 2,000
+LDA topics in front of a personality outcome, were explicit about it — they ran
+*a separate regression for each feature*, with age and gender as covariates,
+and read each coefficient as that feature's correlation. Taters' correlations
+and group differences work the same way, one measure at a time, with optional
+control variables and a correction for multiple comparisons. Nothing to change.
+
+**For prediction, reduce first.** The same paper fed its topics to a ridge
+regression only after running them through PCA. That is worth doing for two
+reasons at once: it cuts hundreds of topics down to something a model can
+learn from, and it makes the sum-to-one problem disappear on its own — the
+redundant direction has exactly zero variance, so PCA drops it without anybody
+having to think about it. In Taters that is the `stats_pca` setting on the
+analysis step; set it to the name of your topic feature set, or to `all`.
+
+If you are reporting individual topics, one more habit of phrasing: "more of
+Topic 3" always means "more of Topic 3 *relative to everything else this person
+could have talked about*", because the shares are of one whole. That is a real
+finding and a slightly different sentence from the one people usually write.
+
+None of this applies to MEM themes or NMF factors — neither is constrained to
+sum to anything.
+
+### Supertopics: reducing topics further
+
+Fifty topics is a lot to read, and a lot to hand a regression. The analysis
+stage can reduce them with PCA, and what comes out is called a **supertopic** —
+a combination of topics that vary together across documents. The columns are
+named for what they are and where they came from —
+`topic_model_lda_Supertopic_1`, `topic_model_mem_Supertopic_1` — rather than
+the generic `Component_1`, so a results table says what it holds without a
+lookup, and a column quoted in a paper still says which model produced it.
+
+That naming only applies when the set being reduced really is a topic model.
+Reduce readability indices, or dictionary categories, or embedding dimensions
+and you get `readability_Component_1` and so on, because that is what those
+are. Reduce a set that *mixes* — topics together with readability, or two
+different topic models thrown in together, which is what the combined "all" set
+does — and you get components too: a blend of two kinds of measure is not a
+supertopic of either.
+
+The awkward part used to be working out what a supertopic *was*. Its features
+are topics, so its word cloud could only name them — `Topic_7`, `Topic_22` —
+which is a second puzzle stacked on the first one. So two things are drawn now:
+
+- **The supertopic in its own words**, under `supertopics/`. The topics'
+  word profiles are composed through the PCA loadings, so you get an ordinary
+  word cloud of terms.
+- **Each contributing topic's own cloud**, under `themes/`, the same way a
+  ridge over topics already got them.
+
+A supertopic is a *contrast*, not a bag of topics: loading positively on one
+topic and negatively on another means "high on this = much of the first, little
+of the second". Both ends are the finding, so both are drawn — blue rises with
+the supertopic, red falls with it, exactly as a MEM theme's cloud reads.
+
+One consequence worth expecting: a word sitting equally in the topics at both
+ends cancels out and disappears. That is correct — it does not distinguish the
+ends, so it is not what the supertopic is about — and it has a pleasant side
+effect of quietly removing the words that are simply common.
+
+### Applying topics to a second study
+
+Every topic model saves a reusable model file, and applying it takes no
+vocabulary or tokenizer settings at all — they come out of the model, because
+the model *is* the instrument. That is what makes two studies comparable:
+measure the second corpus with the first one's topics, rather than fitting new
+topics and hoping `Topic_3` means the same thing in both. Fitting again would
+give you a different number of topics in a different order.
+
+### Column names
+
+MEM writes `Theme_1..Theme_k`, LDA writes `Topic_1..Topic_k`, NMF writes
+`Factor_1..Factor_k`. Deliberately different, so that running more than one
+leaves you with three readable sets of columns rather than a collision.
+
 ## Parts of speech
 
 Sometimes the grammar is the signal: how often someone uses verbs, adjectives, or particular tag *sequences* (syntactic n-grams like determiner-noun) carries stylistic and psychological information independent of which words fill the slots. Taters tags each text (NLTK or Stanza; Penn or Universal tagsets) and writes one row per document of tag frequencies.

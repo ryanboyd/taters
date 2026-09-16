@@ -55,14 +55,22 @@ from .build_doc_term_matrix import (
     _load_vocabulary,
     column_names,
 )
+from . import _topics
 from .ngram_prep import make_token_stream, tags_of, words_of
 from ..helpers.cliargs import CliSpec
+from ..helpers.feature_columns import ColumnSpec
 
 PathLike = Union[str, Path]
 
 #: Model file format, bumped on any incompatible change so an older Taters
 #: refuses a newer model instead of misreading it.
 MODEL_FORMAT = 1
+
+#: One column per retained theme. The number varies with the corpus, the name
+#: does not -- and `Theme_` is what keeps these apart from LDA's `Topic_` and
+#: NMF's `Factor_` when more than one topic model is in the same run.
+FEATURE_COLUMNS = ColumnSpec(label="Topic model (MEM)", patterns=("Theme_{n}",),
+                             reduces_to="Supertopic")
 
 
 # ---------------------------------------------------------------------------
@@ -83,13 +91,12 @@ def _theme_row(text_id: str, token_count, cells, kept, mu, sigma, projection,
 # ---------------------------------------------------------------------------
 
 @records_settings(
-    # the matrix and the vocabulary it came from are our binding, so that the
-    # chain can walk back through the matrix's own record to the gather. we
-    # used to record nothing here, and the theme scores (a feature table, by
-    # declaration) came up as "unavailable" to every model fitted on them.
-    # the refusal's advice ("re-run the extraction so a record is written")
-    # couldn't even be followed, because nothing ever wrote one
-    binding=("dtm_csv", "freq_list_csv"),
+    # the corpus is our binding now. we used to bind the matrix and the
+    # frequency list, because somebody else built them and the chain had to
+    # walk back through *their* records to reach the gather. this step builds
+    # them itself, so the gather is one hop away and the shared text-input
+    # declaration is the right one -- the same one every other text step uses.
+    binding=TEXT_INPUT, grain=TEXT_GRAIN,
     outputs=("out_features_csv", "out_model_json", "out_loadings_csv",
              "out_eigenvalues_csv"),
     # the themes are fitted to this corpus, so the honest way to measure them
@@ -100,8 +107,13 @@ def _theme_row(text_id: str, token_count, cells, kept, mu, sigma, projection,
     bookkeeping=("token_count",))
 def topic_model_mem(
     *,
-    dtm_csv: PathLike,
-    freq_list_csv: PathLike,
+    # ----- Input source (choose exactly one, or pass analysis_csv directly) -----
+    csv_path: Optional[PathLike] = None,
+    txt_dir: Optional[PathLike] = None,
+    analysis_csv: Optional[PathLike] = None,
+    gathered_csv: Optional[PathLike] = None,
+    workers: int = 0,
+    device: str = "auto",
     out_features_csv: Optional[PathLike] = None,
     out_model_json: Optional[PathLike] = None,
     out_loadings_csv: Optional[PathLike] = None,
@@ -110,8 +122,33 @@ def topic_model_mem(
     on_progress: Optional[Callable[[int, int], None]] = None,
     encoding: str = "utf-8-sig",
 
-    # ----- how the matrix was made. we record these into the model, and the
-    # ----- vocab settings also rebuild the term list (checked vs. the matrix)
+    # ====== CSV GATHER OPTIONS ======
+    text_cols: Sequence[str] = ("text",),
+    id_cols: Optional[Sequence[str]] = None,
+    mode: Literal["concat", "separate"] = "concat",
+    group_by: Optional[Sequence[str]] = None,
+    delimiter: str = ",",
+    joiner: str = " ",
+    num_buckets: int = 512,
+    max_open_bucket_files: int = 64,
+    tmp_root: Optional[PathLike] = None,
+
+    # ====== TXT FOLDER GATHER OPTIONS ======
+    recursive: bool = True,
+    pattern: str = DOCUMENT_PATTERN,
+    id_from: Literal["stem", "name", "path"] = "stem",
+    include_source_path: bool = True,
+
+    # ----- how the vocabulary is chosen (the frequency list this builds) -----
+    ngram_n: int = 1,
+    stoplist_paths: Optional[Sequence[PathLike]] = None,
+    min_freq: int = 5,
+    min_obs_pct: float = 0.10,
+    min_token_count: int = 10,
+    min_npmi: Optional[float] = None,
+
+    # ----- how the matrix is made. this step builds it, and records every one
+    # ----- of these into the model so `apply_mem_model` can rebuild it exactly
     lemmatize: bool = False,
     pos_tagged: bool = False,
     engine: Literal["nltk", "stanza"] = "nltk",
@@ -124,7 +161,7 @@ def topic_model_mem(
     vocab_min_obs_pct: float = 0,
     vocab_rule: Literal["top_n", "min_obs_pct", "min_freq"] = "top_n",
     vocab_top_n: int = 500,
-    vocab_rank_by: Literal["frequency", "obs_pct"] = "frequency",
+    vocab_rank_by: Literal["obs_pct", "frequency"] = "obs_pct",
 
     # ----- MEM options -----
     n_components: int = 0,
@@ -133,22 +170,58 @@ def topic_model_mem(
     rounding: int = 4,
 ) -> Path:
     """
-    Fit MEM themes to a document-term matrix; write scores and a reusable model.
+    Fit MEM themes to a corpus; write scores, the matrix, and a reusable model.
 
     Parameters
     ----------
-    dtm_csv
-        A matrix written by
-        :func:`taters.text.build_doc_term_matrix.build_doc_term_matrix`. In a
-        pipeline this is wired automatically from that step's output.
-    freq_list_csv
-        The frequency list the matrix was built over. The vocabulary is
-        re-derived from it (with the ``vocab_*`` settings below) and checked
-        against the matrix's columns, so a mismatch refuses loudly instead of
-        modeling the wrong terms.
+    csv_path, txt_dir, analysis_csv, gathered_csv
+        The corpus, given exactly one of these ways: a spreadsheet, a folder of
+        documents, an already-gathered analysis-ready table, or a gathered
+        table to write and reuse. MEM builds its own frequency list and
+        document-term matrix from it, into a ``<results-stem>_matrix`` folder
+        beside the results -- every topic model needs a different matrix, so
+        sharing one meant two of them quietly rebuilding over each other.
+    workers : int, default=0
+        Worker processes for gathering, counting and scoring. 0 picks a
+        sensible number for the machine and the size of the job.
+    device : {"auto", "cuda", "cpu"}, default="auto"
+        Where Stanza runs, when ``engine="stanza"``. The NLTK engine is
+        CPU-only either way, and the fit itself is linear algebra on the CPU.
+    text_cols : Sequence[str], default=("text",)
+        When gathering from a CSV, name(s) of the column(s) containing text.
+    id_cols : Sequence[str] or None, optional
+        Optional ID columns that identify each row when gathering from CSV.
+    mode : {"concat", "separate"}, default="concat"
+        Gathering behavior when multiple text columns are provided:
+        ``"concat"`` joins them into one text per row; ``"separate"`` measures
+        each column on its own.
+    group_by : Sequence[str] or None, optional
+        Optional grouping keys used during CSV gathering (e.g. ``["speaker"]``)
+        -- one document per group instead of one per row.
+    pattern : str, default=every document type
+        Which files to read when gathering from a folder of documents
+        (globs, ``;``-separated). Only used with ``txt_dir``.
+    ngram_n : int, default=1
+        Highest n-gram order to consider for the vocabulary. Themes are
+        usually built from single words; raise it to let phrases compete.
+    stoplist_paths : Sequence[str or pathlib.Path] or None, optional
+        Word lists to drop before counting. Function words carry grammar
+        rather than topic, and leaving them in gives a first theme that is
+        mostly "the".
+    min_freq : int, default=5
+        Drop terms rarer than this from the vocabulary.
+    min_obs_pct : float, default=0.10
+        Drop terms appearing in fewer than this *percent* of documents. This
+        is the setting that matters most for themes: a term almost nobody uses
+        cannot covary with anything.
+    min_token_count : int, default=10
+        Skip documents shorter than this many tokens entirely.
+    min_npmi : float, optional
+        Optional collocation threshold for orders above one. Default None:
+        the metric is reported and filtering stays an analysis decision.
     out_features_csv : str or pathlib.Path, optional
         Per-document theme scores. Defaults to
-        ``./features/topic_model_mem/<dtm filename>``. The model, loadings,
+        ``./features/topic_model_mem/<gathered filename>``. The model, loadings,
         and eigenvalue files are written next to it unless given their own
         paths (``<name>_model.json``, ``<name>_loadings.csv``,
         ``<name>_eigenvalues.csv``).
@@ -159,11 +232,24 @@ def topic_model_mem(
         If ``False`` and the scores file already exists, skip and return it.
     encoding : str, default="utf-8-sig"
         Encoding for reading and writing CSV files.
-    lemmatize, pos_tagged, engine, tokenizer, stanza_lang, keep_punctuation
-        Must match the settings the matrix was built with -- the pipeline
-        drives both steps from the same shared variables. Recorded in the
-        model so a later apply reads new text the same way. (``pos_tagged``
-        also decides how the vocabulary's tagged terms are parsed here.)
+    lemmatize : bool, default=False
+        Reduce words to a dictionary form before counting, so "running",
+        "runs" and "ran" become one term instead of three.
+    pos_tagged : bool, default=False
+        Keep each word's part of speech attached, so "book" the noun and
+        "book" the verb count as different terms.
+    engine : {"nltk", "stanza"}, default="nltk"
+        Which toolkit does the tagging and lemmatizing. NLTK is fast and
+        English-only; Stanza handles many languages and is much slower, and
+        downloads a model the first time you use it.
+    tokenizer : {"potts", "stanza"}, default="potts"
+        Which rules split the text into words. "potts" keeps emoticons and
+        hashtags intact, which is usually what you want for social media;
+        "stanza" uses Stanza's own splitter.
+    stanza_lang : str, default="en"
+        The language code for Stanza, when the engine is Stanza.
+    keep_punctuation : bool, default=False
+        Count punctuation marks as terms of their own.
     weighting : {"count", "binary", "relfreq", "tfidf"}, default="count"
         The matrix's cell weighting, recorded so apply weights new text the
         same way.
@@ -204,12 +290,20 @@ def topic_model_mem(
         ``out_features_csv``: ``text_id``, ``token_count``, then
         ``Theme_1..Theme_k``.
     """
-    dtm_csv = Path(dtm_csv)
-    if not dtm_csv.exists():
-        raise FileNotFoundError(f"dtm_csv not found: {dtm_csv}")
+    analysis_ready = resolve_analysis_ready(
+        csv_path=csv_path, txt_dir=txt_dir, analysis_csv=analysis_csv,
+        gathered_csv=gathered_csv, text_cols=text_cols, id_cols=id_cols,
+        mode=mode, group_by=group_by, delimiter=delimiter, encoding=encoding,
+        joiner=joiner, num_buckets=num_buckets,
+        max_open_bucket_files=max_open_bucket_files, tmp_root=tmp_root,
+        recursive=recursive, pattern=pattern, id_from=id_from,
+        include_source_path=include_source_path,
+        overwrite_existing=overwrite_existing, on_progress=on_progress,
+        workers=workers)
 
     if out_features_csv is None:
-        out_features_csv = Path.cwd() / "features" / "topic_model_mem" / dtm_csv.name
+        out_features_csv = (Path.cwd() / "features" / "topic_model_mem"
+                            / analysis_ready.name)
     out_features_csv = Path(out_features_csv)
     out_features_csv.parent.mkdir(parents=True, exist_ok=True)
     stem = out_features_csv.stem
@@ -224,8 +318,66 @@ def topic_model_mem(
         print("MEM theme scores output file already exists; returning existing file.")
         return out_features_csv
 
-    # 1) first, we re-derive the vocabulary and hold it up against the
-    #    matrix's header
+    # 1) build this model's own frequency list and matrix.
+    #
+    # these used to arrive as two paths, produced by separate steps that a
+    # pipeline wired in -- and the vocabulary was re-derived here and held up
+    # against the matrix's header, because nothing guaranteed the two had been
+    # made with the same settings. that check is gone along with the problem it
+    # was catching: we make both, so they cannot disagree.
+    #
+    # the reason to make them rather than share them is that every topic model
+    # wants a different matrix. LDA is only defined over integer counts, NMF
+    # conventionally wants tf-idf, MEM takes either plus one-hot, and each wants
+    # its own vocabulary size. worse, the shared matrix's filename carried only
+    # the weighting -- so two models asking for different vocabularies targeted
+    # the same file and rebuilt over each other, and whichever ran last won.
+    #
+    # they go in a folder named after the results' own stem, beside them,
+    # rather than into a temp directory: somebody reading a topic model wants
+    # to see which vocabulary the themes came out of.
+    # the matrix folder is derived from the output's *stem*, not from its
+    # folder. a fixed-name sibling (`parent / "matrix"`) is the same path for
+    # every step that writes into one folder, and that produced the two worst
+    # bugs in this feature: three topic models building over each other's
+    # matrix, and an apply leaving a frozen vocabulary where a later fit picked
+    # it up and modeled the wrong corpus. Deriving from the stem makes both
+    # impossible rather than merely wired-around -- and it is the idiom the
+    # rest of the codebase already uses for companion files.
+    matrix_dir = out_features_csv.with_name(f"{stem}_matrix")
+    matrix_dir.mkdir(parents=True, exist_ok=True)
+
+    from .analyze_ngram_frequencies import analyze_ngram_frequencies
+    from .build_doc_term_matrix import build_doc_term_matrix
+
+    text_settings = dict(
+        lemmatize=lemmatize, pos_tagged=pos_tagged, engine=engine,
+        tokenizer=tokenizer, stanza_lang=stanza_lang,
+        keep_punctuation=keep_punctuation, device=device)
+
+    announce(on_progress, "counting the vocabulary")
+    freq_list_csv = analyze_ngram_frequencies(
+        analysis_csv=analysis_ready,
+        out_features_csv=matrix_dir / "freq_list.csv",
+        overwrite_existing=overwrite_existing, workers=workers,
+        on_progress=on_progress, encoding=encoding,
+        ngram_n=ngram_n, stoplist_paths=stoplist_paths,
+        min_freq=min_freq, min_obs_pct=min_obs_pct,
+        min_token_count=min_token_count, min_npmi=min_npmi,
+        **text_settings)
+
+    announce(on_progress, "building the matrix")
+    dtm_csv = Path(build_doc_term_matrix(
+        freq_list_csv=freq_list_csv, analysis_csv=analysis_ready,
+        out_features_csv=matrix_dir / "dtm.csv",
+        overwrite_existing=overwrite_existing, workers=workers,
+        on_progress=on_progress, encoding=encoding,
+        weighting=weighting, rounding=matrix_rounding,
+        vocab_min_freq=vocab_min_freq, vocab_min_obs_pct=vocab_min_obs_pct,
+        vocab_rule=vocab_rule, vocab_top_n=vocab_top_n,
+        vocab_rank_by=vocab_rank_by,
+        **text_settings))
+
     vocab = _load_vocabulary(
         Path(freq_list_csv), encoding=encoding, pos_tagged=pos_tagged,
         vocab_rule=vocab_rule,
@@ -235,19 +387,7 @@ def topic_model_mem(
     terms = sorted(vocab,
                    key=lambda g: (-vocab[g]["frequency"], words_of(g), tags_of(g)))
     columns = column_names(terms, pos_tagged)
-
-    with dtm_csv.open("r", newline="", encoding=encoding) as f:
-        header = next(csv.reader(f))
-    if header != ["text_id", "token_count", *columns]:
-        raise ValueError(
-            f"{dtm_csv} does not match the vocabulary derived from "
-            f"{freq_list_csv} with these settings (pos_tagged={pos_tagged}, "
-            f"vocab_rule={vocab_rule!r}, "
-            f"vocab_top_n={vocab_top_n}, vocab_min_freq={vocab_min_freq}, "
-            f"vocab_min_obs_pct={vocab_min_obs_pct}, "
-            f"vocab_rank_by={vocab_rank_by!r}). The matrix and this step must "
-            "agree on the vocabulary, or the model would score the wrong terms."
-        )
+    _topics.check_matrix_agrees(dtm_csv, columns, encoding=encoding)
 
     # 2) one streaming pass to get the moments, then we find the axes in memory
     warn_if_wide(len(terms))
@@ -530,7 +670,11 @@ def apply_mem_model(
         workers=workers)
 
     if out_features_csv is None:
-        out_features_csv = Path.cwd() / "features" / "topic_model_mem" / analysis_ready.name
+        # `_applied`, so that fitting and applying with the defaults do not
+        # write to one file -- and so their matrix folders, derived from this
+        # stem, can never be the same one.
+        out_features_csv = (Path.cwd() / "features" / "topic_model_mem"
+                            / f"{analysis_ready.stem}_applied{analysis_ready.suffix}")
     out_features_csv = Path(out_features_csv)
     out_features_csv.parent.mkdir(parents=True, exist_ok=True)
     if not overwrite_existing and out_features_csv.is_file():

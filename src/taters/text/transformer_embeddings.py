@@ -38,6 +38,11 @@ from ._sentences import split_sentences
 from ._transformer_common import (CURATED_ENCODERS, encode_sentences,
                                   load_encoder, round_cells, set_threads,
                                   torch_missing_reason)
+from ..helpers.feature_columns import ColumnSpec
+
+#: `e_1, e_2, ...` -- see the note in `extract_sentence_embeddings` about why
+#: these are spelled differently from its `e0, e1, ...`.
+FEATURE_COLUMNS = ColumnSpec(label="Transformer embeddings", patterns=("e_{n}",))
 
 widen_csv_field_limit()
 

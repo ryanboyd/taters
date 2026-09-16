@@ -988,13 +988,21 @@ def test_a_document_term_matrix_can_carry_the_statistics(tmp_path, study_csv):
     assert_valid_preset(result.preset)
 
 
-def test_a_table_pulled_in_only_as_an_input_does_not_join(tmp_path, study_csv):
+def test_the_topic_models_matrix_never_becomes_a_step_of_its_own(tmp_path, study_csv):
     """
-    The topic model reads a document-term matrix, so picking topics pulls
-    the matrix in as a step. Someone who asked for topic scores has not asked
-    for five thousand term columns to be correlated with their outcome too,
-    so the matrix runs but stays out of the analysis table -- and off the
-    "which tables" picker, which offers exactly what joins.
+    This used to read "a table pulled in only as an input does not join": the
+    topic model was wired to a shared document-term matrix step, and the test
+    checked that the matrix ran but stayed out of the analysis table -- nobody
+    asking for topic scores wants five thousand term columns correlated with
+    their outcome as well.
+
+    The topic model builds its own matrix now, so the question does not arise:
+    there is no matrix *step* to keep out of anything. Every topic model wants
+    a different matrix (LDA needs counts, NMF wants tf-idf), and the shared one
+    meant two of them rebuilding over each other's file.
+
+    What still has to hold is the conclusion: one table reaches the statistics,
+    the topic scores, and picking a single table is not a question worth asking.
     """
     p = ScriptedPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
@@ -1006,7 +1014,10 @@ def test_a_table_pulled_in_only_as_an_input_does_not_join(tmp_path, study_csv):
     result = wiz.run_wizard(p, cwd=tmp_path, analyses=True)
 
     calls = [s["call"] for s in result.preset["steps"]]
-    assert "potato.text.build_doc_term_matrix" in calls, "the input step ran"
+    assert "potato.text.topic_model_mem" in calls
+    assert "potato.text.build_doc_term_matrix" not in calls, (
+        "the topic model builds its own matrix; a shared step would be the "
+        "clobbering this change removed")
     assemble = next(s for s in result.preset["steps"]
                     if s["call"] == "potato.stats.assemble_analysis_table")
     assert assemble["with"]["feature_csvs"] == ["{{mem_topics}}"]
@@ -1017,11 +1028,15 @@ def test_a_table_pulled_in_only_as_an_input_does_not_join(tmp_path, study_csv):
 def test_a_matrix_and_the_topics_built_from_it_are_two_tables(tmp_path,
                                                              study_csv):
     """
-    The rule that folds "Sentence embeddings" and its merge into one table
-    keyed on "one step consumes what the other produces". The topic model
-    consumes the document-term matrix too -- and is a different measure, not
-    the same one re-shaped. Folded, the matrix vanished from the picker and
-    the topic scores were offered under the matrix's name.
+    The rule that folds "Sentence embeddings" and its merge into one table is
+    keyed on "one step consumes what the other produces". The topic model used
+    to consume the document-term matrix, and folding them lost the matrix from
+    the picker and offered the topic scores under its name.
+
+    They are independent now -- the topic model builds its own matrix -- which
+    makes the answer more obviously right rather than less: someone who asks
+    for both a matrix and topic scores wants two tables, because they are two
+    measures and not one re-shaped.
     """
     p = ScriptedPrompter([
         "csv", *browse_to(study_csv), ["text"], False,

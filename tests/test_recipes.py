@@ -14,6 +14,7 @@ user finding out mid-run.
 from __future__ import annotations
 
 import importlib.util
+from pathlib import Path
 
 import pytest
 from preset_checks import templates_in, underlying
@@ -163,6 +164,225 @@ def test_user_facing_recipes_explain_themselves(recipe):
         return
     assert recipe.label and recipe.help
     assert not recipe.label.endswith("."), "labels read better without a full stop"
+
+
+def test_a_step_that_can_use_the_gpu_is_told_where_to_run(recipe):
+    """
+    Declaring `gpu_use` and then not forwarding `device` means the step runs
+    wherever its own default says -- "auto", i.e. CUDA if there is any -- no
+    matter what the person set. Found in review on `topic_model_mem`, which
+    started tokenizing when it took over building its own matrix and had its
+    `gpu_use` corrected without its `with_` block catching up.
+    """
+    if recipe.resolved_gpu_use == "cpu":
+        return
+    try:
+        names = set(describe(load_target(recipe.target)).names)
+    except ImportError:
+        pytest.skip(f"{recipe.id} needs an optional dependency")
+    if "device" not in names:
+        return
+    assert "device" in recipe.with_, (
+        f"{recipe.id} declares gpu_use={recipe.resolved_gpu_use!r} and takes "
+        "`device`, but never passes it")
+
+
+def test_each_topic_model_writes_into_a_folder_of_its_own():
+    """
+    Every topic model builds its own matrix into `<its output folder>/matrix`.
+    While they all wrote straight into `features/`, that resolved to one
+    `features/matrix` for all of them -- so a run with two topic models had
+    them building over each other's matrix, which is the exact clobbering the
+    per-model matrix was introduced to stop.
+
+    The unit test for that passed throughout, because it gave each model its
+    own output folder by hand. The catalog did not.
+    """
+    folders = {}
+    for rid in ("topic_model_mem", "topic_model_lda", "topic_model_nmf",
+                "topic_count_sweep"):
+        recipe = by_id(rid)
+        out = recipe.with_.get("out_features_csv") or recipe.with_["out_csv"]
+        parent = str(out).rsplit("/", 1)[0]
+        assert parent != "{{var:features_dir}}", (
+            f"{rid} writes straight into the features folder, so its matrix "
+            "would land in the one every other topic model uses")
+        clash = folders.setdefault(parent, rid)
+        assert clash == rid, f"{rid} and {clash} share the folder {parent}"
+
+
+def test_every_file_a_topic_model_writes_lands_in_that_same_folder():
+    """A model whose loadings went one place and whose scores went another
+    would leave somebody hunting; the word-cloud step reads the loadings by
+    path, so it has to agree too."""
+    for engine in ("mem", "lda", "nmf"):
+        home = f"{{{{var:features_dir}}}}/topic_model_{engine}/"
+        # the apply too, not just the fit. it was checking only the fits, and
+        # MEM's apply was quietly writing to `features/topic_model_mem_applied
+        # .csv` -- loose in the features folder, outside the model's own.
+        for rid in (f"topic_model_{engine}", f"topic_model_{engine}_apply"):
+            recipe = by_id(rid)
+            for key, value in recipe.with_.items():
+                if key.startswith("out_") and isinstance(value, str):
+                    assert value.startswith(home), (rid, key, value)
+        clouds = by_id(f"topic_model_{engine}_wordclouds")
+        assert str(clouds.with_["loadings_csv"]).startswith(home), engine
+
+
+def test_the_declared_stop_lists_actually_become_paths():
+    """
+    The declaration is two fields on a recipe; the *effect* comes from
+    `_library_defaults`, which turns them into an override before the preset
+    is composed. That is three hops, and the catalog test above only checks the
+    first one -- a step could declare the picker and still apply nothing.
+
+    So this asks the question the user asked: does the frequency list this step
+    builds actually get the shipped stop words?
+    """
+    from taters.ui.wizard import _library_defaults
+
+    for rid in ("ngram_frequencies", "topic_model_mem", "topic_model_lda",
+                "topic_model_nmf", "topic_count_sweep"):
+        overrides: dict = {}
+        _library_defaults([by_id(rid)], overrides)
+        got = [Path(p).name for p in
+               overrides.get(rid, {}).get("stoplist_paths", [])]
+        assert "stopwords-en.txt" in got, (
+            f"{rid} would build its vocabulary with no stop list, so every "
+            f"topic comes out as 'the, and, of'. Got: {got}")
+
+
+def test_the_topic_models_do_not_share_a_vocabulary_setting():
+    """
+    Each topic model builds its own matrix, precisely because they want
+    different ones -- LDA needs counts, NMF wants tf-idf, and one study can
+    reasonably want LDA over lemmatized unigrams and NMF over raw bigrams.
+
+    The settings that decide what the vocabulary *is* were shared back when
+    they all scanned one matrix built by somebody else, where a disagreement
+    would have been a lie. That reason is gone, and sharing now means changing
+    `lemmatize` for one model silently changes it for the others.
+    """
+    models = ["topic_model_mem", "topic_model_lda", "topic_model_nmf",
+              "topic_count_sweep"]
+    vocabulary = ("lemmatize", "pos_tagged", "keep_punctuation", "ngram_n")
+
+    seen: dict = {}
+    for rid in models:
+        recipe = by_id(rid)
+        for setting in vocabulary:
+            var = recipe.with_.get(setting)
+            assert isinstance(var, str) and var.startswith("{{var:"), (
+                f"{rid} does not offer {setting} as a setting at all")
+            shared_with = seen.setdefault(var, rid)
+            assert shared_with == rid, (
+                f"{rid} and {shared_with} both read {var} for {setting}; "
+                "changing it on one screen would change the other's model")
+
+    # and the settings that shape the matrix itself. these are the
+    # document-term-matrix step's variables, which MEM read back when it
+    # scanned the matrix that step built. A topic model that took them again
+    # would not only follow another step's screen -- it would override its own
+    # defaults, which differ on purpose: a topic model ranks its vocabulary by
+    # how many documents use a term, a feature table by raw count.
+    matrix_shape = ("weighting", "vocab_rank_by", "vocab_rule", "vocab_top_n",
+                    "vocab_min_freq", "vocab_min_obs_pct")
+    from taters.ui.recipes import _MATRIX_SHAPE_WITH
+
+    for rid in models:
+        recipe = by_id(rid)
+        for setting in matrix_shape:
+            wired = recipe.with_.get(setting)
+            assert wired != _MATRIX_SHAPE_WITH.get(setting), (
+                f"{rid} reads the document-term-matrix step's {setting!r}; it "
+                "builds its own matrix, so that setting is not shared any more "
+                "-- and taking it would override this step's own default")
+
+
+def test_the_tokenizer_settings_are_still_shared_on_purpose():
+    """
+    The counterpart, so the split above reads as a decision rather than as
+    something half-done. Which toolkit splits and tags the text is a fact
+    about the corpus and the machine -- and Stanza's model download is shared
+    whatever any one step asked for.
+    """
+    for rid in ("topic_model_mem", "topic_model_lda", "topic_model_nmf"):
+        recipe = by_id(rid)
+        assert recipe.with_["engine"] == "{{var:engine}}", rid
+        assert recipe.with_["tokenizer"] == "{{var:tokenizer}}", rid
+
+
+def test_every_step_that_can_take_stop_lists_is_wired_to_the_library():
+    """
+    A step that accepts `stoplist_paths` and does not declare the library
+    binding gets no stop list at all unless somebody types a path -- and the
+    most frequent words in any corpus are function words, so its output comes
+    out as "the, and, of" with no error anywhere.
+
+    That is exactly what happened when the topic models started building their
+    own frequency lists: they had inherited the n-gram step's stop lists, and
+    the wiring did not come across with the rest. A real user found it within
+    minutes, so it is a catalog rule now rather than a thing to remember.
+    """
+    unwired = []
+    for recipe in RECIPES:
+        try:
+            names = set(describe(load_target(recipe.target)).names)
+        except ImportError:
+            continue
+        if "stoplist_paths" not in names:
+            continue
+        if recipe.library.get("stoplist_paths") != "stoplists":
+            unwired.append(f"{recipe.id} (no library picker)")
+        elif not recipe.library_defaults.get("stoplist_paths"):
+            unwired.append(f"{recipe.id} (picker, but nothing applied by default)")
+    assert not unwired, (
+        "these take stop lists but would apply none:\n  " + "\n  ".join(unwired))
+
+
+def test_every_relabeled_setting_is_a_real_setting_somewhere():
+    """
+    `SETTING_LABELS` renames settings on the options screen. A name in it that
+    no step actually takes is a label nobody will ever see -- most likely a
+    parameter that was renamed and left its friendlier wording behind.
+    """
+    from taters.ui.recipes import SETTING_LABELS
+
+    every = set()
+    for recipe in RECIPES:
+        try:
+            every |= set(describe(load_target(recipe.target)).names)
+        except ImportError:
+            continue
+        every |= set(recipe.vars)
+
+    orphans = sorted(set(SETTING_LABELS) - every)
+    assert not orphans, f"labeled but offered by nothing: {orphans}"
+
+
+def test_a_step_that_relabels_a_setting_really_has_it(recipe):
+    """Same check for a step's own overrides, which are the ones most likely
+    to name something that has since moved."""
+    if not recipe.labels:
+        return
+    try:
+        names = set(describe(load_target(recipe.target)).names)
+    except ImportError:
+        pytest.skip(f"{recipe.id} needs an optional dependency")
+    unknown = sorted(set(recipe.labels) - names - set(recipe.vars))
+    assert not unknown, f"{recipe.id} relabels settings it does not take: {unknown}"
+
+
+def test_a_setting_whose_meaning_changes_per_step_is_relabeled_there():
+    """
+    `engine` means "who tags and lemmatizes" almost everywhere, and the shared
+    label says so. In the topic-count sweep it means which topic model to fit,
+    which is a different thing -- so that step overrides it, and this is what
+    stops the shared wording quietly describing the wrong setting.
+    """
+    sweep = by_id("topic_count_sweep")
+    assert sweep.labels.get("engine") == "which topic model"
+    assert sweep.labels.get("engine_nlp") == "tagging engine"
 
 
 # ---------------------------------------------------------------------------
@@ -394,7 +614,15 @@ def test_the_gpu_steps_are_the_ones_we_think_they_are():
         "doc_term_matrix",
         "parts_of_speech",
         "score_with_model",             # the saved model may be stanza-built
-        "topic_model_mem_apply",        # likewise: the theme model's tokenizer
+        # the topic models all build their own matrix, which means they all
+        # tokenize -- and under engine="stanza" that is a model on the GPU.
+        # `topic_model_mem` only joined this list when the matrix moved inside
+        # it; before that somebody else did the tokenizing and it really was
+        # pure linear algebra.
+        "topic_model_mem", "topic_model_mem_apply",
+        "topic_model_lda", "topic_model_lda_apply",
+        "topic_model_nmf", "topic_model_nmf_apply",
+        "topic_count_sweep",            # builds one matrix, same as the models
         "word_vectors_train",           # likewise: tokenizing under stanza
         "word_vectors_apply",
         "cohesion",              # stanza prep and/or the embedding model

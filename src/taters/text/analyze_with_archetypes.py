@@ -9,6 +9,12 @@ from ..helpers.doc_text import DOCUMENT_PATTERN
 from ..helpers.text_gather import (resolve_analysis_ready)
 from ..helpers.provenance import TEXT_GRAIN, TEXT_INPUT, records_settings
 from ..helpers.cliargs import CliSpec
+from ..helpers.feature_columns import ColumnSpec
+
+FEATURE_COLUMNS = ColumnSpec(
+    label="Archetypes",
+    dynamic="one column per archetype in the file the user picked",
+)
 
 @records_settings(binding=TEXT_INPUT, grain=TEXT_GRAIN,
                   outputs=("out_features_csv",),

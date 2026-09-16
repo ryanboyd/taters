@@ -484,6 +484,14 @@ def fit_pca_csv(
 
     from datetime import date
 
+    # this kind is deliberately *not* in `helpers/model_spec.MODEL_TYPES`, so
+    # it cannot be imported into the library or picked by "score with a saved
+    # model". everywhere else in taters a PCA rides inside the instrument that
+    # used it -- MEM's themes are its projection, and a ridge fitted on
+    # components carries its reduction and replays it when it scores. this
+    # pair is the one freestanding PCA, and it is a Python-API tool. a test
+    # pins the exemption, so registering it is a deliberate decision rather
+    # than something to discover later.
     model = {
         "kind": "taters-pca-model",
         "format": PCA_MODEL_FORMAT,
@@ -687,13 +695,20 @@ def apply_in_memory(x, axes: dict):
                                            dtype=np.float64)
 
 
-def component_names(n: int) -> list:
+def component_names(n: int, kind: str = "Component") -> list:
     """``Component_1 … Component_n`` -- one name everywhere. The file API
     wrote ``PC_1`` and the in-analysis reduction ``Component_1`` for the same
     thing, so a reader met two names for one idea in one results folder.
     ``Component_1 … Component_n`` -- what the analyses call them, so a
-    loadings table and a results table can be read side by side."""
-    return [f"Component_{i + 1}" for i in range(n)]
+    loadings table and a results table can be read side by side.
+
+    ``kind`` names them something more specific when the caller knows what is
+    being reduced. Reducing a topic model's topics does not give you
+    "components", it gives you supertopics, and a results table full of
+    ``Component_3`` is one more thing to look up -- see
+    :func:`taters.helpers.feature_columns.reduced_name`, which is what decides.
+    """
+    return [f"{kind}_{i + 1}" for i in range(n)]
 
 
 # ---------------------------------------------------------------------------

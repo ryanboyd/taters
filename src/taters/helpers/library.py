@@ -118,6 +118,8 @@ MODEL_LOADERS: Dict[str, Tuple[str, str]] = {
     "ridge": ("..stats.ridge", "taters.stats.ridge"),
     "classifier": ("..stats.classify", "taters.stats.classify"),
     "mem": ("..text.topic_model_mem", "taters.text.topic_model_mem"),
+    "lda": ("..text.topic_model_lda", "taters.text.topic_model_lda"),
+    "nmf": ("..text.topic_model_nmf", "taters.text.topic_model_nmf"),
     "word_vectors": ("..text.word_vectors", "taters.text.word_vectors"),
     "text_predictor": ("..text.finetune_predictor", "taters.text.finetune_predictor"),
     "hf_classifier": ("..text.hf_classifier", "taters.text.hf_classifier"),

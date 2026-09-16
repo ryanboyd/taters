@@ -67,6 +67,12 @@ from ..helpers.model_spec import class_label, one_model_path, output_label, slug
 from ..helpers.progress import announce
 from ..helpers.provenance import TEXT_GRAIN, TEXT_INPUT, records_settings
 from ..helpers.text_gather import resolve_analysis_ready
+from ..helpers.feature_columns import ColumnSpec
+
+FEATURE_COLUMNS = ColumnSpec(
+    label="Hugging Face classifier",
+    dynamic="pred_/p_ columns named from the model's own labels and classes",
+)
 
 __all__ = ["HF_CLASSIFIER_KIND", "CheckpointInfo", "inspect_checkpoint",
            "checkpoint_problem", "cached_hub_classifiers", "import_hf_classifier",

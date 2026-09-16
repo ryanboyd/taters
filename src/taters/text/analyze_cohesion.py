@@ -43,6 +43,7 @@ from typing import (Callable, Dict, List, Literal, Optional, Sequence, Tuple,
 
 from ..helpers.atomic import atomic_write
 from ..helpers.doc_text import DOCUMENT_PATTERN
+from ..helpers.feature_columns import ColumnSpec
 from ..helpers.progress import announce
 from ..helpers.text_gather import (resolve_analysis_ready)
 from .ngram_prep import make_sentence_stream, pooled_text_workers
@@ -681,6 +682,19 @@ def header_columns(connective_names: Optional[Sequence[str]] = None,
                  "repeated_content_lemmas",
                  "repeated_content_and_pronoun_lemmas"))
     return cols
+
+
+#: Declared from the function that writes the header, so the two cannot drift.
+#: `connective_names=()` keeps the connective lists off the import path -- they
+#: are files, and reading them here would make importing this module do I/O. The
+#: connective columns are named by whichever list files are in play, so they are
+#: the part nothing can check; `semantic=True` includes the four embedding
+#: columns, which exist only when that pass runs but are ours either way.
+FEATURE_COLUMNS = ColumnSpec(
+    label="Cohesion (TAACO)",
+    names=tuple(header_columns(connective_names=(), semantic=True)),
+    dynamic="one column per connective list, named by the list file",
+)
 
 
 # ---------------------------------------------------------------------------

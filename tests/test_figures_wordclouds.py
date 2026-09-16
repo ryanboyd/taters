@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import pytest
 
+from taters.helpers.feature_columns import SEPARATOR
 from taters.figures import wordclouds as wc
 
 pytest.importorskip("numpy")
@@ -164,17 +165,21 @@ def test_component_clouds_take_the_strongest_loadings_of_both_signs():
     rows = [{"feature_set": "dictionary", "feature": f,
              "dictionary_Component_1": c1, "dictionary_Component_2": c2}
             for f, c1, c2 in (("happy", "0.9", "0.1"), ("sad", "-0.8", "0.2"),
-                              ("meh", "0.05", "0.7"), ("dictionary.WC", "0.3", ""))]
+                              ("meh", "0.05", "0.7"),
+                              (f"dictionary{SEPARATOR}WC", "0.3", ""))]
     specs = wc.clouds_for_components(rows, analysis="ridge", component_words=2)
     assert [s.name for s in specs] == ["dictionary_Component_1",
                                        "dictionary_Component_2"]
     assert {s.folder for s in specs} == {"ridge-regression/dictionary/components"}
     assert specs[0].analysis == "Ridge regression" and specs[0].kind == "component"
     assert dict(specs[0].words) == {"happy": 0.9, "sad": -0.8}
-    # the collision prefix comes off the label
+    # the collision prefix comes off the label. spelled with the shared
+    # constant rather than typed out: this fixture said "dictionary.WC" back
+    # when assemble joined with a dot, and would have gone on passing against
+    # a stripper that had stopped matching what assemble actually writes.
     labels = {w for w, _ in wc.clouds_for_components(
         rows, analysis="ridge", component_words=10)[0].words}
-    assert "WC" in labels and "dictionary.WC" not in labels
+    assert "WC" in labels and f"dictionary{SEPARATOR}WC" not in labels
 
 
 def test_frequency_by_group_sums_the_matrix_columns_per_level():
@@ -377,6 +382,101 @@ def test_theme_pictures_land_in_the_run_and_the_loadings_are_found_by_name(tmp_p
     section = (out / "_sections" / "60-word-clouds.md").read_text(encoding="utf-8")
     assert "What the themes that appear above are made of" in section
     assert "ridge-regression/dictionary/themes/" in section
+
+
+def test_a_supertopic_is_drawn_in_words_not_in_topic_names():
+    """
+    Reduce fifty topics to ten and you get `Component_3`, whose cloud can only
+    name topics -- "Topic_7, Topic_22" -- which is a second puzzle on top of
+    the first. A supertopic cloud composes the words straight through:
+    term-by-topic times topic-by-supertopic.
+
+    Here supertopic 1 contrasts two food topics against two work topics, so
+    the food words have to come out positive (blue) and the work words
+    negative (red).
+    """
+    theme_rows = [
+        {"term": "bread", "Topic_1": "0.5", "Topic_2": "0.4", "Topic_3": "0.0", "Topic_4": "0.0"},
+        {"term": "butter", "Topic_1": "0.5", "Topic_2": "0.1", "Topic_3": "0.0", "Topic_4": "0.0"},
+        {"term": "office", "Topic_1": "0.0", "Topic_2": "0.0", "Topic_3": "0.6", "Topic_4": "0.2"},
+        {"term": "deadline", "Topic_1": "0.0", "Topic_2": "0.0", "Topic_3": "0.4", "Topic_4": "0.8"},
+    ]
+    # the statistics stage names these `Supertopic_N` when what it reduced was
+    # a topic model, so that is what arrives here
+    comp_rows = [
+        {"feature_set": "lda_topics", "feature": f, "Supertopic_1": c}
+        for f, c in (("Topic_1", "0.9"), ("Topic_2", "0.8"),
+                     ("Topic_3", "-0.9"), ("Topic_4", "-0.7"))
+    ]
+    (spec,) = wc.clouds_for_supertopics(
+        comp_rows, theme_rows, analysis="ridge",
+        set_name="lda_topics", top_words=10)
+
+    words = dict(spec.words)
+    assert words["bread"] > 0 and words["butter"] > 0
+    assert words["office"] < 0 and words["deadline"] < 0
+    assert spec.kind == "supertopic"
+    assert spec.folder == "ridge-regression/lda_topics/supertopics"
+    assert "Supertopic 1" in spec.title
+
+
+def test_a_word_at_both_ends_of_a_supertopic_cancels_out():
+    """
+    The behavior that makes the signed composition worth having. A term sitting
+    equally in the topics at each end does not distinguish the ends, so it
+    should fall away rather than dominate the picture -- which is what would
+    happen if the loadings were taken as absolute values before composing.
+    """
+    theme_rows = [
+        {"term": "bread", "Topic_1": "0.6", "Topic_2": "0.0"},
+        {"term": "office", "Topic_1": "0.0", "Topic_2": "0.6"},
+        {"term": "the", "Topic_1": "0.4", "Topic_2": "0.4"},
+    ]
+    comp_rows = [
+        {"feature_set": "t", "feature": "Topic_1", "Component_1": "0.9"},
+        {"feature_set": "t", "feature": "Topic_2", "Component_1": "-0.9"},
+    ]
+    (spec,) = wc.clouds_for_supertopics(comp_rows, theme_rows, analysis="ridge",
+                                        set_name="t", top_words=10)
+    weights = dict(spec.words)
+    assert abs(weights.get("the", 0.0)) < 0.01, weights
+    assert abs(weights["bread"]) > 0.5 and abs(weights["office"]) > 0.5
+
+
+def test_a_set_that_is_not_a_topic_model_gets_no_supertopic_clouds():
+    """Reducing a hundred dictionary categories gives components, not
+    supertopics: there are no topics underneath to compose words from."""
+    theme_rows = [{"term": "bread", "Theme_1": "0.6"}]
+    comp_rows = [{"feature_set": "dictionary", "feature": "posemo",
+                  "Component_1": "0.9"}]
+    assert wc.clouds_for_supertopics(
+        comp_rows, theme_rows, analysis="ridge",
+        set_name="dictionary", top_words=10) == []
+
+
+def test_component_clouds_also_get_their_topics_expanded(tmp_path):
+    """
+    The other half. A component cloud names `dic_3` as a word, and that says
+    nothing on its own -- exactly the complaint that `themes/` was built for
+    on ridge results. Components were left out of that expansion, so reducing
+    a topic model gave you two layers of names and no words anywhere.
+    """
+    pytest.importorskip("PIL")
+    from csvhelpers import write_rows
+
+    out = _fitted(tmp_path, pca="all")
+    dic_cols = [f"dic_{i}" for i in range(10)]
+    write_rows(tmp_path / "dictionary_loadings.csv", ["term"] + dic_cols,
+               [[f"term{j}"] + [f"{(j - 5) / 10:.2f}" if (i + j) % 3 else "0"
+                                for i in range(10)] for j in range(12)])
+
+    folder = wc.stats_wordclouds(out, verbose=False)
+    root = folder / "ridge-regression" / "dictionary"
+    assert (root / "components").is_dir(), "the component clouds themselves"
+    assert sorted(q.name for q in (root / "themes").glob("*.png")), (
+        "a component named its features and nothing expanded them into words")
+    assert not (root / "dictionary").exists(), (
+        "the set name was doubled into the path")
 
 
 def test_a_combination_of_tables_gets_no_cloud_of_its_own():

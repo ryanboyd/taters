@@ -634,7 +634,9 @@ def test_a_classifier_fitted_on_components_is_applied_to_raw_features(tmp_path):
     model = tmp_path / "fit" / "models" / "classifier__lang__cond.json"
     doc = json.loads(model.read_text(encoding="utf-8"))
     assert doc["input_columns"] == ["sig", "noise"]
-    assert all(p.startswith("Component_") for p in doc["predictors"])
+    # prefixed by the set it was reduced from, always -- so a predictor name
+    # still says where it came from once it is out of this run
+    assert all(p.startswith("lang_Component_") for p in doc["predictors"])
     scored = _read(apply_classifier_csv(model_json=model, input_csv=table,
                                         out_csv=tmp_path / "s.csv",
                                         verbose=False))

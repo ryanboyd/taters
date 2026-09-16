@@ -20,6 +20,12 @@ from .atomic import SCRATCH_SUFFIX
 from .provenance import TEXT_GRAIN, records_settings
 from .cliargs import CliSpec
 from .csvio import widen_csv_field_limit
+from .feature_columns import ColumnSpec
+
+FEATURE_COLUMNS = ColumnSpec(
+    label="Spreadsheet columns",
+    dynamic="the user's own columns, carried through under their own names",
+)
 
 widen_csv_field_limit()
 

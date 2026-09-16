@@ -41,3 +41,9 @@
       members_order: alphabetical
       show_source: true
       show_root_heading: true
+
+::: taters.helpers.feature_columns
+    options:
+      members_order: source
+      show_source: true
+      show_root_heading: true

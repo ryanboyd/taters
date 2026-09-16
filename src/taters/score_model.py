@@ -46,6 +46,12 @@ from typing import Callable, Dict, List, Optional, Sequence, Union
 from .helpers.model_spec import (MODEL_WORK_DIR, ModelInfo, describe,
                                  one_model_path, slug)
 from .helpers.cliargs import CliSpec
+from .helpers.feature_columns import ColumnSpec
+
+FEATURE_COLUMNS = ColumnSpec(
+    label="Saved model scores",
+    dynamic="`<model name>__...` columns, so the saved model names them",
+)
 
 PathLike = Union[str, Path]
 

@@ -2606,7 +2606,22 @@ def _setting_choice(recipe: _recipes.Recipe, param: ParamSpec, var_specs: Dict[s
         shown = _describe_library_value(
             recipe.library[param.name], current,
             default_names=recipe.library_defaults.get(param.name, ()))
-    label = (key or param.name).replace("_", " ")
+    # the options screen's own word for this setting, where the parameter's
+    # name is a programmer's one. per-step first, because a name can mean
+    # different things in different steps.
+    #
+    # every lookup that can go by the PARAMETER does. a shared row arrives
+    # here keyed by the variable, and the two names need not match: the
+    # sweep's `engine_nlp` reads the shared `engine`, so asking for
+    # labels["engine"] handed the tagging-engine row the sweep's word for
+    # its OWN engine parameter -- "which topic model — nltk". the variable
+    # name is only the last resort, which is also how `pattern` gets called
+    # "which files to read" in both menus instead of "txt pattern" in one.
+    setting = key or param.name
+    label = (recipe.labels.get(param.name)
+             or _recipes.SETTING_LABELS.get(setting)
+             or _recipes.SETTING_LABELS.get(param.name)
+             or setting.replace("_", " "))
     if indent:
         label = INDENT + label
     return Choice(

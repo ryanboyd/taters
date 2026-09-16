@@ -16,8 +16,6 @@ from pathlib import Path
 
 import pytest
 
-from taters.text.analyze_ngram_frequencies import analyze_ngram_frequencies
-from taters.text.build_doc_term_matrix import build_doc_term_matrix
 from taters.stats.pca import varimax as _varimax
 from taters.text.topic_model_mem import (
     MODEL_FORMAT,
@@ -25,6 +23,18 @@ from taters.text.topic_model_mem import (
     topic_model_mem,
 )
 from csvhelpers import _read
+
+def matrix_of(out) -> Path:
+    """Where a step put the matrix it built for itself.
+
+    Derived from the output's *stem*, not a fixed `matrix/` beside it: two
+    steps writing into one folder would otherwise share one matrix folder,
+    which is how three topic models came to build over each other's and how an
+    apply left a frozen vocabulary for a later fit to pick up.
+    """
+    out = Path(out)
+    return out.with_name(f"{out.stem}_matrix")
+
 
 FOOD = "potato gravy butter salt dinner".split()
 WORK = "meeting deadline email boss office".split()
@@ -62,25 +72,25 @@ def _two_theme_docs(n=80, cross=0.0, seed=11):
 
 
 def _fitted(tmp_path, docs, **mem_kwargs):
-    """corpus -> freq list -> DTM -> fitted MEM; returns paths dict."""
+    """corpus -> fitted MEM; returns paths dict.
+
+    The frequency list and the matrix used to be built here and handed in.
+    MEM builds its own now -- every topic model wants a different one, and a
+    shared matrix meant two of them clobbering each other's file -- so this
+    passes the corpus and then looks in the `matrix/` folder beside the
+    results for what MEM made.
+    """
     src = _corpus_csv(tmp_path, docs)
-    freq = analyze_ngram_frequencies(
+    scores = Path(topic_model_mem(
         csv_path=src, text_cols=["text"], id_cols=["text_id"],
         gathered_csv=tmp_path / "gathered.csv",
-        out_features_csv=tmp_path / "freq.csv",
-        min_freq=1, min_obs_pct=0, min_token_count=1,
-        overwrite_existing=True,
-        **{k: mem_kwargs[k] for k in ("lemmatize", "pos_tagged") if k in mem_kwargs})
-    dtm = build_doc_term_matrix(
-        freq_list_csv=freq, analysis_csv=tmp_path / "gathered.csv",
-        out_features_csv=tmp_path / "dtm.csv", overwrite_existing=True,
-        **{k: mem_kwargs[k] for k in ("lemmatize", "pos_tagged") if k in mem_kwargs})
-    scores = topic_model_mem(
-        dtm_csv=dtm, freq_list_csv=freq,
         out_features_csv=tmp_path / "mem.csv", overwrite_existing=True,
-        **mem_kwargs)
-    return {"src": src, "gathered": tmp_path / "gathered.csv", "freq": freq,
-            "dtm": dtm, "scores": Path(scores),
+        min_freq=1, min_obs_pct=0, min_token_count=1,
+        **mem_kwargs))
+    matrix = matrix_of(scores)
+    return {"src": src, "gathered": tmp_path / "gathered.csv",
+            "freq": matrix / "freq_list.csv", "dtm": matrix / "dtm.csv",
+            "scores": scores,
             "model": tmp_path / "mem_model.json",
             "loadings": tmp_path / "mem_loadings.csv",
             "eigen": tmp_path / "mem_eigenvalues.csv"}
@@ -220,12 +230,34 @@ def test_a_pos_tagged_model_roundtrips(tmp_path):
     assert "pos" in loads[0], "tagged loadings must name each term's tag"
 
 
-def test_a_vocabulary_mismatch_is_refused_not_modeled(tmp_path):
-    paths = _fitted(tmp_path, _two_theme_docs())
-    with pytest.raises(ValueError, match="must agree"):
-        topic_model_mem(dtm_csv=paths["dtm"], freq_list_csv=paths["freq"],
-                        out_features_csv=tmp_path / "bad.csv",
-                        overwrite_existing=True, vocab_top_n=3)
+def test_the_matrix_cannot_disagree_with_the_vocabulary_any_more(tmp_path):
+    """
+    This used to be `test_a_vocabulary_mismatch_is_refused_not_modeled`: MEM was
+    handed a matrix and a frequency list built by other steps, re-derived the
+    vocabulary, and refused when the two did not line up -- because nothing
+    guaranteed they had been made with the same settings.
+
+    MEM builds both itself now, so there is no mismatch left to refuse. What
+    replaces the refusal is this: ask for a different vocabulary and you get a
+    different matrix, built to match, rather than an error or -- far worse --
+    the wrong terms scored quietly.
+    """
+    src = _corpus_csv(tmp_path, _two_theme_docs())
+    widths = {}
+    for name, top_n in (("narrow", 3), ("wide", 12)):
+        out = Path(topic_model_mem(
+            csv_path=src, text_cols=["text"], id_cols=["text_id"],
+            out_features_csv=tmp_path / name / "mem.csv",
+            min_freq=1, min_obs_pct=0, min_token_count=1,
+            vocab_top_n=top_n, overwrite_existing=True))
+        header = (matrix_of(out) / "dtm.csv").read_text(
+            encoding="utf-8-sig").splitlines()[0]
+        widths[name] = len(header.split(",")) - 2      # less text_id, token_count
+
+    # not an exact count: `vocab_top_n` is a cut on a ranked list and ties at
+    # the boundary come along with it. what has to hold is that the setting
+    # reached the matrix at all, and that the two runs did not share a file.
+    assert widths["narrow"] < widths["wide"], widths
 
 
 def test_a_model_from_a_newer_taters_is_refused(tmp_path):
@@ -359,7 +391,11 @@ def test_the_theme_table_carries_a_settings_record(tmp_path):
     rec = pv.read(paths["scores"])
     assert rec is not None, "the topic model wrote no record"
     assert rec["instrument"], "the fit's own settings are the instrument"
-    assert "dtm_csv" in rec["binding"], "the matrix is what the chain walks to"
+    # the corpus is the binding now. it used to be the matrix and the frequency
+    # list, because other steps built those and the chain had to walk back
+    # through their records to reach the gather; MEM makes them itself, so the
+    # gather is one hop away and this is the same binding every text step uses.
+    assert "csv_path" in rec["binding"], "the corpus is what the chain walks to"
 
 
 def test_the_model_carries_the_punctuation_rule_and_old_models_keep_theirs(

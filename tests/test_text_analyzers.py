@@ -338,7 +338,11 @@ def test_the_three_input_modes_are_resolved_in_one_place():
     # 16 with hf_classifier (an imported Hugging Face classifier reads text
     # through the same gather as everything else)
     # 17 with VADER sentiment
-    assert len(callers) == 17, sorted(f.name for f in callers)
+    # 18 with LDA topics (topic_model_mem was already counted -- `apply_mem_model`
+    #    gathered text long before the fit did)
+    # 19 with NMF topics
+    # 20 with the topic-count sweep
+    assert len(callers) == 20, sorted(f.name for f in callers)
 
 
 def test_every_readability_metric_still_exists_on_textstat():
@@ -355,26 +359,16 @@ def test_every_readability_metric_still_exists_on_textstat():
     porting the analyzer: it reads the metric list out of the module and
     asks textstat itself whether each one is still callable.
     """
-    import ast
-
     import textstat
 
-    from taters.text import analyze_readability as module
+    from taters.text.analyze_readability import METRICS
 
-    # the module's file, not the function's: `analyze_readability` is
-    # decorated, so its __code__ belongs to the wrapper in provenance.py.
-    # and we read the list with ast rather than a regex, which quietly
-    # matched nothing at all when a name gained a digit
-    tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
-    listed: list = []
-    for node in ast.walk(tree):
-        if (isinstance(node, ast.Assign)
-                and any(isinstance(x, ast.Name) and x.id == "metrics"
-                        for x in node.targets)
-                and isinstance(node.value, ast.List)):
-            listed = [e.value for e in node.value.elts
-                      if isinstance(e, ast.Constant)]
-            break
+    # this used to dig the list out of the module with `ast`, because it lived
+    # inside the function and `analyze_readability` is decorated -- its
+    # __code__ belongs to the wrapper in provenance.py. the list is a module
+    # constant now (the column registry needs to read it too), so we just
+    # import it.
+    listed = list(METRICS)
     assert len(listed) >= 15, f"the metric list moved or shrank: {listed}"
 
     missing = [m for m in listed if not callable(getattr(textstat, m, None))]

@@ -671,9 +671,21 @@ def reduce_sets(sets, columns, *, pca, n_components: int, rotation: bool,
         scores[complete] = _pca.apply_in_memory(matrix[complete], axes)
         unscored = int((~complete).sum())
         cols_used = usable
-        prefix = "" if len(chosen) == 1 and len(sets) == 1 else f"{name}_"
-        names = [f"{prefix}{c}"
-                 for c in _pca.component_names(axes["n_components"])]
+        # the set's name, always -- even when it is the only set in the run and
+        # nothing here needs telling apart. it used to be dropped in that case,
+        # on the grounds that `Supertopic_1` is unambiguous when there is only
+        # one thing it could have come from. it is, inside that run. it stops
+        # being so the moment the column is quoted in a paper, merged into
+        # another study's table, or read a year later, and the name is the only
+        # thing that travels with it.
+        prefix = f"{name}_"
+        # a component built out of a topic model's topics is a supertopic, and
+        # calling it one costs nothing here and saves a lookup every time
+        # somebody reads the results.
+        from ..helpers.feature_columns import reduced_name
+
+        names = [f"{prefix}{c}" for c in _pca.component_names(
+            axes["n_components"], reduced_name(usable, set_name=name))]
         new_sets[name] = names
         reductions[name] = {"features": list(usable), "axes": axes,
                             "components": list(names)}

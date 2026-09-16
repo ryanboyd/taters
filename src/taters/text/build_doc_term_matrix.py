@@ -34,6 +34,12 @@ from ..helpers.text_gather import (resolve_analysis_ready)
 from .ngram_prep import TAG_SEP, make_token_stream, tags_of, words_of
 from ..helpers.provenance import TEXT_GRAIN, TEXT_INPUT, records_settings
 from ..helpers.cliargs import CliSpec
+from ..helpers.feature_columns import ColumnSpec
+
+FEATURE_COLUMNS = ColumnSpec(
+    label="Document-term matrix",
+    dynamic="one column per vocabulary term, so the corpus names them",
+)
 
 PathLike = Union[str, Path]
 

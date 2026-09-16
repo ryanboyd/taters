@@ -9,6 +9,7 @@ chose reaches the column headings in their results.
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -288,6 +289,54 @@ def test_an_unregistered_kind_refuses_rather_than_guessing():
     assert "MODEL_TYPES" in str(e.value)
 
 
+def test_every_model_file_the_toolkit_writes_has_a_registered_kind():
+    """
+    The registry is only useful if it is complete, and nothing until now
+    noticed a kind that gets *written* but never registered.
+
+    That is exactly how LDA and NMF shipped unusable: both fits saved a
+    perfectly good model file, and the import gate refused it by name --
+    "not a model this build can score" -- so the apply steps could never be
+    reached. The failure was at the seam, so neither side's tests saw it.
+
+    So: every ``taters-...-model`` tag spelled anywhere in the source has to
+    be a kind the registry knows. The scan is deliberately blunt rather than
+    looking for ``"kind":`` -- LDA and NMF write ``"kind": MODEL_KIND``, so
+    a scan for the literal spelling would have missed the two modules that
+    prompted the test.
+
+    PCA is the one exemption, and deliberately so: in this application a PCA
+    is never a standalone instrument, it is a component of one. MEM's themes
+    *are* its mu/sigma/projection; a ridge or classifier fitted on components
+    carries its reduction inside its own model file and replays it when it
+    scores. `fit_pca_csv` can save a freestanding one, but that is a
+    Python-API tool with no wizard presence, and the registry is the list of
+    instruments a saved file can be scored with. Registering it stays a live
+    option if it ever gets a recipe of its own.
+    """
+    import re
+
+    from taters.helpers.model_spec import MODEL_TYPES
+
+    src = Path(__file__).resolve().parent.parent / "src" / "taters"
+    written = {}
+    for py in sorted(src.rglob("*.py")):
+        if py.name == "model_spec.py":
+            continue      # the registry itself, where naming a tag proves nothing
+        for tag in re.findall(r'"(taters-[a-z0-9-]+-model)"',
+                              py.read_text(encoding="utf-8")):
+            written.setdefault(tag, []).append(py.name)
+
+    assert written, "no model files are written anywhere -- the scan is broken"
+    unregistered = {tag: mods for tag, mods in written.items()
+                    if tag not in MODEL_TYPES and tag != "taters-pca-model"}
+    assert not unregistered, (
+        "these kinds are written but not in MODEL_TYPES, so the import gate "
+        f"refuses them: {unregistered}")
+    for tag in ("taters-mem-model", "taters-lda-model", "taters-nmf-model"):
+        assert tag in written, f"{tag} is registered but nothing writes it"
+
+
 def test_the_gate_applies_to_feature_models_and_not_to_text_models():
     """
     `needs` is the single word that decides whether a model's features have
@@ -304,7 +353,8 @@ def test_the_gate_applies_to_feature_models_and_not_to_text_models():
     for spec in MODEL_TYPES.values():
         by_needs.setdefault(spec.needs, []).append(spec.id)
     assert sorted(by_needs["features"]) == ["classifier", "ridge"]
-    assert by_needs["text"] == ["mem", "word_vectors", "text_predictor", "hf_classifier"]
+    assert by_needs["text"] == ["mem", "lda", "nmf", "word_vectors",
+                                "text_predictor", "hf_classifier"]
 
 
 def test_the_description_carries_the_control_recipe(tmp_path):

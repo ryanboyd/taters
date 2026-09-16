@@ -61,6 +61,7 @@ from typing import (Callable, Dict, Iterable, List, Literal, Optional,
 
 from ..helpers.atomic import atomic_write
 from ..helpers.cliargs import CliSpec
+from ..helpers.feature_columns import ColumnSpec
 from ..helpers.doc_text import DOCUMENT_PATTERN
 from ..helpers.model_spec import one_model_path
 from ..helpers.progress import announce
@@ -81,6 +82,13 @@ PathLike = Union[str, Path]
 #: incompatible change so an older Taters refuses a newer model.
 MODEL_KIND = "taters-word-vectors-model"
 MODEL_FORMAT = 1
+
+#: One column per vector dimension, plus whatever the concept dictionaries add.
+FEATURE_COLUMNS = ColumnSpec(
+    label="Word vectors",
+    patterns=("wv_{n}",),
+    dynamic="one column per concept-dictionary category, named from the file",
+)
 
 WEIGHTINGS = ("tokens", "types", "sif")
 FAMILIES = ("word2vec", "fasttext")

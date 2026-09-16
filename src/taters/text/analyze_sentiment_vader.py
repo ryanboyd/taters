@@ -36,6 +36,7 @@ from typing import Any, Callable, Dict, Literal, Optional, Sequence, Union
 from ..helpers.atomic import atomic_write
 from ..helpers.cliargs import CliSpec
 from ..helpers.doc_text import DOCUMENT_PATTERN
+from ..helpers.feature_columns import ColumnSpec
 from ..helpers.provenance import TEXT_GRAIN, TEXT_INPUT, records_settings
 from ..helpers.text_gather import resolve_analysis_ready
 
@@ -44,6 +45,8 @@ PathLike = Union[str, Path]
 #: The four scores, in the order VADER's own documentation lists them, with a
 #: prefix so they survive being merged beside everything else.
 METRICS = ("vader_neg", "vader_neu", "vader_pos", "vader_compound")
+
+FEATURE_COLUMNS = ColumnSpec(label="Sentiment (VADER)", names=METRICS)
 
 #: VADER's keys for the same four, in the same order.
 _KEYS = ("neg", "neu", "pos", "compound")

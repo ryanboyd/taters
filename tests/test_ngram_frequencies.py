@@ -680,13 +680,24 @@ def test_the_dtm_defaults_to_the_top_500_terms(tmp_path):
 
     sig = inspect.signature(build_doc_term_matrix)
     assert sig.parameters["vocab_top_n"].default == 500
-    # the recipe now reads it from a variable SHARED with the MEM topic model
-    # (the model re-derives the vocabulary, so the two have to agree), and the
-    # 500 default lives on that shared variable, wired into both steps
-    for rid in ("doc_term_matrix", "topic_model_mem"):
-        recipe = _r.by_id(rid)
-        assert recipe.with_["vocab_top_n"] == "{{var:vocab_top_n}}", rid
-        assert recipe.vars["vocab_top_n"]["default"] == 500, rid
+    # the matrix step reads it from a variable, and the 500 lives there.
+    #
+    # MEM used to read that same variable, because it scanned the matrix this
+    # step built and the two had to agree about the vocabulary. It builds its
+    # own now, so it keeps its own 500 on the function instead -- and the
+    # generative models ask for more, because they have more topics to separate
+    # and starve on a small vocabulary.
+    recipe = _r.by_id("doc_term_matrix")
+    assert recipe.with_["vocab_top_n"] == "{{var:vocab_top_n}}"
+    assert recipe.vars["vocab_top_n"]["default"] == 500
+
+    from taters.text.topic_model_lda import topic_model_lda
+    from taters.text.topic_model_mem import topic_model_mem
+
+    assert "vocab_top_n" not in _r.by_id("topic_model_mem").with_, (
+        "MEM takes the matrix step's vocabulary setting again")
+    assert inspect.signature(topic_model_mem).parameters["vocab_top_n"].default == 500
+    assert inspect.signature(topic_model_lda).parameters["vocab_top_n"].default == 2000
 
     # and in practice: 501 terms with distinct frequencies -> 500 columns
     words = " ".join(f"w{i:03d} " * i for i in range(1, 502))
@@ -1048,17 +1059,27 @@ def test_the_word_counting_steps_lemmatize_by_default(tmp_path):
     from taters.text.topic_model_mem import topic_model_mem
     from taters.ui import recipes as _r
 
-    for rid in ("ngram_frequencies", "doc_term_matrix", "topic_model_mem"):
+    # the frequency list and the matrix share one variable, so those two
+    # cannot disagree -- the matrix scans text against the frequency list's
+    # vocabulary, and a mismatch there fails silently rather than loudly
+    for rid in ("ngram_frequencies", "doc_term_matrix"):
         recipe = _r.by_id(rid)
         assert recipe.with_["lemmatize"] == "{{var:lemmatize}}", rid
         assert recipe.vars["lemmatize"]["default"] is True, rid
-    # one shared variable, so the three can't disagree. this matters because
-    # the matrix scans text against the frequency list's vocabulary, and a
-    # mismatch there fails silently rather than loudly
-    presets = {rid: _r.by_id(rid).with_["lemmatize"]
-               for rid in ("ngram_frequencies", "doc_term_matrix",
-                           "topic_model_mem")}
-    assert len(set(presets.values())) == 1
+    assert len({_r.by_id(rid).with_["lemmatize"]
+                for rid in ("ngram_frequencies", "doc_term_matrix")}) == 1
+
+    # every topic model builds its own frequency list and matrix, so it gets
+    # its own variable -- one study can want LDA over lemmatized unigrams and
+    # NMF over raw bigrams, and sharing this made that impossible. what still
+    # has to hold is the default: on, for every one of them.
+    for rid, var in (("topic_model_mem", "mem_lemmatize"),
+                     ("topic_model_lda", "lda_lemmatize"),
+                     ("topic_model_nmf", "nmf_lemmatize"),
+                     ("topic_count_sweep", "sweep_lemmatize")):
+        recipe = _r.by_id(rid)
+        assert recipe.with_["lemmatize"] == f"{{{{var:{var}}}}}", rid
+        assert recipe.vars[var]["default"] is True, rid
     # the functions themselves keep their own conservative defaults, since the
     # app's answer is a pipeline decision, not a change to the API
     for fn in (analyze_ngram_frequencies, build_doc_term_matrix,

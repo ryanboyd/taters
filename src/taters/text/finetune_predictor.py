@@ -58,6 +58,12 @@ from ._transformer_common import (CURATED_ENCODERS, PREDICTOR_KIND, window_lengt
                                   pool_hidden, resolve_encoder,
                                   run_with_oom_fallback, set_threads,
                                   torch_missing_reason)
+from ..helpers.feature_columns import ColumnSpec
+
+FEATURE_COLUMNS = ColumnSpec(
+    label="Text predictor",
+    dynamic="one column per trained output, named from the model",
+)
 
 widen_csv_field_limit()
 

@@ -10,6 +10,12 @@ from .progress import Ticker, announce
 from .provenance import records_settings
 from .cliargs import CliSpec
 from .csvio import widen_csv_field_limit
+from .feature_columns import ColumnSpec
+
+FEATURE_COLUMNS = ColumnSpec(
+    label="Gathered per-file tables",
+    dynamic="`<column>__<stat>` from whatever the gathered tables held",
+)
 
 PathLike = Union[str, Path]
 

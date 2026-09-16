@@ -1036,6 +1036,37 @@ def test_the_shared_section_and_the_step_menus_agree():
             assert choice.label.startswith(w.INDENT)
 
 
+def test_a_steps_own_word_for_a_setting_cannot_leak_onto_a_shared_row():
+    """
+    A step's `labels` are keyed by its *parameter*; the shared section keys
+    its rows by the *variable*. Where those two names differ, looking the
+    label up by the variable read one step's private word for one of its
+    parameters onto a row about something else entirely.
+
+    The sweep is the case that has both: `engine` is which topic model to
+    sweep, and `engine_nlp` is the shared tagging engine. The shared row
+    said "which topic model — nltk".
+    """
+    from taters.ui import recipes as _r
+    from taters.ui import wizard as w
+    from taters.ui.compose import compose
+
+    ids = ["topic_count_sweep", "parts_of_speech"]
+    steps = [_r.by_id(i) for i in ids]
+    var_specs = compose(ids, name="x", source="csv",
+                        input_path="t.csv")["meta"]["variables"]
+
+    rows = w.shared_rows(w.shared_variables(steps), var_specs, {}, {})
+    engine = next(c for var, _r_, _p, c in rows if var == "engine")
+    assert engine.label.startswith("tagging engine")
+    assert "topic model" not in engine.label
+
+    # and the sweep's own menu still gets the word the sweep asked for
+    sweep = _r.by_id("topic_count_sweep")
+    own = {c.value: c.label for c in _rows(sweep, var_specs)}
+    assert own["engine"].startswith("which topic model")
+
+
 # ---------------------------------------------------------------------------
 # picked, not typed
 # ---------------------------------------------------------------------------

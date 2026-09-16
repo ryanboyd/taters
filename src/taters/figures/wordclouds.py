@@ -48,6 +48,7 @@ from ..stats._common import SECTIONS_DIR, reusable, write_section
 from .render import pillow_missing_reason, render_wordcloud
 
 __all__ = ["CloudSpec", "stats_wordclouds", "theme_wordclouds",
+           "clouds_for_supertopics",
            "frequency_wordclouds", "neighbor_wordclouds",
            "clouds_for_ridge", "clouds_for_classifier",
            "clouds_for_correlations", "clouds_for_group_differences",
@@ -151,9 +152,18 @@ def _split_col(rows: Sequence[Row], first: str = "feature_set") -> Optional[str]
 
 
 def _label(feature: str, feature_set: str) -> str:
-    """The name a feature is shown under: assemble's ``<stem>.`` collision
-    prefix comes off, nothing else does."""
-    prefix = f"{feature_set}."
+    """The name a feature is shown under: assemble's collision prefix comes
+    off, nothing else does.
+
+    The separator is imported rather than spelled out here. It used to be a
+    dot and is now `__`, and this function silently stopped stripping anything
+    the day that changed -- every cloud drawn from a collided column would have
+    shown `readability__word_count` instead of `word_count`, with no error
+    anywhere to say so.
+    """
+    from ..helpers.feature_columns import SEPARATOR
+
+    prefix = f"{feature_set}{SEPARATOR}"
     return feature[len(prefix):] if feature.startswith(prefix) else feature
 
 
@@ -445,6 +455,86 @@ def clouds_for_components(rows: Sequence[Row], *, analysis: str,
                 legend="Bigger and darker = larger loading. Blue loads "
                        "positively, red negatively.",
                 words=chosen))
+    return out
+
+
+def clouds_for_supertopics(component_rows: Sequence[Row],
+                           theme_rows: Sequence[Row], *, analysis: str,
+                           set_name: str, top_words: int) -> List[CloudSpec]:
+    """
+    A PCA over a topic model's topics, drawn in the topic model's own words.
+
+    Reducing fifty topics to ten components leaves you with ``Component_3``,
+    and `clouds_for_components` can only draw that as a cloud of *topic names*
+    -- ``Topic_7``, ``Topic_22`` -- which is a second puzzle on top of the
+    first. These components are what we call **supertopics**, and this composes
+    the words straight through to them::
+
+        term-by-supertopic  =  term-by-topic  @  topic-by-supertopic
+
+    The right-hand matrix is the PCA loading, which in Taters is the
+    *correlation* between a topic's usage and the supertopic score
+    (eigenvector times the root of its eigenvalue, taken on the correlation
+    matrix). So each term's weight is a correlation-weighted blend of the word
+    profiles of the topics that make the supertopic up.
+
+    **Signs are kept, and that is the point.** A supertopic is a contrast, not
+    a bag: loading +0.8 on one topic and -0.7 on another means "high on this =
+    much of the first, little of the second". Both ends are the finding, and
+    they come out blue and red the way a MEM theme's do. A word equally
+    prominent at both ends cancels to near zero and drops out, which is
+    correct -- it does not distinguish the poles, so it is not what the
+    supertopic is about.
+    """
+    if not component_rows or not theme_rows:
+        return []
+
+    import numpy as np
+
+    heading, root = ANALYSES.get(
+        analysis, (analysis.replace("_", " ").capitalize(), slug(analysis)))
+    cols = list(component_rows[0].keys())
+    components = cols[cols.index("feature") + 1:]
+    rows = [r for r in component_rows if r.get("feature_set") == set_name]
+    if not rows or not components:
+        return []
+
+    # the topics this set's PCA was run over, as named in the loadings table
+    topic_cols = [c for c in theme_rows[0] if c not in ("term", "pos")]
+    usable = [(r, _label(r["feature"], set_name)) for r in rows]
+    usable = [(r, name) for r, name in usable if name in topic_cols]
+    if not usable:
+        return []               # this set's features are not the model's topics
+
+    labels = [(r.get("term", "") + (f" ({r['pos']})" if r.get("pos") else ""))
+              for r in theme_rows]
+    profile = np.array([[_num(r.get(name)) or 0.0 for _row, name in usable]
+                        for r in theme_rows], dtype=float)      # terms x topics
+
+    out: List[CloudSpec] = []
+    for comp in components:
+        loading = np.array([_num(row.get(comp)) or 0.0 for row, _name in usable],
+                           dtype=float)
+        if not loading.any():
+            continue
+        weights = profile @ loading                              # terms
+        order = np.argsort(np.abs(weights))[::-1][:max(0, int(top_words))]
+        chosen = [(labels[i], float(weights[i])) for i in order if weights[i]]
+        if not chosen:
+            continue
+        # the statistics stage already names these `Supertopic_3` when the set
+        # it reduced really was a topic model, so this only has to make the
+        # name readable -- and must not assume either spelling, because a
+        # mixed feature set genuinely does reduce to plain components.
+        pretty = comp.replace("_", " ")
+        out.append(CloudSpec(
+            analysis=heading, folder=f"{root}/{slug(set_name)}/supertopics",
+            set_name=set_name, kind="supertopic", name=slug(comp),
+            title=f"{heading}: {pretty} of {set_name} -- the words behind it",
+            legend="The topics making up this supertopic, composed back into "
+                   "their own words. Blue rises with the supertopic, red falls "
+                   "with it; bigger and darker is a stronger contribution.",
+            words=chosen))
     return out
 
 
@@ -912,10 +1002,39 @@ def stats_wordclouds(
     p = stats_dir / "classifier_coefficients.csv"
     if p.is_file():
         take(p, clouds_for_classifier(_rows(p, encoding), allowed))
+    loadings_cache: Dict[str, Optional[Path]] = {}
+
+    def theme_loadings(fs: str) -> Optional[Path]:
+        """Where this set's term-by-topic loadings live, looked up once."""
+        if fs not in loadings_cache:
+            loadings_cache[fs] = _theme_loadings_for(
+                fs, (sets or {}).get(fs, []), sources, stats_dir, encoding)
+        return loadings_cache[fs]
+
     for p in sorted(stats_dir.glob("*_pca_loadings*.csv")):
         analysis = p.name.split("_pca_loadings")[0]
-        take(p, clouds_for_components(_rows(p, encoding), analysis=analysis,
+        rows = _rows(p, encoding)
+        take(p, clouds_for_components(rows, analysis=analysis,
                                       component_words=component_words))
+        # ...and, where the reduced features are a topic model's topics, the
+        # same components drawn in words rather than in topic names. a cloud
+        # that says "Topic_7, Topic_22" only moves the puzzle along one step.
+        for fs in sorted({r.get("feature_set", "") for r in rows} - {""}):
+            path = theme_loadings(fs)
+            if path is None:
+                continue
+            # both inputs, not just the loadings: these clouds are computed
+            # from the PCA loadings at `p` as much as from the topic model's
+            # at `path`, and `reusable()` only redraws when an input is newer
+            # than the picture. Recording one of them meant re-running with a
+            # different `pca_components` kept every supertopic PNG, still
+            # showing the previous reduction.
+            made = clouds_for_supertopics(
+                rows, _rows(path, encoding), analysis=analysis,
+                set_name=fs, top_words=component_words)
+            for spec in made:
+                spec.inputs = [p, path]
+            specs.extend(made)
     if sets and group_col and table_csv.is_file():
         take(table_csv, clouds_for_frequencies_by_group(
             _rows(table_csv, encoding), sets, group_col=group_col,
@@ -926,18 +1045,22 @@ def stats_wordclouds(
     if sets:
         mentions: Dict[Tuple[str, str, str], Dict[str, List[Tuple[str, float]]]] = {}
         for s in specs:
-            if s.kind != "cloud" or not s.words or not s.set_name:
+            # components join the ordinary result clouds here: a component
+            # cloud names "Topic_7" too, and that says nothing until Topic_7's
+            # own words are in view. supertopic clouds are already in words, so
+            # expanding them would just redraw what they show.
+            if s.kind not in ("cloud", "component") or not s.words or not s.set_name:
                 continue
-            folder_root = s.folder.rsplit("/", 1)[0]
+            # everything above this set's own folder. a result cloud sits at
+            # "<analysis>/<set>" and a component at "<analysis>/<set>/components",
+            # so trimming one level off the right gives different answers for
+            # the two -- and the deeper one came out as "<analysis>/<set>/<set>".
+            folder_root = s.folder.split(f"/{slug(s.set_name)}")[0]
             bucket = mentions.setdefault((s.analysis, folder_root, s.set_name), {})
             for label, w in s.words:
                 bucket.setdefault(label, []).append((s.stat, w))
-        loadings_cache: Dict[str, Optional[Path]] = {}
         for (analysis, folder_root, fs), named in mentions.items():
-            if fs not in loadings_cache:
-                loadings_cache[fs] = _theme_loadings_for(
-                    fs, sets.get(fs, []), sources, stats_dir, encoding)
-            path = loadings_cache[fs]
+            path = theme_loadings(fs)
             if path is None:
                 continue
             made = clouds_for_theme_predictors(

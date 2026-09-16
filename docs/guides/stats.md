@@ -182,6 +182,17 @@ becomes the participant's average, named `openness_mean` (with an
 use. The wizard handles the renaming for you; if you are writing the YAML
 by hand, that is the trap to know about.
 
+A note on column names. Every measure Taters ships picks column names that
+no other measure uses, and there is a build test that refuses any two that
+could agree — so `flesch_reading_ease` means the same thing in every results
+table you will ever produce, whatever else was in the run. Where a clash is
+genuinely unavoidable, it gets resolved rather than ignored: if two tables
+both carry a column called `word_count`, or one of your own spreadsheet
+columns has the same name as a measure, both copies are renamed
+`<table>__<column>` — `readability__word_count` and `cohesion__word_count` —
+and the run's record lists every rename it made. Both copies, not just the
+second one, so the answer does not depend on which file was read first.
+
 ## Prediction (cross-validated ridge)
 
 The third question is the ambitious one: can the language *predict* the

@@ -27,12 +27,27 @@ from typing import Callable, Dict, List, Literal, Optional, Sequence, Union
 from ..helpers.atomic import atomic_write
 from ..helpers.progress import announce
 from ..helpers.doc_text import DOCUMENT_PATTERN
+from ..helpers.feature_columns import ColumnSpec
 from ..helpers.text_gather import (resolve_analysis_ready)
 from .ngram_prep import iter_ngrams, make_tagged_stream
 from ..helpers.provenance import TEXT_GRAIN, TEXT_INPUT, records_settings
 from ..helpers.cliargs import CliSpec
 
 PathLike = Union[str, Path]
+
+#: Every column is a part-of-speech tag, or an n-gram of them, under a `pos_`
+#: prefix -- `pos_NN`, `pos_DT_NN`. Which tags appear depends on the corpus and
+#: the tagger, so the prefix is the declarable part and it is what keeps these
+#: out of everybody else's way.
+FEATURE_COLUMNS = ColumnSpec(
+    label="Parts of speech",
+    # `{*}` and not `{n}`: the tail is a tag, `pos_NN` and `pos_DT_NN`, so the
+    # numeric placeholder matched none of the columns this module writes -- and
+    # a pattern matching nothing cannot catch a future measure colliding with
+    # it, which is the one job the registry has.
+    patterns=("pos_{*}",),
+    dynamic="one column per tag or tag n-gram actually seen in the corpus",
+)
 
 
 # the tagging path lives over in ngram_prep (one factory for both engines) so

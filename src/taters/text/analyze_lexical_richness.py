@@ -14,6 +14,7 @@ from statistics import mean
 
 from ..helpers.atomic import atomic_write
 from ..helpers.doc_text import DOCUMENT_PATTERN
+from ..helpers.feature_columns import ColumnSpec
 from ..helpers.provenance import TEXT_GRAIN, TEXT_INPUT, records_settings
 from ..helpers.text_gather import (resolve_analysis_ready)
 from ..helpers.cliargs import CliSpec
@@ -21,6 +22,22 @@ from ..helpers.cliargs import CliSpec
 # ------------------------------------------------------------------------------
 # Lightweight tokenization (lower, strip digits, strip punctuation)
 # ------------------------------------------------------------------------------
+
+#: The measures whose names never change. A module constant so the column
+#: registry can read them without running anything -- see
+#: `helpers/feature_columns.py` for why two measures must never agree on a name.
+METRICS_FIXED = ("ttr", "rttr", "cttr", "herdan_c", "summer_s", "dugast",
+                 "maas", "yule_k", "yule_i", "herdan_vm", "simpson_d")
+
+#: The other five carry their window or threshold in the name, so two runs at
+#: different settings cannot produce the same column with different meanings --
+#: `msttr_50` and `msttr_100` are not the same measure.
+FEATURE_COLUMNS = ColumnSpec(
+    label="Lexical richness",
+    names=METRICS_FIXED,
+    # mtld carries a *threshold*, so its tail is `0_72`, not a plain integer
+    patterns=("msttr_{n}", "mattr_{n}", "mtld_{*}", "hdd_{n}", "vocd_{n}"),
+)
 
 _punct_table = str.maketrans({p: " " for p in string.punctuation})
 _digit_re = re.compile(r"[0-9]+")
@@ -609,10 +626,7 @@ def analyze_lexical_richness(
         return out_features_csv
 
     # 3) name our metrics
-    metrics_fixed = [
-        "ttr", "rttr", "cttr", "herdan_c", "summer_s", "dugast", "maas",
-        "yule_k", "yule_i", "herdan_vm", "simpson_d",
-    ]
+    metrics_fixed = list(METRICS_FIXED)
     m_msttr = f"msttr_{msttr_window}"
     m_mattr = f"mattr_{mattr_window}"
     m_mtld  = f"mtld_{str(mtld_threshold).replace('.', '_')}"

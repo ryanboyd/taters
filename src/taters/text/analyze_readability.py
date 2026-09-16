@@ -8,6 +8,7 @@ import csv
 
 from ..helpers.atomic import atomic_write
 from ..helpers.doc_text import DOCUMENT_PATTERN
+from ..helpers.feature_columns import ColumnSpec
 from ..helpers.text_gather import (resolve_analysis_ready)
 from ..helpers.provenance import TEXT_GRAIN, TEXT_INPUT, records_settings
 from ..helpers.cliargs import CliSpec
@@ -29,6 +30,36 @@ def _require_textstat():
             '    pip install "taters[readability]"\n\n'
             "or add `textstat` to your environment."
         ) from e
+
+
+#: The columns this writes, in order. A module constant rather than a list
+#: inside the function because two other places need it: the column registry
+#: that keeps measures from colliding with each other (see
+#: `helpers/feature_columns.py`), and the tests. Every name is a `textstat`
+#: function name -- that is how `_score_text` looks each one up, and why a
+#: metric textstat drops comes back as an empty column rather than an error.
+METRICS = (
+    "flesch_reading_ease",
+    "smog_index",
+    "flesch_kincaid_grade",
+    "coleman_liau_index",
+    "automated_readability_index",
+    "dale_chall_readability_score",
+    "difficult_words",
+    "linsear_write_formula",
+    "gunning_fog",
+    "text_standard",
+    "spache_readability",
+    "syllable_count",
+    "lexicon_count",
+    "sentence_count",
+    "char_count",
+    "avg_sentence_length",
+    "avg_syllables_per_word",
+    "avg_letter_per_word",
+)
+
+FEATURE_COLUMNS = ColumnSpec(label="Readability", names=METRICS)
 
 
 # ---- Per-document scoring (runs inline or in a worker process) ---------------
@@ -278,26 +309,7 @@ def analyze_readability(
         return out_features_csv
 
     # 3) our list of metrics
-    metrics = [
-        "flesch_reading_ease",
-        "smog_index",
-        "flesch_kincaid_grade",
-        "coleman_liau_index",
-        "automated_readability_index",
-        "dale_chall_readability_score",
-        "difficult_words",
-        "linsear_write_formula",
-        "gunning_fog",
-        "text_standard",
-        "spache_readability",
-        "syllable_count",
-        "lexicon_count",
-        "sentence_count",
-        "char_count",
-        "avg_sentence_length",
-        "avg_syllables_per_word",
-        "avg_letter_per_word",
-    ]
+    metrics = list(METRICS)
 
     # 4) figure out the output's shape from the input's header alone. the
     # gatherer writes the analysis-ready table with commas no matter what the

@@ -410,6 +410,23 @@ def _write_mem(doc: dict, labels: Sequence[str]) -> None:
     doc["model"]["themes"] = [str(label) for label in labels]
 
 
+def _read_topics(doc: dict):
+    """LDA and NMF both name their components in ``model.topics``, so one
+    pair of functions serves both: the names are the outputs *and* the
+    columns, exactly as MEM's themes are."""
+    topics = list((doc.get("model") or {}).get("topics") or [])
+    return topics, topics, []
+
+
+def _write_topics(doc: dict, labels: Sequence[str]) -> None:
+    topics = list((doc.get("model") or {}).get("topics") or [])
+    if len(labels) != len(topics):
+        raise ValueError(
+            f"this model has {len(topics)} topic(s) and {len(labels)} new "
+            f"name(s) were given")
+    doc["model"]["topics"] = [str(label) for label in labels]
+
+
 def _read_word_vectors(doc: dict):
     """Outputs are the dimensions (renamable by prefix); the columns add one
     ``sim_<dictionary>__<category>`` per category of every concept
@@ -544,6 +561,16 @@ MODEL_TYPES: Dict[str, ModelType] = {
         score="taters.text.topic_model_mem:apply_mem_model",
         needs="text", read=_read_mem,
         write_outputs=_write_mem, bulk_outputs=True),
+    "taters-lda-model": ModelType(
+        id="lda", label="LDA topic model", kind_tag="taters-lda-model",
+        score="taters.text.topic_model_lda:apply_lda_model",
+        needs="text", read=_read_topics,
+        write_outputs=_write_topics, bulk_outputs=True),
+    "taters-nmf-model": ModelType(
+        id="nmf", label="NMF topic model", kind_tag="taters-nmf-model",
+        score="taters.text.topic_model_nmf:apply_nmf_model",
+        needs="text", read=_read_topics,
+        write_outputs=_write_topics, bulk_outputs=True),
     "taters-word-vectors-model": ModelType(
         id="word_vectors", label="word vectors",
         kind_tag="taters-word-vectors-model",

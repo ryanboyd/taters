@@ -75,6 +75,11 @@ class Taters:
     def build_doc_term_matrix(self, **kwargs):                  return self.text.build_doc_term_matrix(**kwargs)
     def topic_model_mem(self, **kwargs):                        return self.text.topic_model_mem(**kwargs)
     def apply_mem_model(self, **kwargs):                        return self.text.apply_mem_model(**kwargs)
+    def topic_model_lda(self, **kwargs):                        return self.text.topic_model_lda(**kwargs)
+    def apply_lda_model(self, **kwargs):                        return self.text.apply_lda_model(**kwargs)
+    def topic_model_nmf(self, **kwargs):                        return self.text.topic_model_nmf(**kwargs)
+    def apply_nmf_model(self, **kwargs):                        return self.text.apply_nmf_model(**kwargs)
+    def sweep_topic_count(self, **kwargs):                      return self.text.sweep_topic_count(**kwargs)
     def train_word_vectors(self, **kwargs):                     return self.text.train_word_vectors(**kwargs)
     def apply_word_vectors(self, **kwargs):                     return self.text.apply_word_vectors(**kwargs)
     def import_word_vectors(self, **kwargs):                    return self.text.import_word_vectors(**kwargs)
@@ -206,6 +211,26 @@ class _TextAPI:
     def apply_mem_model(self, **kwargs):
         from .text.topic_model_mem import apply_mem_model
         return _forward(apply_mem_model, kwargs)
+
+    def topic_model_lda(self, **kwargs):
+        from .text.topic_model_lda import topic_model_lda
+        return _forward(topic_model_lda, kwargs)
+
+    def apply_lda_model(self, **kwargs):
+        from .text.topic_model_lda import apply_lda_model
+        return _forward(apply_lda_model, kwargs)
+
+    def topic_model_nmf(self, **kwargs):
+        from .text.topic_model_nmf import topic_model_nmf
+        return _forward(topic_model_nmf, kwargs)
+
+    def apply_nmf_model(self, **kwargs):
+        from .text.topic_model_nmf import apply_nmf_model
+        return _forward(apply_nmf_model, kwargs)
+
+    def sweep_topic_count(self, **kwargs):
+        from .text.topic_count_sweep import sweep_topic_count
+        return _forward(sweep_topic_count, kwargs)
 
     def train_word_vectors(self, **kwargs):
         from .text.word_vectors import train_word_vectors

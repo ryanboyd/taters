@@ -27,6 +27,7 @@ from typing import Any, Callable, Dict, Optional, Sequence, Union
 
 from ..helpers.atomic import atomic_write
 from ..helpers.doc_text import DOCUMENT_PATTERN
+from ..helpers.feature_columns import ColumnSpec
 from ..helpers.text_gather import (resolve_analysis_ready)
 from ..helpers.provenance import TEXT_GRAIN, TEXT_INPUT, records_settings
 from ..helpers.cliargs import CliSpec
@@ -43,6 +44,8 @@ _EMPTY_DICTIONARY = "%\n1\tPlaceholder\n%\nzzzz_taters_placeholder_zzzz\t1\n"
 #: What the output column is called. Plain words, because it is offered in a
 #: filter menu to people who do not know what `lexicon_count` means.
 WORD_COUNT_COLUMN = "word_count"
+
+FEATURE_COLUMNS = ColumnSpec(label="Word count", names=(WORD_COUNT_COLUMN,))
 
 
 def _coder():

@@ -39,13 +39,12 @@ def _freq_list(tmp_path, ready):
 
 
 def _mem_model(tmp_path, ready):
-    from taters.text.build_doc_term_matrix import build_doc_term_matrix
+    # MEM builds its own frequency list and matrix now -- every topic model
+    # wants a different one, and a shared matrix meant two of them rebuilding
+    # over each other -- so this just hands it the gathered corpus.
     from taters.text.topic_model_mem import topic_model_mem
-    freq = _freq_list(tmp_path, ready)
-    dtm = build_doc_term_matrix(freq_list_csv=freq, analysis_csv=ready,
-                                out_features_csv=tmp_path / "dtm.csv",
-                                overwrite_existing=True)
-    topic_model_mem(dtm_csv=dtm, freq_list_csv=freq, n_components=2,
+    topic_model_mem(analysis_csv=ready, n_components=2,
+                    min_freq=1, min_obs_pct=0, min_token_count=1,
                     out_features_csv=tmp_path / "mem.csv",
                     overwrite_existing=True)
     return tmp_path / "mem_model.json"

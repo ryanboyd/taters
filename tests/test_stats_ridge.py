@@ -888,7 +888,10 @@ def test_a_model_fitted_on_components_is_applied_to_raw_features(tmp_path):
                   pca_components=5, verbose=False)
     model = tmp_path / "models" / "ridge__all__outcome.json"
     doc = json.loads(model.read_text(encoding="utf-8"))
-    assert doc["predictors"] == [f"Component_{i}" for i in range(1, 6)]
+    # `all_` because a reduced column now always carries the name of the set
+    # it was built from, even when that set is the only one in the run -- the
+    # name is the only thing that travels with a column out of the run.
+    assert doc["predictors"] == [f"all_Component_{i}" for i in range(1, 6)]
     assert doc["input_columns"] == [f"f{i}" for i in range(5)]
     assert doc["reduction"]["features"] == doc["input_columns"]
     assert set(doc["reduction"]["axes"]) == {"kept", "mu", "sigma",

@@ -13,6 +13,13 @@ from ..helpers.text_gather import (resolve_analysis_ready)
 from ..helpers.provenance import TEXT_GRAIN, TEXT_INPUT, records_settings
 from ..helpers.cliargs import CliSpec
 from ..helpers.csvio import widen_csv_field_limit
+from ..helpers.feature_columns import ColumnSpec
+
+#: `e0, e1, ...` -- zero-indexed with no separator, which is what keeps them
+#: clear of transformer embeddings' `e_1, e_2, ...`. The two are one character
+#: apart and that is an accident of history rather than a design; declaring both
+#: is what stops the accident quietly becoming a collision.
+FEATURE_COLUMNS = ColumnSpec(label="Sentence embeddings", patterns=("e{n}",))
 
 widen_csv_field_limit()
 
