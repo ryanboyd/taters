@@ -97,6 +97,19 @@ and which were added for you.
 The checklist is also filtered by your input: vocal acoustics is not offered for
 a folder of essays, because there is no audio to measure.
 
+It is grouped, too. Rows sit under headings — *Style & readability*, *Topics &
+themes*, *Embeddings & vectors* and so on — arranged by what a measure tells
+you rather than by how it is computed, so you can look for the question you
+have instead of for the name of a method. That is why *Archetype similarity*
+sits with the dictionaries: it runs on embeddings, but what it gives you is a
+score against categories somebody defined in advance.
+
+A heading has its own box. Ticking it takes everything underneath in one
+press; untick one of its rows afterwards and the heading shows `[~]` to say it
+is partly ticked. A heading whose rows are all unavailable — *Score with saved
+models*, before you have saved any — is grayed out with them. Headings are not
+themselves things Taters produces: what you end up with is always the rows.
+
 ## The one question it has to ask you
 
 When something you picked needs a transcript, the app asks how to make one:

@@ -39,6 +39,7 @@ from .prompts import (MEASURE, PAUSE_MESSAGE, _REASON_MARK, _REASON_STYLE,
                       Cancelled, Choice, GoBack, QuestionaryPrompter,
                       Stage, _MIN_VISIBLE_ROWS, description_rows,
                       flip_tick_mark, note_lines, set_chrome_rows,
+                      set_tick_mark,
                       set_description_rows, with_annotation)
 
 __all__ = ["LivePrompter"]
@@ -64,6 +65,12 @@ _MARKERS = {
 #: Every hint names what [enter] acts on -- "the highlighted row" -- because
 #: the highlight itself was read as a state ("already selected? the default?
 #: the best one?") rather than as the cursor it is.
+#: What a row under a heading is prefixed with. The same shape the options
+#: screen uses for a dependent setting (`wizard.INDENT`), spelled here because
+#: `live` cannot import the wizard -- and resolved at import for the same
+#: reason the other markers are: the glyph set is settled once per process.
+ROW_INDENT = f"  {glyphs.INDENT} "
+
 _KEY_HINTS = {
     "select": "[↑↓] move · [enter] picks the highlighted row · [1-9] jump · [esc] back",
     # too many rows to number, so the hint had better not offer a digit
@@ -179,6 +186,32 @@ def _inquirer_control(application):
         if isinstance(window.content, InquirerControl):
             return window.content
     return None
+
+
+def _list_rows(control):
+    """The questionary rows inside a running control, or nothing."""
+    return getattr(control, "choices", None) or []
+
+
+def _row_titled(control, value, mark: str) -> None:
+    """Force one row's box, found by value. Used to move a row the pointer is
+    not on -- a child when its heading was ticked, or the other way about."""
+    for row in _list_rows(control):
+        if getattr(row, "value", None) == value:
+            row.title = set_tick_mark(row.title, mark)
+            return
+
+
+def _heading_mark(children, ticked) -> str:
+    """A heading's box, derived from its children: all, none, or some.
+
+    Derived rather than stored, so the heading can never disagree with what is
+    under it -- which is the bug this shape exists to make impossible.
+    """
+    if not children:
+        return " "
+    hit = sum(1 for c in children if c in ticked)
+    return "x" if hit == len(children) else " " if hit == 0 else "~"
 
 
 class LivePrompter(QuestionaryPrompter):
@@ -631,6 +664,7 @@ class LivePrompter(QuestionaryPrompter):
                navigate=None, breadcrumb=None,
                hint_override: Optional[str] = None,
                enter_gate: Optional[str] = None,
+               cascade=None,
                cycle=None) -> str:
         """
         Pick one option.
@@ -674,7 +708,8 @@ class LivePrompter(QuestionaryPrompter):
         # mid-walk brings its files' tickability along with it.
         toggles = set(toggle_values)
         if ticked is not None or toggles:
-            self._bind_space_toggle(question_obj.application, toggles, ticked)
+            self._bind_space_toggle(question_obj.application, toggles, ticked,
+                                    cascade=cascade)
         if navigate is not None:
             self._bind_navigation(question_obj.application, navigate, toggles)
         if enter_gate is not None:
@@ -749,7 +784,7 @@ class LivePrompter(QuestionaryPrompter):
             else merge_key_bindings([existing, bindings]))
 
     def _bind_space_toggle(self, application, toggle_values: set,
-                           ticked: Optional[set]) -> None:
+                           ticked: Optional[set], cascade=None) -> None:
         """
         Space ticks the pointed row, in place -- no exit, no redraw of the
         world, no flash.
@@ -773,6 +808,9 @@ class LivePrompter(QuestionaryPrompter):
 
         bindings = KeyBindings()
 
+        kids = dict((cascade or {}).get("children") or {})
+        head_of = dict((cascade or {}).get("parent") or {})
+
         @bindings.add(" ", eager=True)
         def _(event):
             control = _control()
@@ -781,8 +819,28 @@ class LivePrompter(QuestionaryPrompter):
             pointed = control.get_pointed_at()
             if pointed is None or pointed.value not in toggle_values:
                 return
-            ticked.symmetric_difference_update({pointed.value})
-            pointed.title = flip_tick_mark(pointed.title)
+            mine = kids.get(pointed.value)
+            if mine:
+                # a heading: drive every live child to one state rather than
+                # flipping each, so a half-ticked heading resolves one way
+                # instead of inverting into the other half
+                turning_on = any(c not in ticked for c in mine)
+                for child in mine:
+                    if turning_on:
+                        ticked.add(child)
+                    else:
+                        ticked.discard(child)
+                    _row_titled(control, child, "x" if turning_on else " ")
+                pointed.title = set_tick_mark(pointed.title,
+                                              "x" if turning_on else " ")
+            else:
+                ticked.symmetric_difference_update({pointed.value})
+                pointed.title = flip_tick_mark(pointed.title)
+                # a child moved, so its heading may have become partly ticked
+                head = head_of.get(pointed.value)
+                if head is not None:
+                    _row_titled(control, head,
+                                _heading_mark(kids.get(head, ()), ticked))
             event.app.invalidate()
 
         existing = application.key_bindings
@@ -900,17 +958,28 @@ class LivePrompter(QuestionaryPrompter):
         """
         ticked = {c.value for c in choices if c.checked}
         order = [c.value for c in choices]
+        # a heading is never ticked in its own right -- its box is computed
+        # from its children every time one of them moves, so the two cannot
+        # drift apart, and `order` below therefore returns recipe values only.
+        live = {c.value for c in choices if not c.disabled}
+        kids = {c.value: tuple(v for v in c.children if v in live)
+                for c in choices if c.children}
+        cascade = {"children": kids,
+                   "parent": {child: head
+                              for head, group in kids.items() for child in group}}
         rows = [Choice(self._TICKS_DONE, f"{glyphs.TICK} Done — use the ticked items",
                        help="Tick boxes with [space]; this row's [enter] "
                             "confirms them. It waits until something is "
                             "ticked.",
                        tone="good")]
         for c in choices:
-            mark = "x" if c.value in ticked else " "
-            rows.append(replace(c, label=f"[{mark}] {c.label}"))
+            mark = (_heading_mark(kids[c.value], ticked) if c.value in kids
+                    else "x" if c.value in ticked else " ")
+            rows.append(replace(
+                c, label=f"{ROW_INDENT * c.depth}[{mark}] {c.label}"))
         self.select(question, rows, numbered=False,
                     toggle_values=set(order), ticked=ticked,
-                    enter_gate=self._TICKS_DONE,
+                    enter_gate=self._TICKS_DONE, cascade=cascade,
                     hint_override=(_KEY_HINTS["checkbox"] if cycle is None else
                                    _KEY_HINTS["checkbox"].replace(
                                        " · [esc] back",

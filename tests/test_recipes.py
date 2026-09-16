@@ -51,6 +51,50 @@ def test_something_is_offered_to_the_user():
     assert user_facing(), "the feature checklist would be empty"
 
 
+def test_every_feature_step_sits_under_exactly_one_heading():
+    """
+    The promise the headings make. A step in no category vanishes from the
+    checklist entirely -- `categories_for` builds the screen from the table,
+    not from the catalog -- and a step in two would be offered twice and
+    ticked by two different headings.
+
+    So a new extractor that names no home fails here rather than silently
+    going missing from the one screen that offers it.
+    """
+    from taters.ui.recipes import FEATURE_CATEGORIES, SOURCES
+
+    placed = [m for c in FEATURE_CATEGORIES for m in c.members]
+    assert len(placed) == len(set(placed)), \
+        f"listed under two headings: {sorted({m for m in placed if placed.count(m) > 1})}"
+
+    every = {r.id for source in SOURCES for r in user_facing(source)}
+    assert set(placed) == every, (
+        f"no heading offers: {sorted(every - set(placed))}; "
+        f"headings name unknown or non-offered steps: {sorted(set(placed) - every)}")
+
+
+def test_every_heading_says_what_is_under_it():
+    """The help text is what someone reads before opening a branch; a heading
+    without one is a bare word on a screen built to stop being cryptic."""
+    from taters.ui.recipes import FEATURE_CATEGORIES
+
+    for category in FEATURE_CATEGORIES:
+        assert category.label and category.help, category.id
+        assert category.members, f"{category.id} is an empty heading"
+
+
+def test_a_heading_is_dropped_where_it_has_nothing_to_offer():
+    """The two audio headings are simply absent for a folder of essays --
+    shown empty, they would advertise things that source can never do."""
+    from taters.ui.recipes import categories_for
+
+    on_text = {c.id for c, _members in categories_for("csv")}
+    on_media = {c.id for c, _members in categories_for("media")}
+    assert {"transcription", "voice"} <= on_media
+    assert not ({"transcription", "voice"} & on_text)
+    assert on_text < on_media
+
+
 def test_every_requirement_has_a_producer():
     """A capability nothing produces is a step that can never run."""
     produced = {c for r in RECIPES for c in r.produces}

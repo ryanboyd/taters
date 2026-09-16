@@ -3353,6 +3353,97 @@ def by_id(recipe_id: str) -> Recipe:
         ) from None
 
 
+@dataclass(frozen=True)
+class FeatureCategory:
+    """One heading on the feature checklist, and what sits under it."""
+
+    id: str
+    label: str
+    help: str
+    members: Tuple[str, ...]
+
+
+#: The feature checklist, grouped. One flat list of 22 rows in catalog order
+#: said nothing about which rows belong together -- that the three topic models
+#: and the topic-count sweep are one family, or that readability and lexical
+#: richness answer related questions -- and every new extractor made it worse.
+#:
+#: Grouped by what a measure is *about* rather than by how it is computed, so
+#: that somebody looks for the thing they want to know rather than for the
+#: machinery that produces it. That is why `archetypes` sits with the
+#: dictionaries: it runs on sentence embeddings, but what it gives you is a
+#: score against theory-driven categories, which is the dictionary question.
+#:
+#: One central table rather than a field on each recipe, the way MODEL_TYPES
+#: and SETTING_LABELS are central: the whole taxonomy reads in one block, and
+#: the order and the headings have somewhere to live. `tags` was the other
+#: candidate and is deliberately not used -- compose reads it into every saved
+#: preset's `meta.tags`, so headings would leak onto disk.
+#:
+#: A test pins every user-facing extract recipe to exactly one category, so a
+#: new extractor that names no home fails the build rather than quietly
+#: vanishing from the checklist.
+FEATURE_CATEGORIES: Tuple[FeatureCategory, ...] = (
+    FeatureCategory(
+        "transcription", "Transcription & speakers",
+        "Turn the audio into text, and work out who said what. Everything "
+        "under the text headings below can then run on the result.",
+        ("transcribe", "diarize", "split_by_speaker")),
+    FeatureCategory(
+        "voice", "Voice & audio measures",
+        "Measures of how it sounded rather than what was said.",
+        ("acoustics", "whisper_embeddings")),
+    FeatureCategory(
+        "style", "Style & readability",
+        "How the language is put together -- how hard it is to read, how "
+        "varied the vocabulary, which parts of speech, how it hangs together.",
+        ("readability", "lexical_richness", "parts_of_speech", "cohesion")),
+    FeatureCategory(
+        "content", "Content categories & sentiment",
+        "Score the text against categories somebody defined in advance: a "
+        "dictionary, a sentiment lexicon, a set of archetypes.",
+        ("dictionaries", "sentiment_vader", "archetypes")),
+    FeatureCategory(
+        "topics", "Topics & themes",
+        "Let the corpus tell you what it is about, by finding the words that "
+        "rise and fall together.",
+        ("topic_model_mem", "topic_model_lda", "topic_model_nmf",
+         "topic_count_sweep")),
+    FeatureCategory(
+        "frequencies", "Word & phrase frequencies",
+        "Counts over the whole corpus rather than measures of each text.",
+        ("ngram_frequencies", "doc_term_matrix")),
+    FeatureCategory(
+        "vectors", "Embeddings & vectors",
+        "Turn each text into numbers that put similar meanings close "
+        "together.",
+        ("sentence_embeddings", "transformer_embeddings", "word_vectors_train")),
+    FeatureCategory(
+        "saved_models", "Score with saved models",
+        "Measure this corpus with something fitted somewhere else.",
+        ("score_with_model",)),
+)
+
+
+def categories_for(source: str = "media",
+                   stage: str = "extract") -> List[Tuple[FeatureCategory, List[Recipe]]]:
+    """
+    :func:`user_facing`, grouped into headings, in table order.
+
+    A category with nothing in it for this source is dropped rather than shown
+    empty -- the two audio headings simply are not there for a folder of
+    essays. Members come back in category order rather than catalog order,
+    because the heading is the promise about what is under it.
+    """
+    offered = {r.id: r for r in user_facing(source, stage)}
+    grouped = []
+    for category in FEATURE_CATEGORIES:
+        members = [offered[m] for m in category.members if m in offered]
+        if members:
+            grouped.append((category, members))
+    return grouped
+
+
 def user_facing(source: str = "media", stage: str = "extract") -> List[Recipe]:
     """
     The recipes to show in one wizard checklist, in catalog order.

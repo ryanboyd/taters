@@ -87,6 +87,14 @@ class Choice:
     #: should read as the affirmative act it is, not as one more entry in the
     #: pile of folders around it.
     tone: str = ""
+    #: How far this row is indented, for a list with headings. Purely
+    #: presentational -- the widget renders it and nothing else reads it.
+    depth: int = 0
+    #: The values this row is a heading for. Ticking a row with children ticks
+    #: all of them; a row with none behaves exactly as it always has. The map
+    #: is built from the choices themselves so that the checkbox protocol did
+    #: not need a second argument threaded through three implementations.
+    children: Tuple[str, ...] = ()
 
 
 def with_annotation(title, annotation: str):
@@ -108,26 +116,66 @@ def with_annotation(title, annotation: str):
     return rows
 
 
-def flip_tick_mark(title):
-    """
-    "[ ]" <-> "[x]" in a row's rendered title, whichever shape it has.
+#: The three box states a row can wear. "~" is a heading whose children are
+#: only partly ticked -- ASCII, because this has to read the same in PuTTY as
+#: it does in Windows Terminal, and because "-" would read as "disabled".
+TICK_MARKS = (" ", "x", "~")
 
-    questionary titles are either a plain string or a list of (style, text)
-    tuples (ours carry the annotation as a second tuple); the mark always
-    lives in the first text segment. Used by the in-place space toggle, where
-    the row must change on screen without the prompt being torn down.
-    """
-    def swap(text: str) -> str:
-        if "[ ]" in text:
-            return text.replace("[ ]", "[x]", 1)
-        return text.replace("[x]", "[ ]", 1)
 
+def _retitle(title, swap):
+    """Apply `swap` to a questionary title, whichever shape it has.
+
+    Titles are either a plain string or a list of (style, text) tuples (ours
+    carry the annotation as a second tuple); the mark always lives in the
+    first text segment.
+    """
     if isinstance(title, str):
         return swap(title)
     if isinstance(title, list) and title:
         style, text = title[0]
         return [(style, swap(text))] + list(title[1:])
     return title
+
+
+def set_tick_mark(title, mark: str):
+    """
+    Force a row's box to a given state -- one of :data:`TICK_MARKS`.
+
+    :func:`flip_tick_mark` can only ever toggle, which is all a single row
+    needs. A heading has to be *set*: ticking it drives every child to the
+    same state regardless of where each one started, and unticking one child
+    drives the heading to "some" without anything having been flipped.
+    """
+    if mark not in TICK_MARKS:
+        raise ValueError(f"unknown tick mark {mark!r}; one of {TICK_MARKS}")
+
+    def swap(text: str) -> str:
+        for current in TICK_MARKS:
+            if f"[{current}]" in text:
+                return text.replace(f"[{current}]", f"[{mark}]", 1)
+        return text
+
+    return _retitle(title, swap)
+
+
+def flip_tick_mark(title):
+    """
+    "[ ]" <-> "[x]" in a row's rendered title, whichever shape it has.
+
+    Used by the in-place space toggle, where the row must change on screen
+    without the prompt being torn down. A heading's "[~]" counts as ticked
+    here, so flipping it clears it -- which is what somebody pressing space on
+    a half-ticked heading means.
+    """
+    def swap(text: str) -> str:
+        if "[ ]" in text:
+            return text.replace("[ ]", "[x]", 1)
+        for current in ("x", "~"):
+            if f"[{current}]" in text:
+                return text.replace(f"[{current}]", "[ ]", 1)
+        return text
+
+    return _retitle(title, swap)
 
 
 def ask_at_least_one(prompter: "Prompter", question: str,
@@ -528,9 +576,14 @@ class QuestionaryPrompter:
     def checkbox(self, question: str, choices: Sequence[Choice], *,
                  cycle: Optional[Callable[[str, int], Optional[str]]] = None
                  ) -> List[str]:
+        # plain spaces rather than the live renderer's glyph: this is the
+        # no-frills fallback, and stock questionary draws its own boxes, so
+        # the indent is the only thing saying which rows sit under a heading.
         return self._ask(self._q.checkbox(
             question,
-            choices=[self._to_q(c) for c in choices],
+            choices=[self._to_q(replace(c, label=f"{'    ' * c.depth}{c.label}")
+                                if c.depth else c)
+                     for c in choices],
             style=self._style,
             show_description=True,
         ))

@@ -655,6 +655,46 @@ def ask_source(prompter: Prompter,
 NOT_FOR_STATISTICS = "(not for statistics)"
 
 
+#: What a heading's row value looks like. A colon can never appear in a recipe
+#: id, so a heading can never be mistaken for one -- which matters because
+#: every consumer downstream of here calls `_recipes.by_id()` on what it is
+#: given and raises on anything it does not know.
+CATEGORY_PREFIX = "category:"
+
+
+def category_value(category_id: str) -> str:
+    return f"{CATEGORY_PREFIX}{category_id}"
+
+
+def expand_categories(picked: Sequence[str],
+                      rows: Sequence[Choice]) -> List[str]:
+    """
+    Turn a checklist answer into recipe ids: headings become their children.
+
+    The live checklist already ticks the children when a heading is ticked, so
+    this is usually a no-op there. It is the whole mechanism in `--plain` mode
+    and under the scripted prompter, where stock questionary has no in-place
+    toggle to cascade from -- which is the point of doing it here rather than
+    only in the key binding. Correctness does not depend on the TUI, and a
+    heading's value can never escape this function.
+
+    The answer comes back in *screen* order rather than the order things were
+    ticked, which is what the flat list did before there were headings: two
+    people who tick the same rows in a different order have asked for the same
+    pipeline and should get the same one.
+    """
+    enabled = {c.value: c for c in rows if not c.disabled}
+    wanted: set = set()
+    for value in picked:
+        row = enabled.get(value)
+        # a heading stands for its rows; anything else stands for itself
+        wanted.update(row.children if row is not None and row.children
+                      else [value])
+    return [c.value for c in rows
+            if c.value in wanted and c.value in enabled
+            and not c.value.startswith(CATEGORY_PREFIX)]
+
+
 def ask_features(prompter: Prompter, source: str = "media",
                  analyses: bool = False) -> List[str]:
     """
@@ -678,20 +718,36 @@ def ask_features(prompter: Prompter, source: str = "media",
     layout then cut down to "Pick something else to extract, whose measures
     the statistics" (a real report).
     """
-    choices = [
-        Choice(r.id, r.label,
-               (r.text_help or r.help) if source != "media" else r.help,
-               disabled=_no_saved_model(r) or unavailable_reason(r),
-               annotation=(NOT_FOR_STATISTICS
-                           if analyses and not r.feature_table else ""))
-        for r in _recipes.user_facing(source)
-    ]
+    def row(r) -> Choice:
+        return Choice(r.id, r.label,
+                      (r.text_help or r.help) if source != "media" else r.help,
+                      disabled=_no_saved_model(r) or unavailable_reason(r),
+                      annotation=(NOT_FOR_STATISTICS
+                                  if analyses and not r.feature_table else ""),
+                      depth=1)
+
+    choices: List[Choice] = []
+    for category, members in _recipes.categories_for(source):
+        rows = [row(r) for r in members]
+        choices.append(Choice(
+            category_value(category.id), category.label, category.help,
+            # a heading is only as available as what is under it: the saved-model
+            # heading has nothing to offer a library with no models in it.
+            disabled=("nothing here is available"
+                      if all(c.disabled for c in rows) else ""),
+            # and it only carries the warning when every row under it does,
+            # which is exactly the whole-corpus heading
+            annotation=(NOT_FOR_STATISTICS
+                        if rows and all(c.annotation for c in rows) else ""),
+            children=tuple(c.value for c in rows)))
+        choices.extend(rows)
     # the question here used to be "What do you want out of it?", and people
     # found it vague -- it didn't say that the answer is a set of feature
     # tables, or that the steps they depend on come along for free.
-    reason = ("Each row here is a table of measures Taters will produce, "
-              f"one row per {'file' if source == 'media' else 'text'}. Tick "
-              "as many as you like; anything a pick needs first -- "
+    reason = ("Each indented row here is a table of measures Taters will "
+              f"produce, one row per {'file' if source == 'media' else 'text'}"
+              ". Tick as many as you like -- ticking a heading takes "
+              "everything under it -- and anything a pick needs first -- "
               "converting audio, transcribing it, counting words -- is added "
               "for you.")
     if analyses:
@@ -701,9 +757,18 @@ def ask_features(prompter: Prompter, source: str = "media",
                    "and can come along but not carry the statistics.")
     prompter.reason(reason)
     while True:
-        picked = ask_at_least_one(
-            prompter, "Which features do you want to extract?", choices,
-            thing="one feature")
+        picked = expand_categories(
+            ask_at_least_one(
+                prompter, "Which features do you want to extract?", choices,
+                thing="one feature"),
+            choices)
+        if not picked:
+            # `ask_at_least_one` counts the boxes, and a heading is a box that
+            # may stand for nothing available. Belt and braces: the live screen
+            # grays such a heading out so the pointer cannot reach it.
+            prompter.note("  Nothing under that is available yet; pick "
+                          "something else.", style="yellow")
+            continue
         if not analyses or any(_recipes.by_id(p).feature_table
                                for p in picked):
             return picked

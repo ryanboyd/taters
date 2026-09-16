@@ -70,6 +70,12 @@ Lexical richness/diversity asks: *how varied is a speaker's vocabulary use?* Cla
 
 ### Archetypes (theory-driven, embedding-based)
 
+<!-- Filed here because it runs on sentence embeddings. Note that the wizard's
+     checklist groups it with the dictionaries instead, under "Content
+     categories & sentiment", because that is what it measures. Both are
+     true; the guide is organized by machinery and the checklist by what you
+     get out of it. -->
+
 Archetype analysis encodes each text with a **Sentence-Transformers** model and measures similarity to **curated seed phrases** (one CSV per construct). The model handles nuance; your archetype definitions provide **direction** in embedding space. Two
 validated archetype dictionaries — resilience and suicidality — ship with
 Taters and are listed, with their citations, under

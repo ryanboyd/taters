@@ -1350,6 +1350,89 @@ def test_space_ticks_in_place_without_leaving_the_prompt(staged):
     assert drawn  # at least the prompt rendered
 
 
+def test_space_on_a_heading_ticks_everything_under_it(staged):
+    """
+    The cascade, through the real key binding. A heading is not a pick in its
+    own right -- it never appears in the answer -- it is a way to tick the
+    rows beneath it in one press.
+    """
+    choices = [Choice("head", "Topics & themes",
+                      children=("lda", "nmf")),
+               Choice("lda", "LDA", depth=1),
+               Choice("nmf", "NMF", depth=1)]
+
+    picked, _drawn = render(
+        staged, "\x1b[B \x1b[A\r",          # ↓ to the heading, space, ↑ to Done, enter
+        lambda p: p.checkbox("Which?", choices))
+
+    assert picked == ["lda", "nmf"]
+    assert "head" not in picked
+
+
+def test_space_on_a_heading_again_clears_it(staged):
+    """
+    Pressing it twice is off, not inverted -- a half-ticked heading has to
+    resolve one way rather than swapping which half is ticked.
+
+    The unrelated row is ticked from the start and never touched: enter is
+    gated on *something* being ticked, so a screen that ends up empty can
+    never be confirmed, and the assertion below could not be reached.
+    """
+    choices = [Choice("head", "Topics", children=("lda", "nmf")),
+               Choice("lda", "LDA", depth=1, checked=True),
+               Choice("nmf", "NMF", depth=1),
+               Choice("other", "Readability", checked=True)]
+
+    # the heading starts partial (one of two ticked): one space fills it,
+    # the next empties it
+    picked, _drawn = render(
+        staged, "\x1b[B  \x1b[A\r",         # ↓, space, space, ↑, enter
+        lambda p: p.checkbox("Which?", choices))
+
+    assert picked == ["other"], "the heading's second press inverted it"
+
+
+def test_a_heading_does_not_tick_what_is_unavailable(staged):
+    """A grayed-out row stays grayed out: its heading cannot smuggle it in."""
+    choices = [Choice("head", "Saved models", children=("live", "gone")),
+               Choice("live", "A model", depth=1),
+               Choice("gone", "Another", depth=1, disabled="none saved yet")]
+
+    picked, _drawn = render(
+        staged, "\x1b[B \x1b[A\r",
+        lambda p: p.checkbox("Which?", choices))
+
+    assert picked == ["live"]
+
+
+def test_a_headings_box_reads_all_none_or_some():
+    """Derived from the children every time one moves, so the heading can
+    never disagree with what is under it."""
+    from taters.ui.live import _heading_mark
+
+    assert _heading_mark(("a", "b"), {"a", "b"}) == "x"
+    assert _heading_mark(("a", "b"), set()) == " "
+    assert _heading_mark(("a", "b"), {"a"}) == "~"
+    assert _heading_mark((), {"a"}) == " "
+
+
+def test_set_tick_mark_moves_a_row_to_a_state_rather_than_flipping_it():
+    """`flip` is all a single row needs; a heading has to be *set*, because
+    its children may have started anywhere."""
+    from taters.ui.live import flip_tick_mark, set_tick_mark
+
+    assert set_tick_mark("[ ] a", "x") == "[x] a"
+    assert set_tick_mark("[~] a", " ") == "[ ] a"
+    assert set_tick_mark("[x] a", "~") == "[~] a"
+    assert set_tick_mark([("class:text", "[~] a"),
+                          ("class:annotation", " 2 files")], "x") == \
+        [("class:text", "[x] a"), ("class:annotation", " 2 files")]
+    # and space on a half-ticked heading clears it rather than filling it
+    assert flip_tick_mark("[~] a") == "[ ] a"
+    with pytest.raises(ValueError, match="unknown tick mark"):
+        set_tick_mark("[ ] a", "?")
+
+
 def test_flip_tick_mark_handles_both_title_shapes():
     from taters.ui.live import flip_tick_mark
 
