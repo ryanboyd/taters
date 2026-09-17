@@ -29,12 +29,19 @@ Two commitments shape this module:
   training scores exactly.
 
 Eigenvalues here are those of the **correlation matrix** (they average 1.0),
-which is what both retention rules are stated over: ``n_components=0`` picks
+which is what the retention rules are stated over: ``n_components=0`` picks
 the count by parallel analysis (a theme is kept while its eigenvalue beats
-what a random matrix of the same size gives at that rank) or, on request,
-by the Kaiser criterion (keep eigenvalue >= 1). Rotation redistributes variance,
-so the reported per-theme eigenvalues and %-variance follow the rotated
-loadings, ordered largest first, exactly as classic MEM tooling reports them.
+what a random matrix of the same shape gives at that rank) or, on request, by
+the Kaiser criterion (keep eigenvalue >= a cutoff).
+
+Two files come out of this, because there are two quantities and only one of
+them is an eigenvalue. The **eigenvalues** file is the spectrum the rule read,
+every rank beside what chance reaches there. The **theme variance** file is
+each finished theme's sum of squared loadings -- which is the same quantity
+before rotation, and deliberately redistributed by it, so it comes out much
+flatter than the spectrum. Classic MEM tooling reports the second; this
+reports both, apart, because they are sorted lists of different things and a
+shared table made that look like a pairing.
 """
 
 from __future__ import annotations
@@ -50,7 +57,8 @@ from ..helpers.progress import Ticker, announce
 from ..helpers.model_spec import one_model_path
 from ..helpers.provenance import TEXT_GRAIN, TEXT_INPUT, records_settings
 from ..helpers.text_gather import (resolve_analysis_ready)
-from ..stats.pca import fit_axes, project_row, stream_moments, warn_if_wide
+from ..stats.pca import (_axes_at, _decompose, _retain_count,
+                         project_row, stream_moments, warn_if_wide)
 from .build_doc_term_matrix import (
     _load_vocabulary,
     column_names,
@@ -98,7 +106,7 @@ def _theme_row(text_id: str, token_count, cells, kept, mu, sigma, projection,
     # declaration is the right one -- the same one every other text step uses.
     binding=TEXT_INPUT, grain=TEXT_GRAIN,
     outputs=("out_features_csv", "out_model_json", "out_loadings_csv",
-             "out_eigenvalues_csv"),
+             "out_eigenvalues_csv", "out_theme_variance_csv"),
     # the themes are fitted to this corpus, so the honest way to measure them
     # on another is to apply the saved model. when we refit instead, a second
     # study picked a different number of themes, and a ridge fitted on the
@@ -118,6 +126,7 @@ def topic_model_mem(
     out_model_json: Optional[PathLike] = None,
     out_loadings_csv: Optional[PathLike] = None,
     out_eigenvalues_csv: Optional[PathLike] = None,
+    out_theme_variance_csv: Optional[PathLike] = None,
     overwrite_existing: bool = False,
     on_progress: Optional[Callable[[int, int], None]] = None,
     encoding: str = "utf-8-sig",
@@ -165,7 +174,12 @@ def topic_model_mem(
 
     # ----- MEM options -----
     n_components: int = 0,
-    retain: Literal["parallel", "kaiser"] = "parallel",
+    k_selection: Literal["parallel", "kaiser", "coherence",
+                         "coherence_exclusivity"] = "parallel",
+    kaiser_cutoff: float = 1.5,
+    k_values: Union[str, Sequence[int]] = _topics.DEFAULT_K_VALUES,
+    coherence_metric: Literal["npmi", "umass"] = "npmi",
+    top_terms: int = 15,
     rotation: bool = True,
     rounding: int = 4,
 ) -> Path:
@@ -209,13 +223,18 @@ def topic_model_mem(
         rather than topic, and leaving them in gives a first theme that is
         mostly "the".
     min_freq : int, default=5
-        Drop terms rarer than this from the vocabulary.
+        The **first** of two cuts: a term used fewer times than this anywhere
+        in the corpus is never counted, so it cannot reach the frequency list.
+        The ``vocab_*`` settings below then decide how many of the survivors
+        the model sees -- which is what ``vocab_min_freq`` does, and why the
+        two are not the same setting.
     min_obs_pct : float, default=0.10
-        Drop terms appearing in fewer than this *percent* of documents. This
-        is the setting that matters most for themes: a term almost nobody uses
-        cannot covary with anything.
+        Also the first cut: drop terms found in fewer than this *percent* of
+        documents. The setting that matters most for themes -- a term almost
+        nobody uses cannot covary with anything.
     min_token_count : int, default=10
-        Skip documents shorter than this many tokens entirely.
+        Skip whole *documents* shorter than this many tokens. A filter on
+        texts, not on terms, despite sitting among the term filters.
     min_npmi : float, optional
         Optional collocation threshold for orders above one. Default None:
         the metric is reported and filtering stays an analysis decision.
@@ -225,9 +244,25 @@ def topic_model_mem(
         and eigenvalue files are written next to it unless given their own
         paths (``<name>_model.json``, ``<name>_loadings.csv``,
         ``<name>_eigenvalues.csv``).
-    out_model_json, out_loadings_csv, out_eigenvalues_csv : optional
-        The reusable model (see :func:`apply_mem_model`), the term-by-theme
-        rotated loadings, and the per-theme eigenvalue / %-variance table.
+    out_model_json, out_loadings_csv : optional
+        The reusable model (see :func:`apply_mem_model`) and the term-by-theme
+        rotated loadings.
+    out_eigenvalues_csv : optional
+        The **spectrum**: one row per rank with the correlation matrix's
+        eigenvalue, the level chance alone reaches at that rank (under
+        parallel analysis), and whether it was kept. This is what the
+        retention rule read and the curve to judge signal by. Every rank is
+        listed, not just the kept ones, so you can see where the curve crosses.
+    out_theme_variance_csv : optional
+        What each finished **theme** accounts for: its sum of squared loadings
+        and that as a percent.
+
+        Deliberately a separate file from the eigenvalues, because the two do
+        not line up. Varimax rotates the kept axes within the space they span,
+        so a rotated theme is a remix of all of them and theme 3 is not built
+        from eigenvector 3. Both lists come out sorted descending, which is
+        the only thing they share -- and putting them in one table made that
+        coincidence look like a correspondence.
     overwrite_existing : bool, default=False
         If ``False`` and the scores file already exists, skip and return it.
     encoding : str, default="utf-8-sig"
@@ -257,27 +292,81 @@ def topic_model_mem(
         The ``rounding`` the matrix step used (its default). Only affects
         relfreq/tfidf cells; recorded so apply reproduces them digit for
         digit.
-    vocab_rule, vocab_min_freq, vocab_min_obs_pct, vocab_top_n, vocab_rank_by
-        The vocabulary rule the matrix was built with, and its setting; used
-        to re-derive (and verify) the exact term list, which the model then
-        carries. These have to match the matrix step exactly -- the check
-        below is what makes a mismatch an error rather than a model fitted
-        on the wrong terms -- so ``vocab_rule`` is a shared setting in the
-        app, not a per-step one.
+    vocab_rule : {"top_n", "min_obs_pct", "min_freq"}, default="top_n"
+        Which of the surviving terms become columns of the matrix.
+
+        This is the **second** of two cuts and the source of a long-standing
+        confusion. ``min_freq`` and ``min_obs_pct`` above decide which terms
+        get counted at all, so they never reach the frequency list; these
+        decide how many of the survivors the model actually sees. The names
+        are nearly the same and the jobs are not.
+
+        ``top_n`` takes the strongest ``vocab_top_n`` terms by
+        ``vocab_rank_by``. The other two rules keep everything above a
+        threshold instead, and read ``vocab_min_freq`` or
+        ``vocab_min_obs_pct`` respectively -- whichever one does not match the
+        rule is ignored.
+    vocab_top_n : int, default=500
+        How many terms the model gets under ``vocab_rule="top_n"``.
+    vocab_rank_by : {"obs_pct", "frequency"}, default="obs_pct"
+        What "strongest" means when taking the top N. ``obs_pct`` ranks by how
+        many documents a term appears in; ``frequency`` by how often it
+        appears in total -- so a word one document shouts four hundred times
+        tops the frequency ranking and all but vanishes under ``obs_pct``.
+        Spread is what themes are made of, which is why this is the default.
+    vocab_min_freq : float, default=0
+        The threshold under ``vocab_rule="min_freq"``: keep terms used at
+        least this many times across the corpus.
+    vocab_min_obs_pct : float, default=0
+        The threshold under ``vocab_rule="min_obs_pct"``: keep terms found in
+        at least this percent of documents.
     n_components : int, default=0
-        How many themes to keep. ``0`` picks automatically by ``retain``;
-        an explicit number is honored up to the number of non-constant
-        terms.
-    retain : {"parallel", "kaiser"}, default="parallel"
-        How ``0`` chooses. ``parallel`` is parallel analysis: a theme is
-        kept while its eigenvalue beats the 95th percentile of what fifty
-        random matrices of the same size produce at the same rank -- the
-        eigenvalues chance alone would give -- so a theme has to explain
-        more than noise does. ``kaiser`` keeps every eigenvalue above 1,
-        the older rule of thumb, which on a wide matrix keeps most of them
-        (one real corpus gave 101 themes). Both are generic PCA rules, not
-        MEM doctrine; the eigenvalues file and the model record how the
-        count was decided, so read them before trusting it.
+        How many themes to keep. ``0`` picks automatically by
+        ``k_selection``; an explicit number is honored up to the number of
+        non-constant terms.
+    k_selection : {"parallel", "kaiser", "coherence", "coherence_exclusivity"}, default="parallel"
+        How ``0`` chooses.
+
+        ``parallel`` is parallel analysis: a component is kept while its
+        eigenvalue beats the 95th percentile of what fifty random data sets of
+        the *same shape* produce at the same rank. That last part is why it is
+        the default. A document-term matrix is wide, and on a wide matrix
+        chance alone makes large eigenvalues: at 938 documents by 515 terms,
+        random noise produces eigenvalues up to about 3.0, so any fixed cutoff
+        below that keeps themes indistinguishable from noise. Parallel analysis
+        works out that ceiling for your matrix instead of assuming one.
+
+        ``kaiser`` keeps every component whose eigenvalue beats
+        ``kaiser_cutoff``, which is simple and reproducible but cannot know
+        the shape of your data. Both are cheap -- they read eigenvalues the
+        fit has already computed.
+
+        ``coherence`` and ``coherence_exclusivity`` instead *fit* at each of
+        ``k_values`` and score the themes' words, which is the same question
+        LDA and NMF answer and lets the three be compared on one footing.
+        They cost a varimax rotation per candidate count, not a whole refit,
+        because the eigen-decomposition underneath is computed once.
+    kaiser_cutoff : float, default=1.5
+        The eigenvalue a theme has to beat under ``kaiser``. The textbook
+        value is 1.0 -- one term's worth of variance -- but on a vocabulary of
+        hundreds of terms that keeps almost everything (one real corpus gave
+        101 themes), so this starts higher. Raising it further is often right:
+        a cutoff only means something if it clears the level chance alone
+        reaches at your matrix's shape, which is roughly
+        ``(1 + sqrt(terms / documents)) ** 2`` and is what ``parallel``
+        measures rather than guesses.
+    k_values : str or sequence of int
+        The theme counts the two scoring rules try. ``"5,10,20"`` as well as
+        a list. Counts this corpus is too small to support are skipped and
+        named rather than ending the run.
+    coherence_metric : {"npmi", "umass"}, default="npmi"
+        Which coherence. NPMI is bounded, which is what lets it be balanced
+        against exclusivity without rescaling.
+    top_terms : int, default=15
+        How many of a theme's words the scoring rules look at. Only its
+        *positive* pole counts: a theme is bipolar and its two ends
+        anti-correlate by construction, so mixing them would make every theme
+        score badly and the comparison across counts meaningless.
     rotation : bool, default=True
         Varimax-rotate the components. MEM is defined over rotated loadings;
         turn off only to inspect the raw principal axes.
@@ -313,6 +402,8 @@ def topic_model_mem(
         out_features_csv.with_name(f"{stem}_loadings.csv")
     eigen_path = Path(out_eigenvalues_csv) if out_eigenvalues_csv else \
         out_features_csv.with_name(f"{stem}_eigenvalues.csv")
+    variance_path = Path(out_theme_variance_csv) if out_theme_variance_csv else \
+        out_features_csv.with_name(f"{stem}_theme_variance.csv")
 
     if not overwrite_existing and out_features_csv.is_file():
         print("MEM theme scores output file already exists; returning existing file.")
@@ -397,10 +488,43 @@ def topic_model_mem(
     if n < 3:
         raise ValueError(f"Only {n} document(s) in {dtm_csv}; MEM needs a corpus.")
     announce(on_progress, "extracting themes")
-    kept, mu, sigma, loadings, projection, theme_eig, pct, retention = fit_axes(
-        n, sums, cross, n_components=n_components, rotation=rotation,
-        retain=retain, on_progress=on_progress)
-    k = projection.shape[1]
+    # the expensive half once, whatever happens next: a sweep over theme
+    # counts is then a varimax per count rather than a decomposition per count
+    kept, mu, sigma, eigvals, eigvecs = _decompose(n, sums, cross)
+    if n_components == 0 and k_selection in _topics.K_SELECTION_RULES:
+        import numpy as np
+
+        def fit_at(candidate):
+            themes, _proj, _eig, _pct = _axes_at(
+                kept, eigvals, eigvecs, candidate, rotation=rotation)
+            # a theme's words are its *positive* pole, put back where the
+            # whole vocabulary can see them: `kept` dropped the constant
+            # columns, and the co-occurrence counts are indexed over every
+            # term. Getting this wrong scores a theme against other words
+            # entirely, with no error anywhere.
+            weights = np.zeros((candidate, len(terms)))
+            weights[:, kept] = np.maximum(themes.T, 0.0)
+            return weights
+
+        def batches():
+            return _topics.stream_counts(dtm_csv, encoding=encoding, skip_cols=2)
+
+        n_components, _winner = _topics.select_k(
+            k_values=k_values, fit=fit_at, terms=terms, batches=batches,
+            engine="mem", rule=k_selection, metric=coherence_metric,
+            top_terms=top_terms, rounding=rounding,
+            out_stem=out_features_csv.with_name(f"{stem}_k_selection"),
+            encoding=encoding, on_progress=on_progress)
+        retention = {"rule": k_selection, "metric": coherence_metric,
+                     "n_components": int(n_components)}
+        k = n_components
+    else:
+        k, retention = _retain_count(
+            n, kept.size, eigvals, n_components=n_components,
+            retain=k_selection, kaiser_cutoff=kaiser_cutoff,
+            on_progress=on_progress)
+    loadings, projection, theme_eig, pct = _axes_at(
+        kept, eigvals, eigvecs, k, rotation=rotation)
     theme_names = [f"Theme_{i + 1}" for i in range(k)]
 
     kept_set = set(kept.tolist())
@@ -424,12 +548,37 @@ def topic_model_mem(
                 row.append(tags_of(gram))
             row.extend(round(float(v), rounding) for v in loadings[i])
             writer.writerow(row)
+    # Two quantities, two tables. They were one table with a shared `rank`
+    # column, which implied theme 3 was built from eigenvector 3 -- and it is
+    # not. Varimax rotates the kept axes within the space they span, so each
+    # rotated theme is a remix of all of them. Both lists are sorted
+    # descending and that is the only thing they have in common, which is
+    # exactly the kind of coincidence a shared column turns into a claim.
+
+    # the spectrum: what the retention rule read, and the curve to judge
+    # signal by. Every rank, not just the kept ones -- seeing where the curve
+    # crosses the chance line is the whole reason to look at it.
+    thresholds = list(retention.get("thresholds") or [])
     with atomic_write(eigen_path, newline="", encoding=encoding) as f:
         writer = csv.writer(f)
-        writer.writerow(["theme", "eigenvalue", "pct_variance"])
-        for name, eig, p in zip(theme_names, theme_eig, pct):
+        writer.writerow(["rank", "eigenvalue", "chance_threshold", "kept"])
+        for i, value in enumerate(eigvals):
+            writer.writerow([
+                i + 1, round(float(value), rounding),
+                round(float(thresholds[i]), rounding) if i < len(thresholds) else "",
+                "yes" if i < k else ""])
+
+    # and what each theme actually accounts for. Not an eigenvalue: a rotated
+    # theme is not an eigenvector, so it has none. This is its sum of squared
+    # loadings, which is the same quantity *before* rotation and deliberately
+    # redistributed by it -- which is why this column is much flatter than the
+    # spectrum, and why reading it as a scree curve looks like broken math.
+    with atomic_write(variance_path, newline="", encoding=encoding) as f:
+        writer = csv.writer(f)
+        writer.writerow(["theme", "variance", "pct_variance"])
+        for name, eig, p_ in zip(theme_names, theme_eig, pct):
             writer.writerow([name, round(float(eig), rounding),
-                             round(float(p), rounding)])
+                             round(float(p_), rounding)])
 
     # 4) the model itself: everything apply needs and nothing it doesn't.
     #    `device` is a runtime choice, not part of the instrument, so we do

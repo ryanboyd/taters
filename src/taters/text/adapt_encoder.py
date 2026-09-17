@@ -586,14 +586,14 @@ def _write_report(path: Path, doc: dict, manifest: Path, folder: Path, *,
         plot = line_plot(path.with_name(manifest.stem + "_loss.png"),
                          {"training loss": [(i + 1, float(v)) for i, v in enumerate(steps)]},
                          title="Training loss per optimizer step", x_label="step",
-                         y_label="loss", integer_x=False)
+                         y_label="loss", x_scale="linear")
         if plot is not None:
             lines += [f"![training loss]({plot.name})", ""]
         lr = line_plot(path.with_name(manifest.stem + "_lr.png"),
                        {"learning rate": [(i + 1, float(v)) for i, v in
                                           enumerate(t["learning_rate_trace"])]},
                        title="Learning-rate schedule", x_label="step",
-                       y_label="learning rate", integer_x=False)
+                       y_label="learning rate", x_scale="linear")
         if lr is not None:
             lines += [f"![learning rate]({lr.name})", ""]
     lines += ["## Outputs", "",

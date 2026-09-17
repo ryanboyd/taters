@@ -93,7 +93,8 @@ def _fitted(tmp_path, docs, **mem_kwargs):
             "scores": scores,
             "model": tmp_path / "mem_model.json",
             "loadings": tmp_path / "mem_loadings.csv",
-            "eigen": tmp_path / "mem_eigenvalues.csv"}
+            "eigen": tmp_path / "mem_eigenvalues.csv",
+            "variance": tmp_path / "mem_theme_variance.csv"}
 
 
 # ---------------------------------------------------------------------------
@@ -155,8 +156,19 @@ def test_two_planted_themes_are_recovered_and_ordered(tmp_path):
     eigenvalue table must come out in descending order."""
     paths = _fitted(tmp_path, _two_theme_docs(cross=0.6), n_components=2)
     loads = _read(paths["loadings"])
-    eig = [float(r["eigenvalue"]) for r in _read(paths["eigen"])]
+    # the themes' own variance, which is what "ordered" is about here
+    eig = [float(r["variance"]) for r in _read(paths["variance"])]
     assert eig == sorted(eig, reverse=True) and len(eig) == 2
+    # and the spectrum is its own table, descending too and strictly larger at
+    # the top: rotation moves variance down off the leading axis
+    spectrum = _read(paths["eigen"])
+    raw = [float(r["eigenvalue"]) for r in spectrum]
+    assert raw == sorted(raw, reverse=True)
+    assert raw[0] > eig[0], "rotation should have spread the first axis out"
+    # the spectrum runs past the cut, so the curve can be seen crossing
+    assert len(raw) > 2, "only the kept ranks were written; the curve is cut off"
+    assert [r["kept"] for r in spectrum[:2]] == ["yes", "yes"]
+    assert spectrum[2]["kept"] == ""
 
     def family_of_theme(col):
         top = sorted(loads, key=lambda r: -abs(float(r[col])))[:4]
@@ -176,16 +188,43 @@ def test_two_planted_themes_are_recovered_and_ordered(tmp_path):
 
 
 def test_kaiser_picks_the_component_count_automatically(tmp_path):
-    paths = _fitted(tmp_path, _two_theme_docs(), retain="kaiser")  # two planted blocks
-    eig = _read(paths["eigen"])
+    paths = _fitted(tmp_path, _two_theme_docs(), k_selection="kaiser",
+                    kaiser_cutoff=1.0)  # two planted blocks
+    eig = _read(paths["variance"])
     assert len(eig) == 2, "two planted blocks; Kaiser must find two themes"
     header = _read(paths["scores"])[0]
     assert "token_count" in header and "Theme_1" in header
 
 
+def test_the_spectrum_and_the_theme_variances_are_separate_tables(tmp_path):
+    """
+    They were one table with a shared `rank` column, and that column made a
+    claim that is false: theme 3 is not built from eigenvector 3. Varimax
+    rotates the kept axes within the space they span, so every rotated theme
+    is a remix of all of them. Both lists come out sorted descending, which is
+    the only thing they share -- and side by side that coincidence reads as a
+    correspondence.
+
+    So: two files, and neither carries a column that would let them be lined
+    up by row.
+    """
+    paths = _fitted(tmp_path, _two_theme_docs(), n_components=2)
+
+    spectrum = _read(paths["eigen"])
+    variance = _read(paths["variance"])
+    assert set(spectrum[0]) == {"rank", "eigenvalue", "chance_threshold", "kept"}
+    assert set(variance[0]) == {"theme", "variance", "pct_variance"}
+    # nothing in either table invites a join with the other
+    assert "theme" not in spectrum[0]
+    assert "rank" not in variance[0] and "eigenvalue" not in variance[0]
+    # and they are not even the same length, which is the honest shape: the
+    # spectrum has a rank for every term, the themes only for what was kept
+    assert len(spectrum) > len(variance)
+
+
 def test_an_explicit_component_count_is_honored(tmp_path):
     paths = _fitted(tmp_path, _two_theme_docs(), n_components=3)
-    assert [r["theme"] for r in _read(paths["eigen"])] == \
+    assert [r["theme"] for r in _read(paths["variance"])] == \
         ["Theme_1", "Theme_2", "Theme_3"]
 
 
@@ -430,12 +469,30 @@ def test_the_model_carries_the_punctuation_rule_and_old_models_keep_theirs(
     assert int(fresh[0]["token_count"]) == 3
 
 
-def test_parallel_analysis_is_the_default_theme_count_and_is_recorded(tmp_path):
+def test_the_kaiser_rule_records_the_cutoff_it_used(tmp_path):
     """
-    The Kaiser rule gave one real corpus 101 themes. Parallel analysis keeps
-    a theme only while its eigenvalue beats what a random matrix of the same
-    size produces at that rank; it is the default, and the model file says
-    which rule decided so the count can be argued with.
+    "Chosen by Kaiser" without the number is not a decision anyone can argue
+    with -- especially since the right number depends on the shape of the
+    matrix, and the textbook 1.0 is far below the level chance reaches on a
+    wide one.
+    """
+    import json
+
+    paths = _fitted(tmp_path, _two_theme_docs(), k_selection="kaiser",
+                    kaiser_cutoff=1.5)
+    model = json.loads(Path(paths["model"]).read_text(encoding="utf-8"))
+    retention = model["model"]["retention"]
+    assert retention["rule"] == "kaiser"
+    assert retention["cutoff"] == 1.5
+
+
+def test_parallel_analysis_is_the_default_and_records_its_thresholds(tmp_path):
+    """
+    The default because it is the only rule that adapts to the shape of the
+    matrix. A document-term matrix is wide, and chance alone makes large
+    eigenvalues on a wide one -- at 938 documents by 515 terms the noise
+    ceiling is about 3.0, so a fixed cutoff of 1.5 keeps a hundred themes
+    that are not there.
     """
     import json
 
@@ -444,4 +501,4 @@ def test_parallel_analysis_is_the_default_theme_count_and_is_recorded(tmp_path):
     retention = model["model"]["retention"]
     assert retention["rule"] == "parallel"
     assert len(retention["thresholds"]) == len(retention["unrotated_eigenvalues"])
-    assert len(_read(paths["eigen"])) == 2, "two planted blocks, two themes"
+    assert len(_read(paths["variance"])) == 2, "two planted blocks, two themes"

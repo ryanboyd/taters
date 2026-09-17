@@ -55,7 +55,8 @@ def machine(device_name: Optional[str] = None) -> str:
 
 
 def line_plot(path: Path, series, *, title: str, x_label: str, y_label: str,
-              integer_x: bool = True) -> Optional[Path]:
+              x_scale: str = "integer", dpi: Optional[int] = None,
+              scale: Optional[float] = None) -> Optional[Path]:
     """A line chart when Pillow and the renderer are available; None when
     not, so a report stands on its tables alone."""
     try:
@@ -66,7 +67,14 @@ def line_plot(path: Path, series, *, title: str, x_label: str, y_label: str,
         return None
     try:
         return line_chart(series, path, title=title, x_label=x_label,
-                          y_label=y_label, integer_x=integer_x)
+                          y_label=y_label, x_scale=x_scale, dpi=dpi,
+                          scale=scale)
+    except TypeError:
+        # a signature that does not match is a programmer's mistake, and
+        # swallowing it here turns it into a figure that silently stops being
+        # drawn. Everything else -- a missing font, data that cannot be
+        # ranged -- is the environment, and the report survives without it.
+        raise
     except Exception:
         return None
 

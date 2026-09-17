@@ -244,7 +244,7 @@ def test_each_topic_model_writes_into_a_folder_of_its_own():
     """
     folders = {}
     for rid in ("topic_model_mem", "topic_model_lda", "topic_model_nmf",
-                "topic_count_sweep"):
+                ):
         recipe = by_id(rid)
         out = recipe.with_.get("out_features_csv") or recipe.with_["out_csv"]
         parent = str(out).rsplit("/", 1)[0]
@@ -286,7 +286,7 @@ def test_the_declared_stop_lists_actually_become_paths():
     from taters.ui.wizard import _library_defaults
 
     for rid in ("ngram_frequencies", "topic_model_mem", "topic_model_lda",
-                "topic_model_nmf", "topic_count_sweep"):
+                "topic_model_nmf"):
         overrides: dict = {}
         _library_defaults([by_id(rid)], overrides)
         got = [Path(p).name for p in
@@ -308,7 +308,7 @@ def test_the_topic_models_do_not_share_a_vocabulary_setting():
     `lemmatize` for one model silently changes it for the others.
     """
     models = ["topic_model_mem", "topic_model_lda", "topic_model_nmf",
-              "topic_count_sweep"]
+              ]
     vocabulary = ("lemmatize", "pos_tagged", "keep_punctuation", "ngram_n")
 
     seen: dict = {}
@@ -417,16 +417,60 @@ def test_a_step_that_relabels_a_setting_really_has_it(recipe):
     assert not unknown, f"{recipe.id} relabels settings it does not take: {unknown}"
 
 
-def test_a_setting_whose_meaning_changes_per_step_is_relabeled_there():
+def test_a_setting_that_does_nothing_under_the_chosen_rule_is_not_shown():
     """
-    `engine` means "who tags and lemmatizes" almost everywhere, and the shared
-    label says so. In the topic-count sweep it means which topic model to fit,
-    which is a different thing -- so that step overrides it, and this is what
-    stops the shared wording quietly describing the wrong setting.
+    The vocabulary is cut one of three ways and each way reads one threshold,
+    so two of the three thresholds are always inert. Showing all of them is
+    most of why this screen was confusing -- and the inert ones are precisely
+    the ones whose names collide with the frequency-list thresholds above
+    (`vocab_min_freq` beside `min_freq`, four rows apart and doing different
+    jobs at different stages).
     """
-    sweep = by_id("topic_count_sweep")
-    assert sweep.labels.get("engine") == "which topic model"
-    assert sweep.labels.get("engine_nlp") == "tagging engine"
+    from taters.ui.recipes import gate_of
+
+    for recipe in RECIPES:
+        if "vocab_rule" not in (recipe.with_ or {}):
+            continue
+        assert gate_of(recipe, "vocab_top_n") == ("vocab_rule", "==", "top_n")
+        assert gate_of(recipe, "vocab_rank_by") == ("vocab_rule", "==", "top_n")
+        assert gate_of(recipe, "vocab_min_freq") == ("vocab_rule", "==", "min_freq")
+        assert gate_of(recipe, "vocab_min_obs_pct") == \
+            ("vocab_rule", "==", "min_obs_pct")
+
+
+def test_the_two_vocabulary_stages_do_not_read_alike_on_screen():
+    """
+    `min_freq` and `vocab_min_freq` are different settings at different
+    stages, and as bare parameter names they read as a typo for each other.
+    Whatever they are called, the labels have to be tellable apart.
+    """
+    from taters.ui.recipes import SETTING_LABELS
+
+    pairs = [("min_freq", "vocab_min_freq"),
+             ("min_obs_pct", "vocab_min_obs_pct")]
+    for first, second in pairs:
+        a, b = SETTING_LABELS.get(first), SETTING_LABELS.get(second)
+        assert a and b, f"{first}/{second} still show as raw parameter names"
+        assert a != b
+        # and neither is the other with a word bolted on the front
+        assert not b.endswith(a) and not a.endswith(b), (a, b)
+
+
+def test_a_per_step_label_names_a_setting_that_step_actually_has():
+    """
+    `Recipe.labels` renames a setting on the options screen where the shared
+    word would describe the wrong thing -- `engine` meaning which topic model
+    rather than who tags the text. A label keyed by a name the step does not
+    have is dead text nobody will ever see, and the mistake is invisible.
+
+    Nothing in the catalog needs an override at the moment (the step that did
+    has been folded into the topic models), so this is currently vacuous --
+    deliberately so, since it is the guard for the next one.
+    """
+    for recipe in RECIPES:
+        spec = describe(load_target(recipe.target))
+        for name in recipe.labels:
+            assert name in spec, f"{recipe.id}: labels[{name!r}] is not a setting"
 
 
 # ---------------------------------------------------------------------------
@@ -666,7 +710,6 @@ def test_the_gpu_steps_are_the_ones_we_think_they_are():
         "topic_model_mem", "topic_model_mem_apply",
         "topic_model_lda", "topic_model_lda_apply",
         "topic_model_nmf", "topic_model_nmf_apply",
-        "topic_count_sweep",            # builds one matrix, same as the models
         "word_vectors_train",           # likewise: tokenizing under stanza
         "word_vectors_apply",
         "cohesion",              # stanza prep and/or the embedding model
@@ -1234,10 +1277,14 @@ def test_the_retention_rule_is_a_shared_setting_on_the_analyses_and_the_topic_mo
             assert r.vars["stats_pca_retain"]["default"] == "parallel", r.id
             assert gate_of(r, "pca_retain") == ("pca", "!=", "off"), r.id
     mem = by_id("topic_model_mem")
-    assert mem.with_["retain"] == "{{var:mem_retain}}"
+    assert mem.with_["k_selection"] == "{{var:mem_k_selection}}"
     assert mem.with_["n_components"] == "{{var:mem_components}}"
-    assert mem.vars["mem_retain"]["default"] == "parallel"
-    assert gate_of(mem, "retain") == ("n_components", "==", "0")
+    # parallel analysis, same as the analyses use: a document-term matrix is
+    # wide, and on a wide matrix chance alone makes large eigenvalues, so a
+    # fixed cutoff cannot know where the noise floor is.
+    assert mem.vars["mem_k_selection"]["default"] == "parallel"
+    assert mem.vars["mem_kaiser_cutoff"]["default"] == 1.5
+    assert gate_of(mem, "k_selection") == ("n_components", "==", "0")
 
 
 def test_combining_the_tables_is_a_shared_setting_shown_only_when_together():

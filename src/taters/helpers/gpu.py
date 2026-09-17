@@ -79,7 +79,7 @@ def worker_cap(gpu_use: Optional[str]) -> Optional[int]:
     """
     Most files a step may work on at once, or None for no limit.
 
-    An unrecognised or missing value is treated as ``"gpu_model_each"`` -- one
+    An unrecognized or missing value is treated as ``"gpu_model_each"`` -- one
     file at a time. Wrong-but-slow is a recoverable mistake; wrong-and-out-of-
     memory is not, and it fails halfway through a batch rather than at the start.
     """

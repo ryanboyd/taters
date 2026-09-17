@@ -233,24 +233,16 @@ def stream_moments(csv_path: Path, *, encoding: str, skip_cols: int,
     return n, sums, cross
 
 
-def fit_axes(n: int, sums, cross, *, n_components: int, rotation: bool,
-             retain: str = "parallel", on_progress=None):
+def _decompose(n: int, sums, cross):
     """
-    From streamed moments to finished axes.
+    The expensive half of a PCA: the correlation matrix and its eigen-
+    decomposition, which do not depend on how many components you keep.
 
-    Returns ``(kept, mu, sigma, loadings, projection, eigenvalues, pct,
-    retention)``: ``kept`` indexes the non-constant columns; ``loadings`` is
-    the rotated feature-by-component matrix (interpretation); ``projection``
-    scores a row -- standardized kept cells @ projection -- and both share
-    one component order (descending rotated eigenvalue) and one sign
-    convention (each component's strongest feature loads positive), so
-    reruns cannot come back mirror-flipped or shuffled. ``retention`` says
-    how the count was chosen: the rule, and for parallel analysis the
-    unrotated eigenvalues beside the chance thresholds up to the first one
-    that fell short, so the decision can be read and argued with.
+    Split out so a sweep over component counts pays for this once. MEM
+    scoring twenty candidate theme counts was otherwise twenty eigen-
+    decompositions of the same matrix.
 
-    ``n_components > 0`` is honored as asked; ``0`` chooses by ``retain``,
-    one of :data:`RETAIN_RULES`.
+    Returns ``(kept, mu, sigma, eigvals, eigvecs)``, eigen-pairs descending.
     """
     import numpy as np
 
@@ -270,33 +262,53 @@ def fit_axes(n: int, sums, cross, *, n_components: int, rotation: bool,
     eigvals, eigvecs = np.linalg.eigh(corr)             # these come out ascending, so flip
     eigvals = np.maximum(eigvals[::-1], 0.0)
     eigvecs = eigvecs[:, ::-1]
+    return kept, mu, sigma, eigvals, eigvecs
 
-    retention: dict = {"rule": "asked", "n_components": int(n_components)}
+
+def _retain_count(n: int, n_features: int, eigvals, *, n_components: int,
+                  retain: str, kaiser_cutoff: float = 1.0, on_progress=None):
+    """How many components to keep, and the record of why. See
+    :func:`fit_axes` for what the rules mean."""
+    import numpy as np
+
     if n_components > 0:
-        k = min(int(n_components), kept.size)
-    elif retain == "parallel":
-        thresholds = parallel_thresholds(n, kept.size, on_progress=on_progress)
+        return (min(int(n_components), n_features),
+                {"rule": "asked", "n_components": int(n_components)})
+    if retain == "parallel":
+        thresholds = parallel_thresholds(n, n_features, on_progress=on_progress)
         # we keep going while the eigenvalue beats chance at its rank, and
         # stop at the first one that doesn't (that's Horn's procedure). a
         # later one that happens to beat its threshold isn't a component
         # worth naming.
         k = 0
-        while k < kept.size and eigvals[k] > thresholds[k]:
+        while k < n_features and eigvals[k] > thresholds[k]:
             k += 1
         k = max(1, k)
-        shown = min(k + 1, kept.size)
-        retention = {"rule": "parallel", "draws": PARALLEL_DRAWS,
-                     "percentile": PARALLEL_PERCENTILE,
-                     "unrotated_eigenvalues": [float(v) for v in eigvals[:shown]],
-                     "thresholds": [float(v) for v in thresholds[:shown]]}
-    elif retain == "kaiser":
+        shown = min(k + 1, n_features)
+        return k, {"rule": "parallel", "draws": PARALLEL_DRAWS,
+                   "percentile": PARALLEL_PERCENTILE,
+                   "unrotated_eigenvalues": [float(v) for v in eigvals[:shown]],
+                   "thresholds": [float(v) for v in thresholds[:shown]]}
+    if retain == "kaiser":
         # Kaiser's rule: keep the components that explain more than one
-        # feature's worth of variance.
-        k = max(1, int(np.sum(eigvals >= 1.0)))
-        retention = {"rule": "kaiser",
-                     "unrotated_eigenvalues": [float(v) for v in eigvals[:k + 1]]}
-    else:
-        raise ValueError(f"retain must be one of {RETAIN_RULES}, got {retain!r}")
+        # feature's worth of variance -- or more than `kaiser_cutoff` of
+        # one, since on a wide matrix a cutoff of exactly 1 keeps almost
+        # everything (one real corpus gave 101 themes).
+        cutoff = float(kaiser_cutoff)
+        k = max(1, int(np.sum(eigvals >= cutoff)))
+        return k, {"rule": "kaiser", "cutoff": cutoff,
+                   "unrotated_eigenvalues": [float(v) for v in eigvals[:k + 1]]}
+    raise ValueError(f"retain must be one of {RETAIN_RULES}, got {retain!r}")
+
+
+def _axes_at(kept, eigvals, eigvecs, k: int, *, rotation: bool):
+    """
+    The cheap half: the loadings and the projection at one component count.
+
+    Called once by :func:`fit_axes` and once per candidate count by a sweep,
+    over an eigen-decomposition computed once.
+    """
+    import numpy as np
 
     unrotated = eigvecs[:, :k] * np.sqrt(eigvals[:k])   # the loadings, before rotation
     if rotation and k > 1:
@@ -315,6 +327,39 @@ def fit_axes(n: int, sums, cross, *, n_components: int, rotation: bool,
     # the scores have to go through the same rotation, order, and sign flips.
     projection = (eigvecs[:, :k] @ R)[:, order] * flips
     pct = comp_eig / kept.size * 100
+    return loadings, projection, comp_eig, pct
+
+
+def fit_axes(n: int, sums, cross, *, n_components: int, rotation: bool,
+             retain: str = "parallel", kaiser_cutoff: float = 1.0,
+             on_progress=None):
+    """
+    From streamed moments to finished axes.
+
+    Returns ``(kept, mu, sigma, loadings, projection, eigenvalues, pct,
+    retention)``: ``kept`` indexes the non-constant columns; ``loadings`` is
+    the rotated feature-by-component matrix (interpretation); ``projection``
+    scores a row -- standardized kept cells @ projection -- and both share
+    one component order (descending rotated eigenvalue) and one sign
+    convention (each component's strongest feature loads positive), so
+    reruns cannot come back mirror-flipped or shuffled. ``retention`` says
+    how the count was chosen: the rule, and for parallel analysis the
+    unrotated eigenvalues beside the chance thresholds up to the first one
+    that fell short, so the decision can be read and argued with.
+
+    ``n_components > 0`` is honored as asked; ``0`` chooses by ``retain``,
+    one of :data:`RETAIN_RULES`. ``kaiser_cutoff`` is the eigenvalue a
+    component has to beat under the Kaiser rule; 1.0 is the textbook value
+    (one feature's worth of variance, since these are correlation-matrix
+    eigenvalues), and raising it is the usual answer to that rule keeping
+    almost everything on a wide matrix.
+    """
+    kept, mu, sigma, eigvals, eigvecs = _decompose(n, sums, cross)
+    k, retention = _retain_count(
+        n, kept.size, eigvals, n_components=n_components, retain=retain,
+        kaiser_cutoff=kaiser_cutoff, on_progress=on_progress)
+    loadings, projection, comp_eig, pct = _axes_at(
+        kept, eigvals, eigvecs, k, rotation=rotation)
     return kept, mu, sigma, loadings, projection, comp_eig, pct, retention
 
 
@@ -334,7 +379,9 @@ def describe_retention(retention: dict) -> str:
                 f"percentile of {retention.get('draws', PARALLEL_DRAWS)} random "
                 f"data sets of the same size{tail}")
     if rule == "kaiser":
-        return "chosen by the Kaiser rule: every component with an eigenvalue above 1"
+        cutoff = retention.get("cutoff", 1.0)
+        return ("chosen by the Kaiser rule: every component with an "
+                f"eigenvalue above {cutoff:g}")
     return "the number asked for"
 
 
@@ -363,6 +410,7 @@ def fit_pca_csv(
     start_col: int = 2,
     n_components: int = 0,
     retain: Literal["parallel", "kaiser"] = "parallel",
+    kaiser_cutoff: float = 1.0,
     rotation: bool = True,
     out_scores_csv: Optional[PathLike] = None,
     out_model_json: Optional[PathLike] = None,
@@ -395,8 +443,14 @@ def fit_pca_csv(
         kept while its eigenvalue beats the 95th percentile of what fifty
         random data sets of the same size produce at the same rank, so
         chance structure is not kept. ``kaiser`` keeps every eigenvalue above
-        1, which on a wide table keeps most of them. The decision is written
-        into the model file so it can be read and argued with.
+        ``kaiser_cutoff``, which at the textbook 1.0 keeps most of them on a
+        wide table. The decision is written into the model file so it can be
+        read and argued with.
+    kaiser_cutoff : float, default=1.0
+        The eigenvalue a component has to beat under ``retain="kaiser"``.
+        1.0 is the textbook value -- one feature's worth of variance -- and
+        raising it is the usual answer to that rule keeping almost
+        everything on a wide matrix.
     rotation : bool, default=True
         Varimax-rotate. Off gives the raw principal axes.
     out_scores_csv, out_model_json, out_loadings_csv, out_eigenvalues_csv
@@ -455,7 +509,8 @@ def fit_pca_csv(
     announce(on_progress, "extracting components")
     kept, mu, sigma, loadings, projection, eig, pct, retention = fit_axes(
         n, sums, cross, n_components=n_components, rotation=rotation,
-        retain=retain, on_progress=on_progress)
+        retain=retain, kaiser_cutoff=kaiser_cutoff,
+        on_progress=on_progress)
     k = projection.shape[1]
     comp_names = component_names(k)
 
@@ -640,7 +695,7 @@ def apply_pca_csv(
 # ---------------------------------------------------------------------------
 
 def fit_in_memory(x, *, n_components: int = 0, rotation: bool = True,
-                  retain: str = "parallel"):
+                  retain: str = "parallel", kaiser_cutoff: float = 1.0):
     """
     Fit the same axes as :func:`fit_pca_csv`, from a matrix already in memory.
 
@@ -665,7 +720,7 @@ def fit_in_memory(x, *, n_components: int = 0, rotation: bool = True,
     cross = a.T @ a
     kept, mu, sigma, loadings, projection, eigenvalues, pct, retention = fit_axes(
         n, sums, cross, n_components=n_components, rotation=rotation,
-        retain=retain)
+        retain=retain, kaiser_cutoff=kaiser_cutoff)
     return {
         "retention": retention,
         "kept": [int(i) for i in kept],

@@ -554,7 +554,7 @@ def test_a_disabled_rows_reason_is_fitted_beside_its_label(monkeypatch):
     assert QuestionaryPrompter()._to_q(Choice("x", "y")).disabled is None
 
 
-def test_a_version_number_is_not_recoloured_halfway_through():
+def test_a_version_number_is_not_recolored_halfway_through():
     """
     From a real report: the banner showed `v0.` in one color and `2.1` in
     another, as though the version had been cut in half.
@@ -635,7 +635,7 @@ def test_a_narrow_terminal_is_left_alone():
 def test_the_description_gets_its_own_style_class():
     """
     questionary tags it `class:text`, the same class as every unselected option
-    title -- so coloring the description would recolour the whole list. It
+    title -- so coloring the description would recolor the whole list. It
     needs a class of its own before it can look like a note rather than another
     option.
     """
@@ -1431,6 +1431,76 @@ def test_set_tick_mark_moves_a_row_to_a_state_rather_than_flipping_it():
     assert flip_tick_mark("[~] a") == "[ ] a"
     with pytest.raises(ValueError, match="unknown tick mark"):
         set_tick_mark("[ ] a", "?")
+
+
+# ---------------------------------------------------------------------------
+# Paging through a long list
+# ---------------------------------------------------------------------------
+
+PAGE_DOWN, PAGE_UP = "\x1b[6~", "\x1b[5~"
+
+
+def _long(n: int = 40, disabled=()):
+    return [Choice(f"r{i:02d}", f"row {i}",
+                   disabled="not available" if i in disabled else "")
+            for i in range(n)]
+
+
+def test_page_down_moves_a_screenful_not_a_row(staged):
+    """
+    Arrow keys are fine for a menu and miserable for a vocabulary: a
+    five-hundred-term list is five hundred keypresses end to end.
+    """
+    rows = _long()
+    landed, _drawn = render(staged, PAGE_DOWN + "\r",
+                            lambda p: p.select("Pick:", rows))
+    assert landed != "r00", "the pointer did not move at all"
+    assert landed != "r01", "that is one row, not a page"
+
+
+def test_paging_down_and_back_up_returns_where_it_started(staged):
+    rows = _long()
+    landed, _drawn = render(staged, PAGE_DOWN + PAGE_UP + "\r",
+                            lambda p: p.select("Pick:", rows))
+    assert landed == "r00"
+
+
+def test_paging_stops_at_the_ends_instead_of_wrapping(staged):
+    """
+    The arrows wrap, and that is right for them -- one step past the last row
+    is a small, obvious move. A page that wraps puts you somewhere you did not
+    ask to go with nothing on screen saying it happened.
+    """
+    rows = _long()
+    bottom, _d = render(staged, PAGE_DOWN * 20 + "\r",
+                        lambda p: p.select("Pick:", rows))
+    assert bottom == "r39", "paging past the end should stop at the last row"
+
+    top, _d = render(staged, PAGE_UP * 20 + "\r",
+                     lambda p: p.select("Pick:", rows))
+    assert top == "r00", "paging past the start should stop at the first row"
+
+
+def test_a_page_never_lands_on_a_row_that_cannot_be_picked(staged):
+    """A jump is far likelier than a single step to come down on a grayed-out
+    row, so it looks outward for the nearest one that can be picked."""
+    rows = _long(disabled=range(1, 39))       # only the two ends are live
+    landed, _drawn = render(staged, PAGE_DOWN + "\r",
+                            lambda p: p.select("Pick:", rows))
+    assert landed in ("r00", "r39"), landed
+
+
+def test_paging_works_on_a_tick_list_too(staged):
+    """Same binding for every list -- paging is navigation, not a feature of
+    one screen."""
+    rows = _long(12)
+    ticked: set = set()
+    landed, _drawn = render(staged, PAGE_DOWN + " \r",
+                            lambda p: p.select("Pick:", rows,
+                                               toggle_values={c.value for c in rows},
+                                               ticked=ticked))
+    assert len(ticked) == 1, "space after a page should tick where it landed"
+    assert ticked != {"r00"}, "the page did not move before the tick"
 
 
 def test_flip_tick_mark_handles_both_title_shapes():

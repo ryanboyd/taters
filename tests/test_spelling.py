@@ -42,6 +42,33 @@ def test_the_docs_and_planning_notes_are_in_american_english():
     assert not hits, "British spellings in the docs:\n" + _report(hits)
 
 
+def test_the_word_list_covers_prefixes_and_the_words_this_codebase_uses():
+    """
+    The list is generated from stems, and two holes let spellings straight
+    back through the door they had just been shown out of.
+
+    `recognised` was caught and `unrecognised` was not, because a prefix made
+    it a different word. And `lemma` was a stem while `lemmat` was not -- so
+    `lemmatised` sailed past in a project where lemmatizing is on half the
+    screens. Both were found by the words that were already in the tree, not
+    by reading the list.
+    """
+    for british, american in (
+            ("unrecognised", "unrecognized"),
+            ("unnormalised", "unnormalized"),
+            ("renormalised", "renormalized"),
+            ("lemmatised", "lemmatized"),
+            ("lemmatising", "lemmatizing"),
+            ("lemmatisation", "lemmatization"),
+            ("canonicalised", "canonicalized"),
+            ("canonicalisation", "canonicalization"),
+            ("recolour", "recolor")):
+        assert PAIRS.get(british) == american, f"{british} is not caught"
+    # and the prefix rule has not invented a correction for a word that is
+    # already American
+    assert "unrecognized" not in PAIRS and "relocalize" not in PAIRS
+
+
 def test_the_scanner_reads_prose_and_leaves_code_alone():
     """The word list is only as useful as the scanner's aim: a quoted
     parameter name and a code span must never count, and a plain word must."""

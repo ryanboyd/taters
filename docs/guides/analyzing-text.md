@@ -151,7 +151,7 @@ A word-vector model learns, from nothing but which words keep company with which
 **In Taters:** two doors. "Train a model" on the main menu trains word2vec or fastText on your own texts (`pip install "taters[vectors]"` for gensim), or brings in a pre-trained file; the "Word vectors: train on these texts" row on the feature checklist does the same inside an ordinary pipeline. Either way you get three things:
 
 * **Features** — `word_vectors.csv`: per text, the mean vector of its words (`wv_1 … wv_k`), how many words were in the vocabulary (`in_vocab_count`), and one `sim_<dictionary>__<category>` column for every category of every *concept dictionary* you tick. Concepts are spelled as LIWC-22 dictionaries — the same `.dicx`/`.csv` files the dictionary analyzer counts with, picked from the same library: columns are categories, rows are terms, a cell is the term's weight in the category (`X` is 1; write `2` to count *happy* twice as heavily as *calm*), `*` wildcards and multi-word terms exactly as LIWC reads them. Each term is resolved against the model's vocabulary the way LIWC resolves it against text — `abrad*` becomes every vocabulary word starting with *abrad*, a phrase becomes the mean of its words — and counts as one term however many words it matched; the category's vector is the weighted mean of its terms' vectors, and each text's column is the cosine to it. A hypothesis becomes one column per category; a dictionary of sixteen categories becomes sixteen.
-* **A model** — `models/word_vectors.json` with its matrix beside it as `.npy`. Add it to your library from the finish screen and it scores any new dataset from the checklist ("Score with models I already have"), reading text exactly as it was trained (lower-cased, lemmatised or not, the same tokenizer). A ridge fitted on these features carries the model and re-applies it to a new corpus — retraining there would give different dimensions.
+* **A model** — `models/word_vectors.json` with its matrix beside it as `.npy`. Add it to your library from the finish screen and it scores any new dataset from the checklist ("Score with models I already have"), reading text exactly as it was trained (lower-cased, lemmatized or not, the same tokenizer). A ridge fitted on these features carries the model and re-applies it to a new corpus — retraining there would give different dimensions.
 * **Evidence** — `word_vectors_report.md` beside the model: a methods paragraph ready to paste, every setting, the vocabulary's coverage of the corpus and the words that fell below the minimum count, the training loss per epoch (table and plot), and the nearest neighbors of your concept seeds and the most frequent words, drawn as word clouds under `features/figures/wordclouds/word_vectors/`. The neighbors are the evidence that the model learned what you think it learned; look at them before you trust a `sim_` column.
 
 How words are averaged is a setting of the *model*, not of the pipeline: `tokens` (every occurrence), `types` (each distinct word once) or `sif` (smooth inverse frequency — the commonest words count least; needs the counts a trained model has, so not for imported vectors), with an option to scale every word vector to unit length first. The concept dictionaries are stored *inside* the model — their terms and weights, not a path — so a model applied on another machine measures the same concepts; change them, and the averaging, per model under Settings → Manage Taters data → Manage saved models, and every later run of the model uses the new values. The report's *Concepts* table says, per category, how many of its terms the model knew, the weight behind its vector, and the terms that missed; a category no word of which the model knows is refused by name rather than written as a blank column.
@@ -208,9 +208,41 @@ The MEM is a simple, durable idea: build a document-term matrix over frequent co
 * Markowitz, D. M. (2021). The meaning extraction method: An approach to evaluate content patterns from large-scale language data. *Frontiers in Communication, 6*. [https://doi.org/10.3389/fcomm.2021.588823](https://doi.org/10.3389/fcomm.2021.588823)
 
 
-**In Taters:** the "Topic model: meaning extraction method" step. It fits the themes, writes per-document theme scores, the term-by-theme loadings, an eigenvalue table — and a **reusable model file**. That last part matters: import the model into your library and pick "Score with models I already have" and you can score a *new* dataset on the *same* themes later, with the original vocabulary, tokenizer settings, and standardization frozen inside the model. The PCA itself is exact (not approximated), streams so corpus size is not a memory problem, and its varimax matches what R's `psych` package produces. 
+**In Taters:** the "Topic model: meaning extraction method" step. It fits the themes, writes per-document theme scores, the term-by-theme loadings, two variance tables (see below) — and a **reusable model file**. That last part matters: import the model into your library and pick "Score with models I already have" and you can score a *new* dataset on the *same* themes later, with the original vocabulary, tokenizer settings, and standardization frozen inside the model. The PCA itself is exact (not approximated), streams so corpus size is not a memory problem, and its varimax matches what R's `psych` package produces. 
 
-How many themes? Left to decide for itself, the step uses parallel analysis: a theme is kept while its eigenvalue beats what a random matrix of the same size would give at that rank, so a theme has to explain more than noise does. The older Kaiser rule (every eigenvalue above 1) is available as `mem_retain: kaiser`; on a wide matrix it keeps most of them — one real corpus came back with 101 themes. The model file records which rule decided and the eigenvalues beside their chance levels.
+How many themes? Left to decide for itself, the step uses parallel analysis: a theme is kept while its eigenvalue beats what a random matrix of the same shape would give at that rank, so a theme has to explain more than noise does. See [How many topics?](#how-many-topics) for the other rules and for why a fixed cutoff is risky on a wide matrix.
+
+### Two variance tables, and why they are separate
+
+MEM writes two, and mixing them up is the single easiest way to conclude the
+math is broken when it is not.
+
+`<name>_eigenvalues.csv` is the **spectrum**: one row per rank, with the
+correlation matrix's eigenvalue, the level chance alone reaches at that rank,
+and whether it was kept. Every rank is listed, not just the kept ones, so you
+can see exactly where the curve crosses:
+
+| rank | eigenvalue | chance_threshold | kept |
+|---:|---:|---:|---|
+| 1 | 23.25 | 3.04 | yes |
+| 2 | 7.71 | 2.98 | yes |
+| 62 | 2.07 | 2.06 | yes |
+| 63 | 2.04 | 2.05 | |
+
+That is the curve to judge signal by, and it is what the rule read.
+
+`<name>_theme_variance.csv` is what each finished **theme** accounts for — its
+sum of squared loadings, and that as a percent.
+
+Two files rather than one, and the reason matters. Before rotation,
+"eigenvalue" and "sum of squared loadings" are the same number. Varimax then
+rotates the kept axes inside the space they span: they stop being
+eigenvectors, so they stop having eigenvalues, and the variance gets
+deliberately *spread around* — which is the thing that makes a theme
+nameable in the first place. So the theme table comes out much flatter than
+the spectrum, and theme 3 is **not** built from eigenvector 3. Both lists come
+out sorted descending, and that is all they have in common. Side by side in
+one table, that coincidence looks like a promise.
 
 Each theme is also drawn as a word cloud under `features/figures/wordclouds/topic_model_mem/` — the thirty terms loading most strongly, sized by their loading, blue loading positively and red negatively — with an `index.md` beside them naming each theme's share of the variance. Reading the clouds is the fastest way to decide what to call a theme; the loadings table is what you report.
 
@@ -284,22 +316,75 @@ the same one the n-gram step uses, and you can manage the lists under Settings.
 
 ### How many topics?
 
-The one setting with no sensible default. Ask for five and you get broad
-topics; ask for fifty on the same corpus and you get narrow ones. Neither is
-wrong — they are different questions.
+The one setting with no good default. Ask for five and you get broad topics;
+ask for fifty on the same corpus and you get narrow ones. Neither is wrong —
+they're different questions.
 
-The **topic-count sweep** fits at several counts, scores how well each one's
-topics hang together (topic coherence), and writes a curve, a table, and the
-top words of every fit. Read the words. Coherence measures whether a topic's
-words turn up in the same documents, which is *related to* whether a topic is
-meaningful and is not the same thing — a model can score well and still cut the
-corpus somewhere useless. The curve is good for ruling out counts that are
-clearly too few or too many; the choice among what is left is yours.
+All three models take **0** to mean *you decide*, over that model's own matrix,
+at the moment of fitting.
 
-Worth knowing: the curve is usually much sharper for LDA than for NMF. NMF
-merges topics in the tail rather than the head, so its top words stay coherent
-even when the count is wrong, and a flat NMF curve means "coherence cannot
-separate these" rather than "any of these is fine".
+**MEM's two cheap rules** read numbers the fit already has, so they cost
+nothing extra:
+
+| rule | keeps a theme while |
+|---|---|
+| `parallel` (default) | its eigenvalue beats what a random matrix of the **same shape** would give at that rank |
+| `kaiser` | its eigenvalue beats a fixed `kaiser_cutoff` |
+
+Why parallel is the default: a document-term matrix is *wide*, and wide
+matrices throw up big eigenvalues out of pure noise. On a real corpus here —
+938 documents, 515 terms — random data of that shape reaches **3.0**. So the
+textbook Kaiser cutoff of 1.0 kept 196 themes, 1.5 kept 122, and parallel
+analysis kept 82. A fixed number can't know the shape of your data; parallel
+analysis measures it.
+
+If you do use `kaiser`, pick a cutoff above that ceiling or it isn't really
+doing anything. It's roughly `(1 + sqrt(terms / documents)) ** 2`, so it climbs
+as your vocabulary grows against your corpus.
+
+**Two rules that actually fit things.** These work on all three models, and
+they cost one fit per candidate count:
+
+| rule | maximizes |
+|---|---|
+| `coherence` | how often a topic's top words show up in the same documents |
+| `coherence_exclusivity` | the harmonic mean of that and *exclusivity* — whether those words are this topic's, or everybody's |
+
+Use the second one. Coherence alone loves a handful of topics built out of
+common words, because common words co-occur everywhere. Exclusivity alone loves
+whatever splits the corpus into the most distinctive-looking pieces. They fail
+in opposite directions, which is exactly why you want both — and it's a
+*harmonic* mean, so a great score on one can't paper over a terrible score on
+the other.
+
+`coherence_exclusivity` needs `coherence_metric="npmi"`, and says so if you ask
+for UMass. NPMI is bounded between −1 and 1, so the two balance as they are.
+UMass isn't bounded, so balancing it would mean rescaling against whichever
+counts happened to be in your sweep — and then the winner changes when you add
+a candidate. That's not a number to put in a paper.
+
+Either way, the evidence lands next to your results: `<stem>_k_selection.csv`
+(every metric at every count), `<stem>_k_selection.png` (the chosen score, log
+x-axis), a report with the top words of every fit, and — for the balanced rule
+— `<stem>_k_tradeoff.png`, coherence on the left axis and exclusivity on the
+right, so you can see the trade-off you're picking from.
+
+**Then read the words.** These are a guide, not a verdict. A model can score
+beautifully and still cut your corpus somewhere useless, and the best score is
+often at more topics than anyone wants to interpret. The literature this comes
+from hands you the plot so a *person* looks at it; the automatic answer is a
+convenience on top of that, not a replacement for it.
+
+Two practical notes. Counts your corpus is too small for get skipped and named
+rather than killing the run, so the default list can reach 2000 without
+breaking a 60-document study. And a sweep on LDA or NMF is one fit per count —
+that's the slow road. MEM is much cheaper, because changing the theme count
+just re-slices an eigendecomposition it already did.
+
+Worth knowing: the coherence curve is usually much sharper for LDA than for
+NMF. NMF merges topics in the tail rather than the head, so its top words stay
+coherent even when the count is wrong, and a flat NMF curve means "coherence
+cannot separate these" rather than "any of these is fine".
 
 ### Using topic proportions in an analysis
 

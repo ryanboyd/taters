@@ -29,6 +29,7 @@ parametr symbol synthes theor hypothes penal equal local global formal digit
 central neutral personal legal actual factor familiar harmon human ideal
 internal material mobil modern national natural popular public rational regular
 scrutin sensit signal steril subsid synchron systemat trivial urban verbal vocal
+lemmat canonical
 """.split()
 ISE_SUFFIXES = [("isations", "izations"), ("isation", "ization"), ("ising", "izing"),
                 ("ised", "ized"), ("ises", "izes"), ("isers", "izers"),
@@ -91,6 +92,11 @@ PAIRS: Dict[str, str] = {
 for _stem in set(ISE_STEMS):
     for _br, _us in ISE_SUFFIXES:
         PAIRS.setdefault(_stem + _br, _stem + _us)
+# `recognised` was caught and `unrecognised` was not, which is the kind of hole
+# that lets a spelling back in through the door it was just shown out of.
+for _br, _us in list(PAIRS.items()):
+    PAIRS.setdefault("un" + _br, "un" + _us)
+    PAIRS.setdefault("re" + _br, "re" + _us)
 PAIRS = {k: v for k, v in PAIRS.items() if k != v}
 for _skip in ("analyses", "cancelled", "cancelling"):
     PAIRS.pop(_skip, None)

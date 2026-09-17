@@ -33,7 +33,10 @@ of the answers do not involve new data at all.
 | **Settings and tools** | Check whether your setup works, and manage everything Taters keeps between runs. |
 
 Everything is chosen from a list. Move with the arrow keys and press enter, or
-press the number beside an option to pick it outright. Yes/no questions take
+press the number beside an option to pick it outright. <kbd>PgUp</kbd> and
+<kbd>PgDn</kbd> jump a screenful at a time, which is what you want once a list
+runs to hundreds of rows — a vocabulary, a folder of files, a spreadsheet's
+columns. They stop at the ends rather than wrapping around. Yes/no questions take
 `y`/`n` or `1`/`0` as single keypresses, <kbd>Esc</kbd> steps back exactly one
 question if you change your mind (what you already answered stays filled in,
 so changing one thing costs one keypress per question, not a re-typing of all of

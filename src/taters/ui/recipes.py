@@ -37,7 +37,7 @@ from ..helpers.gpu import worker_cap
 
 __all__ = [
     "Recipe", "RECIPES", "by_id", "user_facing", "providers_of",
-    "gate_of", "gate_holds",
+    "gate_of", "gates_of", "gate_holds",
     "CAPABILITIES", "SOURCES", "TEXT_INPUT_KEYS", "TEXT_IDENTITY",
     "LEVELS", "DEFAULT_LEVEL", "Level", "levels_for", "level_by_id",
     "level_aware",
@@ -627,6 +627,24 @@ _KEEP_PUNCTUATION_VAR = {
 #: `workers` and `rounding` already mean what they look like.
 SETTING_LABELS: Dict[str, str] = {
     "engine": "tagging engine",
+    # the vocabulary is built in two passes and the parameter names do not say
+    # so: `min_freq` decides which words are counted at all, `vocab_min_freq`
+    # decides how many of the survivors the model actually sees. Four rows
+    # apart on screen and near-identically named, they read as a typo.
+    "min_freq": "drop words used fewer times than",
+    "min_obs_pct": "drop words found in fewer texts than (%)",
+    "min_token_count": "skip texts shorter than",
+    "min_npmi": "phrase strength cutoff",
+    "ngram_n": "longest phrase to consider",
+    "vocab_rule": "how to pick the model's vocabulary",
+    "vocab_top_n": "how many words the model gets",
+    "vocab_rank_by": "rank the vocabulary by",
+    "vocab_min_freq": "keep words used at least this many times",
+    "vocab_min_obs_pct": "keep words found in at least this % of texts",
+    "matrix_rounding": "decimal places in the matrix",
+    "rounding": "decimal places",
+    "rotation": "rotate the themes (varimax)",
+    "n_components": "how many themes",
     "stoplist_paths": "stop word lists",
     "tokenizer": "word splitter",
     "stanza_lang": "stanza language",
@@ -645,6 +663,66 @@ SETTING_LABELS: Dict[str, str] = {
 #: Shared for the same reason as lemmatize: every text-preparing step in a
 #: pipeline must read text the same way, or a vocabulary built by one step is
 #: silently unfindable by another.
+def _k_sweep_vars(prefix: str) -> Dict[str, dict]:
+    """The settings the two scoring rules need, one copy per model.
+
+    Per model rather than shared, for the same reason each builds its own
+    matrix: a sweep scored over one model's vocabulary says nothing about
+    another's, and sharing the setting would quietly imply it did.
+    """
+    return {
+        f"{prefix}_k_values": {
+            "default": ",".join(str(k) for k in _topics_default_k()),
+            "desc": "Which topic counts to try, when the count is being "
+                    "chosen by fitting. Counts this corpus is too small to "
+                    "support are skipped and named.",
+        },
+        f"{prefix}_coherence_metric": {
+            "default": "npmi",
+            "desc": "Which coherence to score with. npmi is bounded, which "
+                    "is what lets it be balanced against exclusivity; umass "
+                    "is the older measure and cannot be balanced.",
+        },
+    }
+
+
+def _topics_default_k():
+    from ..text._topics import DEFAULT_K_VALUES
+    return DEFAULT_K_VALUES
+
+
+#: Shown only while a topic count is being chosen by fitting, on all three
+#: models. Two conditions where the model has more than one rule.
+_K_SELECTION_DESC = (
+    "How 0 decides the number of topics. coherence: fit at each count and "
+    "keep the one whose topics' words most often turn up in the same "
+    "documents. coherence_exclusivity: the harmonic mean of that and "
+    "exclusivity -- whether those are this topic's words rather than "
+    "everybody's -- because coherence alone prefers a few topics made of "
+    "common words. Both cost one fit per count."
+)
+
+
+#: MEM is the one model with four rules, two of which read eigenvalues the
+#: fit already has and two of which fit at every candidate count. The sweep's
+#: own settings only mean anything under the latter pair.
+#: The vocabulary is cut one of three ways, and each way reads one setting.
+#: Showing all three settings at once is most of why this screen is confusing:
+#: two of them are inert, and the inert ones are the ones whose names collide
+#: with the frequency-list thresholds higher up.
+_VOCAB_PARAM_WHEN = {
+    "vocab_top_n": ("vocab_rule", "top_n"),
+    "vocab_rank_by": ("vocab_rule", "top_n"),
+    "vocab_min_freq": ("vocab_rule", "min_freq"),
+    "vocab_min_obs_pct": ("vocab_rule", "min_obs_pct"),
+}
+
+
+_MEM_SWEEPING = [("n_components", 0),
+                 ("k_selection", "!=", "kaiser"),
+                 ("k_selection", "!=", "parallel")]
+
+
 _ENGINE_VAR = {
     "default": "nltk",
     "desc": "Who tags and lemmatizes: nltk (fast, English) or stanza "
@@ -698,19 +776,43 @@ def gate_of(recipe: "Recipe", param: str) -> Optional[Tuple[str, str, str]]:
     """
     A gated setting's rule as ``(gate, op, value)``, or None when ungated.
 
+    Where a setting has more than one condition this is the *first* one --
+    what the row nests under on screen. :func:`gates_of` is the whole
+    predicate.
+
     Two spellings are accepted -- ``(gate, value)`` means ``==`` -- and
     anything else raises, so a typo in a declaration is a test failure
     rather than a row that never shows.
     """
+    gates = gates_of(recipe, param)
+    return gates[0] if gates else None
+
+
+def gates_of(recipe: "Recipe",
+             param: str) -> Optional[Tuple[Tuple[str, str, str], ...]]:
+    """
+    Every condition on a setting, all of which must hold for it to show.
+
+    A list of rules rather than one, because some settings depend on two
+    answers: the Kaiser cutoff is worth asking about only when the theme
+    count is being chosen automatically *and* the rule doing the choosing is
+    Kaiser. One rule stays the common case and is written as one.
+    """
     raw = recipe.param_when.get(param)
     if raw is None:
         return None
-    if len(raw) == 2:
-        return str(raw[0]), "==", str(raw[1])
-    if len(raw) == 3 and raw[1] in ("==", "!="):
-        return str(raw[0]), str(raw[1]), str(raw[2])
-    raise ValueError(f"{recipe.id}: param_when[{param!r}] must be (gate, value) "
-                     f"or (gate, '!='|'==', value), got {raw!r}")
+    rules = raw if (raw and isinstance(raw[0], (tuple, list))) else [raw]
+    out = []
+    for rule in rules:
+        if len(rule) == 2:
+            out.append((str(rule[0]), "==", str(rule[1])))
+        elif len(rule) == 3 and rule[1] in ("==", "!="):
+            out.append((str(rule[0]), str(rule[1]), str(rule[2])))
+        else:
+            raise ValueError(
+                f"{recipe.id}: param_when[{param!r}] must be (gate, value) or "
+                f"(gate, '!='|'==', value), or a list of those, got {raw!r}")
+    return tuple(out)
 
 
 def gate_holds(gate: Tuple[str, str, str], current: object) -> bool:
@@ -1736,7 +1838,7 @@ RECIPES: List[Recipe] = [
             **_MATRIX_SHAPE_VARS,
         },
         gpu_use="gpu_one_model",
-        param_when=dict(_ENGINE_PARAM_WHEN),
+        param_when={**_ENGINE_PARAM_WHEN, **_VOCAB_PARAM_WHEN},
         label="Document-term matrix",
         help="One row per speaker per file, one column per frequent word or "
              "phrase. Uses the n-gram frequency list as its vocabulary, so "
@@ -1797,16 +1899,27 @@ RECIPES: List[Recipe] = [
                 "desc": "How many themes to keep. 0 decides by the rule "
                         "below; a number is honored as asked.",
             },
-            "mem_retain": {
+            "mem_k_selection": {
                 "default": "parallel",
-                "desc": "How 0 decides the number of themes. parallel: "
-                        "parallel analysis, keep a theme while its "
-                        "eigenvalue beats what a random matrix of the same "
-                        "size would give -- the recommended rule, and "
-                        "memory-light. kaiser: keep every eigenvalue above "
-                        "1, which on a wide matrix keeps most of them (one "
-                        "real corpus gave 101 themes).",
+                "desc": "How 0 decides the number of themes. parallel: keep "
+                        "a theme while its eigenvalue beats what a random "
+                        "matrix of the same shape would give -- the "
+                        "recommended rule, because a wide matrix makes large "
+                        "eigenvalues by chance alone. kaiser: keep every "
+                        "theme whose eigenvalue beats the fixed cutoff "
+                        "below. Both read numbers the fit already has. "
+                        "coherence and coherence_exclusivity instead score "
+                        "the themes' words at each count, which is how LDA "
+                        "and NMF choose, and costs a rotation per count.",
             },
+            "mem_kaiser_cutoff": {
+                "default": 1.5,
+                "desc": "The eigenvalue a theme has to beat under kaiser. "
+                        "The textbook value is 1, but on a vocabulary of "
+                        "hundreds of terms that keeps almost everything "
+                        "(one real corpus gave 101 themes).",
+            },
+            **_k_sweep_vars("mem"),
         },
         # the fit is pure linear algebra, but the step is not: it builds its
         # own frequency list and matrix now, which means it tokenizes -- and
@@ -1817,9 +1930,18 @@ RECIPES: List[Recipe] = [
         # exactly what they do.
         gpu_use="gpu_one_model",
         # `device` only means anything under stanza, same as every other step
-        param_when={**_ENGINE_PARAM_WHEN,
+        param_when={**_ENGINE_PARAM_WHEN, **_VOCAB_PARAM_WHEN,
                     # the rule decides nothing once a count is given.
-                    "retain": ("n_components", 0)},
+                    "k_selection": ("n_components", 0),
+                    # and the cutoff belongs to one rule in particular, so it
+                    # takes both conditions
+                    "kaiser_cutoff": [("n_components", 0),
+                                      ("k_selection", "kaiser")],
+                    # the two scoring rules are the only ones that fit
+                    # anything, so these belong to neither eigenvalue rule
+                    "k_values": _MEM_SWEEPING,
+                    "coherence_metric": _MEM_SWEEPING,
+                    "top_terms": _MEM_SWEEPING},
         label="Topic model: meaning extraction method",
         help="Themes from the document-term matrix (Chung & Pennebaker's "
              "meaning extraction method): a score per theme per speaker, the "
@@ -1855,7 +1977,10 @@ RECIPES: List[Recipe] = [
             "out_loadings_csv":
                 "{{var:features_dir}}/topic_model_mem/topic_model_mem_loadings.csv",
             "n_components": "{{var:mem_components}}",
-            "retain": "{{var:mem_retain}}",
+            "k_selection": "{{var:mem_k_selection}}",
+            "kaiser_cutoff": "{{var:mem_kaiser_cutoff}}",
+            "k_values": "{{var:mem_k_values}}",
+            "coherence_metric": "{{var:mem_coherence_metric}}",
             "encoding": "utf-8-sig",
             "overwrite_existing": "{{var:overwrite_existing}}",
             **_vocab_with("mem"),
@@ -1947,9 +2072,16 @@ RECIPES: List[Recipe] = [
             "lda_topics": {
                 "default": 20,
                 "desc": "How many topics to fit. There is no right answer -- "
-                        "more topics means narrower ones. Fit a few and read "
-                        "the words before settling.",
+                        "more topics means narrower ones. 0 chooses by "
+                        "fitting at several counts and scoring them, which "
+                        "is the slow way round but leaves the evidence "
+                        "behind.",
             },
+            "lda_k_selection": {
+                "default": "coherence_exclusivity",
+                "desc": _K_SELECTION_DESC,
+            },
+            **_k_sweep_vars("lda"),
             "lda_passes": {
                 "default": 10,
                 "desc": "How many times to go over the corpus. More is "
@@ -1959,7 +2091,12 @@ RECIPES: List[Recipe] = [
         # it tokenizes to build its own matrix, and under engine="stanza" that
         # is a model that can sit on the GPU -- same as the n-gram family.
         gpu_use="gpu_one_model",
-        param_when={"stanza_lang": ("engine", "stanza")},
+        param_when={"stanza_lang": ("engine", "stanza"), **_VOCAB_PARAM_WHEN,
+                    # none of these decides anything once a count is given
+                    "k_selection": ("n_topics", 0),
+                    "k_values": ("n_topics", 0),
+                    "coherence_metric": ("n_topics", 0),
+                    "top_terms": ("n_topics", 0)},
         label="Topic model: latent Dirichlet allocation",
         help="Topics from the corpus (LDA, the topic model most papers mean): a share of each topic per speaker, the words behind each topic, and a saved model.",
         text_help="Topics from the corpus (LDA, the topic model most papers mean): a share of each topic per text, the words behind each topic, and a saved model.",
@@ -1981,6 +2118,9 @@ RECIPES: List[Recipe] = [
             # named for the same reason: the word-cloud step reads this file.
             "out_loadings_csv": "{{var:features_dir}}/topic_model_lda/topic_model_lda_loadings.csv",
             "n_topics": "{{var:lda_topics}}",
+            "k_selection": "{{var:lda_k_selection}}",
+            "k_values": "{{var:lda_k_values}}",
+            "coherence_metric": "{{var:lda_coherence_metric}}",
             "passes": "{{var:lda_passes}}",
             "encoding": "utf-8-sig",
             "overwrite_existing": "{{var:overwrite_existing}}",
@@ -2055,14 +2195,27 @@ RECIPES: List[Recipe] = [
             **_ENGINE_VARS,
             "nmf_factors": {
                 "default": 20,
-                "desc": "How many factors to fit. Same trade-off as any topic "
-                        "model: more factors means narrower ones.",
+                "desc": "How many factors to fit. There is no right answer -- "
+                        "more factors means narrower ones. 0 chooses by "
+                        "fitting at several counts and scoring them, which "
+                        "is the slow way round but leaves the evidence "
+                        "behind.",
             },
+            "nmf_k_selection": {
+                "default": "coherence_exclusivity",
+                "desc": _K_SELECTION_DESC,
+            },
+            **_k_sweep_vars("nmf"),
         },
         # it tokenizes to build its own matrix, and under engine="stanza" that
         # is a model that can sit on the GPU -- same as the n-gram family.
         gpu_use="gpu_one_model",
-        param_when={"stanza_lang": ("engine", "stanza")},
+        param_when={"stanza_lang": ("engine", "stanza"), **_VOCAB_PARAM_WHEN,
+                    # none of these decides anything once a count is given
+                    "k_selection": ("n_topics", 0),
+                    "k_values": ("n_topics", 0),
+                    "coherence_metric": ("n_topics", 0),
+                    "top_terms": ("n_topics", 0)},
         label="Topic model: non-negative matrix factorization",
         help="Topics from the corpus (NMF, often sharper on short texts): a weight for each factor per speaker, the words behind each topic, and a saved model.",
         text_help="Topics from the corpus (NMF, often sharper on short texts): a weight for each factor per text, the words behind each topic, and a saved model.",
@@ -2084,6 +2237,9 @@ RECIPES: List[Recipe] = [
             # named for the same reason: the word-cloud step reads this file.
             "out_loadings_csv": "{{var:features_dir}}/topic_model_nmf/topic_model_nmf_loadings.csv",
             "n_topics": "{{var:nmf_factors}}",
+            "k_selection": "{{var:nmf_k_selection}}",
+            "k_values": "{{var:nmf_k_values}}",
+            "coherence_metric": "{{var:nmf_coherence_metric}}",
             "encoding": "utf-8-sig",
             "overwrite_existing": "{{var:overwrite_existing}}",
             **_vocab_with("nmf"),
@@ -2137,69 +2293,6 @@ RECIPES: List[Recipe] = [
         },
         hidden=("loadings_csv", "out_dir"),
         vars={**_FEATURES_DIR_VAR, **_WORDCLOUD_VARS},
-    ),
-    Recipe(
-        id="topic_count_sweep",
-        # the same stop lists the n-gram step applies, and for the same
-        # reason: left unfiltered, the most frequent words in any corpus are
-        # function words, and every topic comes out as "the, and, of". this
-        # step builds its own frequency list, so it has to ask for them
-        # itself -- it used to inherit them from a shared n-gram step.
-        library={"stoplist_paths": "stoplists"},
-        library_defaults={"stoplist_paths": _DEFAULT_STOPLISTS},
-        label="Topic model: how many topics?",
-        help="Fit a topic model at several topic counts and score how well "
-             "each one's topics hang together, so you can pick a number by "
-             "looking at a curve and the words rather than by guessing.",
-        text_help="Fit a topic model at several topic counts and score how "
-                  "well each one's topics hang together, so you can pick a "
-                  "number by looking at a curve and the words.",
-        call="potato.text.sweep_topic_count",
-        target="taters.text.topic_count_sweep:sweep_topic_count",
-        scope="global",
-        save_as="topic_sweep",
-        requires=frozenset({"unified_transcripts_csv"}),
-        # it tokenizes to build its one shared matrix, same as the models it
-        # is choosing a setting for
-        gpu_use="gpu_one_model",
-        # `engine` here is which topic model to fit, not who does the tagging
-        # -- the shared label would describe the wrong setting entirely.
-        labels={"engine": "which topic model", "engine_nlp": "tagging engine"},
-        param_when={"stanza_lang": ("engine_nlp", "stanza"),
-                    "beta_loss": ("engine", "nmf"),
-                    "passes": ("engine", "lda"),
-                    "seed": ("engine", "lda")},
-        **_TEXT_STEP,
-        with_={
-            **_TEXT_INPUT_WITH,
-            "out_csv": "{{var:features_dir}}/topic_count_sweep/topic_count_sweep.csv",
-            "encoding": "utf-8-sig",
-            "overwrite_existing": "{{var:overwrite_existing}}",
-            "engine": "{{var:sweep_engine}}",
-            "k_values": "{{var:sweep_k_values}}",
-            **_vocab_with("sweep"),
-            "engine_nlp": "{{var:engine}}",
-            "tokenizer": "{{var:tokenizer}}",
-            "stanza_lang": "{{var:stanza_lang}}",
-            "device": "{{var:device}}",
-        },
-        vars={
-            **_FEATURES_DIR_VAR,
-            **_vocab_vars("sweep"),
-            **_ENGINE_VARS,
-            "sweep_engine": {
-                "default": "lda",
-                "desc": "Which topic model to try: lda or nmf. Whichever you "
-                        "mean to fit for real -- the number that suits one "
-                        "does not have to suit the other.",
-            },
-            "sweep_k_values": {
-                "default": "5,10,20,40",
-                "desc": "The topic counts to try, separated by commas. Spread "
-                        "them out rather than packing them close together; "
-                        "the point is to see the shape of the curve.",
-            },
-        },
     ),
     Recipe(
         id="word_vectors_train",
@@ -3407,8 +3500,7 @@ FEATURE_CATEGORIES: Tuple[FeatureCategory, ...] = (
         "topics", "Topics & themes",
         "Let the corpus tell you what it is about, by finding the words that "
         "rise and fall together.",
-        ("topic_model_mem", "topic_model_lda", "topic_model_nmf",
-         "topic_count_sweep")),
+        ("topic_model_mem", "topic_model_lda", "topic_model_nmf")),
     FeatureCategory(
         "frequencies", "Word & phrase frequencies",
         "Counts over the whole corpus rather than measures of each text.",

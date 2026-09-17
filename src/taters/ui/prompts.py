@@ -1129,7 +1129,7 @@ def style_descriptions_separately() -> bool:
     Give a choice's description its own style class, so it can be colored.
 
     questionary tags the description with ``class:text`` -- the same class it
-    uses for every unselected option title. Restyling that class would recolour
+    uses for every unselected option title. Restyling that class would recolor
     the whole list, so the description cannot be told apart from the options it
     is explaining without this.
 

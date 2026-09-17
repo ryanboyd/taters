@@ -503,8 +503,9 @@ memory-light: the random data are never held whole, only folded chunk by
 chunk into one small matrix, so it runs on an old laptop as readily as the
 fit itself. The model file records which rule decided, with the eigenvalues
 beside their chance thresholds up to the first that fell short, so the count
-can be read and argued with. The same rule, `mem_retain`, decides the number
-of themes in the topic model.
+can be read and argued with. The MEM topic model asks the same question under
+the name `mem_k_selection`, and has two extra answers to it — see
+[How many topics?](analyzing-text.md#how-many-topics).
 
 Two properties of the Taters implementation are worth knowing because they
 matter scientifically. First, it is **exact and deterministic** — a full

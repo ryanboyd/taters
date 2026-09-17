@@ -62,7 +62,7 @@ __all__ = ["PROVENANCE_VERSION", "PLUMBING", "TEXT_INPUT",
            "differences", "explain", "canonical", "digest", "asset_manifest",
            "for_columns", "compare_tables", "embedded_assets", "replays"]
 
-#: Bumped whenever the recorded shape or the canonicaliser changes. It is the
+#: Bumped whenever the recorded shape or the canonicalizer changes. It is the
 #: first key inside every hashed blob, so bumping it retires every stored
 #: digest into the safe direction (nothing matches) rather than leaving old
 #: records to be compared against new ones under the same hash.
@@ -129,7 +129,7 @@ def _strict() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Canonicalisation and digests
+# Canonicalization and digests
 # ---------------------------------------------------------------------------
 
 def canonical(obj: Any) -> Any:
@@ -164,7 +164,7 @@ def canonical(obj: Any) -> Any:
 
 
 def digest(obj: Any) -> str:
-    """A short, stable hash of a canonicalised object."""
+    """A short, stable hash of a canonicalized object."""
     blob = json.dumps({"v": PROVENANCE_VERSION, "d": canonical(obj)},
                       sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
@@ -695,7 +695,7 @@ def _effective_arguments(signature, args, kwargs) -> dict:
 
 
 def _classify(every: Mapping, *, skip, binding, grain, asset_keys) -> dict:
-    """The four recorded views of one call's arguments, canonicalised."""
+    """The four recorded views of one call's arguments, canonicalized."""
     return {
         "instrument": {k: canonical(v) for k, v in every.items() if k not in skip},
         "assets": {k: asset_manifest(kind, every.get(k))

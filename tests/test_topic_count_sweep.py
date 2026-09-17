@@ -153,7 +153,7 @@ def test_the_report_says_coherence_is_not_the_answer(four_families, tmp_path):
     out = sweep(four_families, tmp_path)
     report = out.with_name("sweep_report.md").read_text(encoding="utf-8-sig").lower()
     assert "read the words" in report
-    assert "not the same thing" in report
+    assert "a guide, not a verdict" in report
 
 
 def test_every_fit_is_scored_over_one_shared_vocabulary(four_families, tmp_path):

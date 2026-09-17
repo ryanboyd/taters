@@ -22,7 +22,7 @@ How a term meets a vocabulary
 LIWC resolves a term against *text*; here it is resolved against the
 model's *vocabulary*, the same way:
 
-* a plain word is tokenized with the model's own stream (so a lemmatised
+* a plain word is tokenized with the model's own stream (so a lemmatized
   model matches ``dying`` as ``die``) and looked up;
 * a wildcard word (``abrad*``) matches every vocabulary word its compiled
   pattern accepts -- a trailing-asterisk prefix by bisection on the sorted
@@ -199,7 +199,7 @@ def _word_rows(word: str, vocab: _Vocabulary, stream, lowercase: bool) -> List[i
         if w.endswith("*") and "*" not in w[:-1] and body:
             return vocab.prefix(body)
         return vocab.pattern(compileWildcard(w))
-    # a plain word goes through the model's own tokenizer so that a lemmatised
+    # a plain word goes through the model's own tokenizer so that a lemmatized
     # model sees "dying" as "die" -- the same way it saw the corpus
     forms = list(stream(w)) or [w]
     forms = [f.lower() for f in forms] if lowercase else forms

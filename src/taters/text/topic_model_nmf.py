@@ -184,6 +184,9 @@ def topic_model_nmf(
 
     # ----- NMF options -----
     n_topics: int = 20,
+    k_selection: Literal["coherence", "coherence_exclusivity"] = "coherence_exclusivity",
+    k_values: Union[str, Sequence[int]] = _topics.DEFAULT_K_VALUES,
+    coherence_metric: Literal["npmi", "umass"] = "npmi",
     beta_loss: Literal["frobenius", "kullback-leibler"] = "frobenius",
     iters: int = 200,
     tol: float = 1e-4,
@@ -282,9 +285,25 @@ def topic_model_nmf(
         frequency, because a *feature* table usually does want the commonest
         terms.)
     n_topics : int, default=20
-        How many topics to fit. The one setting with no good default -- see
-        :func:`taters.text.topic_count_sweep.sweep_topic_count` for help
-        choosing, and expect to read the topics before believing a number.
+        How many topics to fit. ``0`` chooses for you by ``k_selection``,
+        which costs one fit per candidate count and is the expensive path --
+        see the ``<stem>_k_selection`` files it leaves behind for the
+        evidence.
+    k_selection : {"coherence", "coherence_exclusivity"}, default="coherence_exclusivity"
+        How ``0`` chooses. ``coherence`` maximizes how often a topic's top
+        words turn up in the same documents. ``coherence_exclusivity`` takes
+        the harmonic mean of that and exclusivity -- whether those are this
+        topic's words rather than everybody's -- because coherence alone is
+        maximized by a few topics made of common words. Needs
+        ``coherence_metric="npmi"``.
+    k_values : str or sequence of int
+        The counts to try. ``"5,10,20"`` as well as a list, since this
+        arrives from a pipeline file and from a command line. Counts the
+        corpus is too small to support are skipped and named rather than
+        ending the run.
+    coherence_metric : {"npmi", "umass"}, default="npmi"
+        Which coherence. NPMI is bounded, which is what lets it be balanced
+        against exclusivity without rescaling.
     beta_loss : {"frobenius", "kullback-leibler"}, default="frobenius"
         What "close to the original" means. Frobenius is least squares: faster,
         steadier, and the usual choice. Kullback-Leibler matches the way counts
@@ -391,7 +410,8 @@ def topic_model_nmf(
     # every cell on every pass -- so unlike LDA it cannot stream. say how much
     # that will cost before spending minutes reading it in, not after.
     n_documents = sum(len(block) for block in batches())
-    wanted = _topics.nmf_memory_gb(n_documents, len(terms), n_topics)
+    wanted = _topics.nmf_memory_gb(n_documents, len(terms),
+                                   n_topics or max(_topics.parse_counts(k_values)))
     if wanted >= 1.0:
         import warnings
         warnings.warn(
@@ -400,9 +420,25 @@ def topic_model_nmf(
             "`vocab_top_n` if that is more than this machine has.")
 
     announce(on_progress, "fitting factors")
+    # read once, whether we fit once or twenty times
     matrix = _topics.read_matrix(dtm_csv, encoding=encoding, skip_cols=2)
-    _w, h, trace = _topics.fit_nmf(matrix, n_topics, beta_loss=beta_loss,
-                                   iters=iters, tol=tol, on_progress=on_progress)
+
+    def fit_at(k):
+        return _topics.fit_nmf(matrix, k, beta_loss=beta_loss, iters=iters,
+                               tol=tol)[1]
+
+    trace: list = []
+    if n_topics:
+        _w, h, trace = _topics.fit_nmf(matrix, n_topics, beta_loss=beta_loss,
+                                       iters=iters, tol=tol,
+                                       on_progress=on_progress)
+    else:
+        n_topics, h = _topics.select_k(
+            k_values=k_values, fit=fit_at, terms=terms, batches=batches,
+            engine="nmf", rule=k_selection, metric=coherence_metric,
+            top_terms=top_terms, rounding=rounding,
+            out_stem=out_features_csv.with_name(f"{stem}_k_selection"),
+            encoding=encoding, on_progress=on_progress)
     topic_names = _topic_names(n_topics)
 
     # the loadings table, in the shape `figures.wordclouds.theme_wordclouds`

@@ -45,12 +45,14 @@ rather than after an out-of-memory.
 
 from __future__ import annotations
 
-from typing import Callable, Iterator, List, Sequence
+from typing import Callable, Iterator, List, Sequence, Tuple
 
 __all__ = [
     "dirichlet_expectation", "fit_lda", "infer_lda", "perplexity",
     "nndsvd", "fit_nmf", "infer_nmf", "nmf_memory_gb",
     "top_terms", "coherence", "COHERENCE_METRICS",
+    "exclusivity", "choose_k", "parse_counts", "fittable_counts",
+    "DEFAULT_K_VALUES", "K_SELECTION_RULES", "write_k_selection", "select_k",
 ]
 
 #: What `coherence` can score. Both are computable from the matrix alone, in one
@@ -624,6 +626,378 @@ def check_matrix_agrees(dtm_csv, columns, *, encoding: str) -> None:
             f"{len(columns):,}. An earlier run left a matrix behind and this "
             "one reused it. Delete that folder, or pass "
             "`overwrite_existing=True`, and run again.")
+
+
+#: The candidate topic counts a sweep tries when nobody says otherwise.
+#: Dense where the answer usually is and sparse out at the top, because the
+#: gap between 1000 and 2000 topics matters less than the gap between 5 and 10
+#: -- which is also why the chart that plots these uses a log x axis.
+DEFAULT_K_VALUES = (5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 75, 100, 200, 300,
+                    400, 500, 1000, 2000)
+
+#: The rules that pick a topic count by fitting at several and scoring them.
+#: `parallel` and `kaiser` are MEM's own, and live in `stats/pca.py`.
+K_SELECTION_RULES = ("coherence", "coherence_exclusivity")
+
+
+def parse_counts(k_values) -> List[int]:
+    """``"5,10,20"`` or ``[5, 10, 20]`` -> ``[5, 10, 20]``.
+
+    A string as well as a list because this arrives from a YAML pipeline and
+    from a command line, and typing a list on a command line is miserable.
+    """
+    if isinstance(k_values, str):
+        parts = [p.strip() for p in k_values.replace(";", ",").split(",")]
+        k_values = [p for p in parts if p]
+    counts = []
+    for value in k_values:
+        try:
+            k = int(value)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"{value!r} is not a number of topics. Give something like "
+                "'5,10,20,40'.") from None
+        if k < 2:
+            raise ValueError(f"{k} topics is not a topic model; ask for 2 or more.")
+        counts.append(k)
+    if not counts:
+        raise ValueError("no topic counts to try; give something like '5,10,20,40'.")
+    return sorted(set(counts))
+
+
+def fittable_counts(counts: Sequence[int], n_docs: int, n_terms: int,
+                    engine: str) -> Tuple[List[int], List[int]]:
+    """
+    Split candidate counts into the ones this corpus can support and the rest.
+
+    A sweep is the one place where a count that cannot be fitted is the
+    question rather than a mistake. `fit_lda` refuses more topics than
+    documents and NNDSVD refuses more than the matrix has dimensions, and
+    both fire mid-loop -- so on a 300-document corpus the default list threw
+    away ten good fits and the whole run, after paying for the matrix.
+    """
+    ceiling = n_docs if engine == "lda" else min(n_docs, n_terms)
+    return ([k for k in counts if k <= ceiling],
+            [k for k in counts if k > ceiling])
+
+
+def exclusivity(components) -> List[float]:
+    """
+    How much of each topic's top terms belongs to that topic rather than
+    being shared out among the others, per topic, in ``[0, 1]``.
+
+    The companion to coherence, and its opposite in temperament: coherence is
+    maximized by a few topics made of common words, which co-occur
+    everywhere; exclusivity by many topics made of rare ones. Neither alone
+    says a model is good, which is why the balanced rule wants both.
+
+    Two normalizations, and the order matters. Rows first, so each topic is a
+    distribution over words: NMF's factor scale is arbitrary (W absorbs it),
+    so column-normalizing the raw H would make a large factor look
+    spuriously exclusive on every term it touches. Columns second, which is
+    the exclusivity itself -- a word's share of its own mass that sits here.
+    """
+    import numpy as np
+
+    comp = np.asarray(components, dtype=np.float64)
+    comp = np.maximum(comp, 0.0)
+    rows = comp.sum(axis=1, keepdims=True)
+    beta = comp / np.where(rows > 0, rows, 1.0)
+    cols = beta.sum(axis=0, keepdims=True)
+    return beta / np.where(cols > 0, cols, 1.0)
+
+
+def _balanced(coherence_score: float, exclusivity_score: float) -> float:
+    """
+    The harmonic mean of the two, each on ``[0, 1]``.
+
+    Harmonic rather than arithmetic because the mean lets a fine coherence
+    cover for a hopeless exclusivity, which is the compensation the pairing
+    exists to prevent -- the same reason F1 is a harmonic mean. NPMI arrives
+    on ``[-1, 1]`` and is mapped onto ``[0, 1]`` by a fixed affine step, not
+    by rescaling against the other counts in the sweep: a score that moved
+    when you added a candidate k would be a bad thing to put in a paper.
+    """
+    a = (float(coherence_score) + 1.0) / 2.0
+    b = float(exclusivity_score)
+    return 0.0 if a + b <= 0 else 2.0 * a * b / (a + b)
+
+
+def choose_k(*, counts: Sequence[int], fit, terms: Sequence[str], pair, single,
+             n_docs: int, rule: str = "coherence", metric: str = "npmi",
+             top_terms: int = 15, rounding: int = 4, on_progress=None):
+    """
+    Fit at each candidate count, score it, and say which one won.
+
+    ``fit`` is called once per count and returns that model's term weights as
+    ``(k, len(terms))``, non-negative and in the vocabulary's own order. A
+    callable rather than an engine name because the three models arrive here
+    by genuinely different roads -- LDA streams counts, NMF holds the whole
+    matrix, MEM slices an eigen-decomposition -- and the scoring does not
+    care which.
+
+    Returns ``(rows, words, best_k, best_components)``. The winning fit is
+    handed back rather than thrown away: both engines are deterministic, so
+    refitting at the chosen count would be the same work twice.
+    """
+    import numpy as np
+
+    from ..helpers.progress import announce
+
+    if rule not in K_SELECTION_RULES:
+        raise ValueError(f"unknown k selection rule {rule!r}; "
+                         f"have {K_SELECTION_RULES}")
+    if rule == "coherence_exclusivity" and metric != "npmi":
+        raise ValueError(
+            "the coherence_exclusivity rule needs metric='npmi'. UMass is "
+            "unbounded below, so balancing it against exclusivity would mean "
+            "rescaling both against whichever counts happen to be in the "
+            "sweep -- and the winner would then change when you added a "
+            "candidate. NPMI is bounded, so the balance stands on its own.")
+
+    rows: List[dict] = []
+    words: dict = {}
+    best = None
+    for i, k in enumerate(counts):
+        announce(on_progress, f"fitting {k} topics ({i + 1} of {len(counts)})")
+        components = np.asarray(fit(k), dtype=np.float64)
+        leading = [list(np.argsort(row)[::-1][:top_terms]) for row in components]
+        coh = coherence(leading, pair, single, n_docs, metric=metric)
+        excl_all = exclusivity(components)
+        excl = [float(np.mean([excl_all[t][j] for j in topic]))
+                for t, topic in enumerate(leading)]
+        balanced = [_balanced(c, e) for c, e in zip(coh, excl)]
+        row = {
+            "n_topics": k,
+            "coherence": round(float(np.mean(coh)), rounding),
+            "coherence_sd": round(float(np.std(coh)), rounding),
+            "worst_topic": round(float(np.min(coh)), rounding),
+            "exclusivity": round(float(np.mean(excl)), rounding),
+            "exclusivity_sd": round(float(np.std(excl)), rounding),
+            "balanced": round(float(np.mean(balanced)), rounding),
+        }
+        rows.append(row)
+        words[k] = [[terms[j] for j in topic] for topic in leading]
+        score = row["balanced"] if rule == "coherence_exclusivity" else row["coherence"]
+        if best is None or score > best[0]:
+            best = (score, k, components)
+
+    _score, best_k, best_components = best
+    for row in rows:
+        row["chosen"] = "yes" if row["n_topics"] == best_k else ""
+    return rows, words, best_k, best_components
+
+
+def select_k(*, k_values, fit, terms: Sequence[str], batches, engine: str,
+             rule: str = "coherence", metric: str = "npmi",
+             top_terms: int = 15, rounding: int = 4, out_stem,
+             chart=None, report=None,
+             encoding: str = "utf-8-sig", on_progress=None):
+    """
+    Choose a topic count, leaving the evidence behind. One call per model.
+
+    Everything a sweep has to get right in one place -- the counts this
+    corpus can actually support, the co-occurrence pass, the scoring, and the
+    files somebody reads afterwards -- because each of those was a bug the
+    first time it was written and three copies would be three chances to
+    regrow it.
+
+    Returns ``(best_k, components)``: the winning count and its own fit,
+    which the caller uses rather than fitting again.
+    """
+    import warnings
+
+    from ..helpers.progress import announce
+
+    counts = parse_counts(k_values)
+    announce(on_progress, "counting how often terms appear together")
+    pair, single, n_docs = codocument_counts(batches, len(terms))
+
+    fittable, skipped = fittable_counts(counts, n_docs, len(terms), engine)
+    if skipped:
+        warnings.warn(
+            f"{n_docs:,} documents and {len(terms):,} terms cannot support "
+            f"{', '.join(str(k) for k in skipped)} topics, so "
+            f"{'those counts were' if len(skipped) > 1 else 'that count was'} "
+            "skipped. A topic model needs more documents than topics, and in "
+            "practice many more.")
+    if not fittable:
+        ceiling = min(n_docs, len(terms)) if engine != "lda" else n_docs
+        raise ValueError(
+            f"none of the topic counts {', '.join(str(k) for k in counts)} can "
+            f"be fitted to {n_docs:,} document(s) over {len(terms):,} terms: "
+            f"the most this corpus can support is {ceiling}. Pass smaller "
+            "`k_values`, or set the topic count yourself.")
+
+    # a trap worth naming, because it produces confident nonsense rather than
+    # an error: the scores are computed over each topic's top `top_terms`
+    # words, and if the vocabulary cannot supply that many *distinct* words
+    # per topic the lists necessarily spill into each other.
+    crowded = [k for k in fittable if k * top_terms > len(terms)]
+    if crowded:
+        warnings.warn(
+            f"a {len(terms)}-term vocabulary cannot give {top_terms} distinct "
+            f"words to each of {', '.join(str(k) for k in crowded)} topics, so "
+            "their scores are measuring words from different topics against "
+            "each other. Raise `vocab_top_n`, lower `top_terms`, or drop the "
+            "larger topic counts.")
+
+    rows, words, best_k, components = choose_k(
+        counts=fittable, fit=fit, terms=terms, pair=pair, single=single,
+        n_docs=n_docs, rule=rule, metric=metric, top_terms=top_terms,
+        rounding=rounding, on_progress=on_progress)
+    write_k_selection(out_stem, rows, words, rule=rule, metric=metric,
+                      engine=engine, n_docs=n_docs, n_terms=len(terms),
+                      skipped=skipped, chart=chart, report=report,
+                      encoding=encoding, on_progress=on_progress)
+    return best_k, components
+
+
+def write_k_selection(out_stem, rows: Sequence[dict], words: dict, *,
+                      rule: str, metric: str, engine: str, n_docs: int,
+                      n_terms: int, skipped: Sequence[int] = (),
+                      chart=None, report=None,
+                      encoding: str = "utf-8-sig", on_progress=None):
+    """
+    The evidence behind a chosen topic count: the numbers, the pictures, the
+    words.
+
+    Written whenever a sweep rule runs, because the argmax is a suggestion
+    and this is the part somebody actually has to read. Returns the CSV.
+    """
+    import csv as _csv
+    from pathlib import Path as _Path
+
+    from ..helpers.atomic import atomic_write
+    from ..helpers.progress import announce
+
+    stem = _Path(out_stem)
+    table = stem.with_name(f"{stem.name}.csv")
+    table.parent.mkdir(parents=True, exist_ok=True)
+    with atomic_write(table, newline="", encoding=encoding) as fh:
+        writer = _csv.DictWriter(fh, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+    announce(on_progress, "drawing the topic-count curve")
+    try:
+        from ..figures.charts import (dual_axis_line_chart, line_chart,
+                                      pillow_missing_reason)
+        drawable = not pillow_missing_reason()
+    except ImportError:                                   # pragma: no cover
+        drawable = False
+    if drawable:
+        # every other chart caller in the codebase guards this; the sweep did
+        # not, and a machine without Pillow lost the whole run *after* paying
+        # for every fit.
+        counts = [(r["n_topics"], r["balanced" if rule == "coherence_exclusivity"
+                                   else "coherence"]) for r in rows]
+        label = ("coherence and exclusivity, balanced"
+                 if rule == "coherence_exclusivity" else f"{metric} coherence")
+        try:
+            line_chart({label: counts},
+                       _Path(chart) if chart else stem.with_name(f"{stem.name}.png"),
+                       title=f"Choosing a topic count for {engine.upper()}",
+                       x_label="topics", y_label=label, x_scale="log",
+                       dpi=300, on_progress=on_progress)
+            if rule == "coherence_exclusivity":
+                dual_axis_line_chart(
+                    {"coherence": [(r["n_topics"], r["coherence"]) for r in rows]},
+                    {"exclusivity": [(r["n_topics"], r["exclusivity"]) for r in rows]},
+                    stem.with_name(f"{stem.name.replace('_k_selection', '')}"
+                                   "_k_tradeoff.png"),
+                    title="Coherence against exclusivity",
+                    x_label="topics", y_label=f"{metric} coherence",
+                    y2_label="exclusivity", x_scale="log", dpi=300,
+                    on_progress=on_progress)
+        except Exception:                                 # pragma: no cover
+            pass
+
+    _write_k_report(_Path(report) if report
+                    else stem.with_name(f"{stem.name}_report.md"), rows=rows,
+                    words=words, rule=rule, metric=metric, engine=engine,
+                    n_docs=n_docs, n_terms=n_terms, skipped=skipped,
+                    encoding=encoding)
+    return table
+
+
+def _write_k_report(path, *, rows, words, rule: str, metric: str, engine: str,
+                    n_docs: int, n_terms: int, skipped, encoding: str) -> None:
+    """The write-up: the numbers, then the words, then the caveat."""
+    from ..helpers.atomic import atomic_write
+
+    column = "balanced" if rule == "coherence_exclusivity" else "coherence"
+    best = max(rows, key=lambda r: r[column])
+    lines = [
+        "# How many topics?",
+        "",
+        f"Fitted **{engine.upper()}** at {len(rows)} topic counts over "
+        f"{n_docs:,} documents and a {n_terms:,}-term vocabulary.",
+        "",
+    ]
+    if rule == "coherence_exclusivity":
+        lines += [
+            f"Scored by **coherence and exclusivity together** -- the harmonic "
+            f"mean of {metric} coherence (do a topic's words turn up in the "
+            "same documents?) and exclusivity (are they this topic's words "
+            "rather than everybody's?). Harmonic, so that a fine score on one "
+            "cannot cover for a hopeless score on the other: a model with few "
+            "topics made of common words scores well on coherence alone, and "
+            "one with many topics made of rare words scores well on "
+            "exclusivity alone, and neither is what you want.",
+            "",
+        ]
+    else:
+        lines += [f"Scored by **{metric}** coherence alone.", ""]
+    lines += [
+        f"The best score was at **{best['n_topics']} topics** "
+        f"({best[column]}).",
+        "",
+    ]
+    if skipped:
+        lines += [
+            f"{', '.join(str(k) for k in skipped)} "
+            f"{'topics were' if len(skipped) > 1 else 'topics was'} asked for "
+            "and skipped: this corpus is too small to fit "
+            f"{'them' if len(skipped) > 1 else 'it'}.",
+            "",
+        ]
+    lines += [
+        "| topics | coherence | exclusivity | balanced | spread | worst topic |",
+        "|---:|---:|---:|---:|---:|---:|",
+    ]
+    for row in rows:
+        marker = " **<-**" if row is best else ""
+        lines.append(
+            f"| {row['n_topics']}{marker} | {row['coherence']} | "
+            f"{row['exclusivity']} | {row['balanced']} | "
+            f"{row['coherence_sd']} | {row['worst_topic']} |")
+    lines += [
+        "",
+        "## Read the words before believing the number",
+        "",
+        "These measures are a guide, not a verdict. The literature they come "
+        "from (Roberts, Stewart & Tingley on structural topic models) plots "
+        "coherence against exclusivity so a person can *look* at the trade-off "
+        "and pick from it; taking the best single number is a convenience on "
+        "top of that, not a replacement for it. A model can score well and "
+        "still cut the corpus somewhere useless, and the best score is often "
+        "at more topics than anybody wants to interpret.",
+        "",
+        "Use the curve to rule out counts that are clearly too few or too "
+        "many, then pick from what is left by reading the topics below.",
+        "",
+        "## The topics at each count",
+        "",
+    ]
+    for k in sorted(words):
+        lines.append(f"### {k} topics")
+        lines.append("")
+        for i, topic in enumerate(words[k], 1):
+            lines.append(f"{i}. {', '.join(topic)}")
+        lines.append("")
+    with atomic_write(path, encoding=encoding) as fh:
+        fh.write("\n".join(lines) + "\n")
 
 
 def build_matrix(*, analysis_ready, out_dir, weighting: str, matrix_rounding: int,

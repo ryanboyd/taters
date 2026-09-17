@@ -134,7 +134,7 @@ def test_a_text_with_no_known_word_gets_blanks_not_zeros(tmp_path):
 
 
 def test_normalizing_words_evens_out_long_vectors(tmp_path):
-    """fish has norm 0.71, cat norm 1: unnormalised, cat pulls the mean its
+    """fish has norm 0.71, cat norm 1: unnormalized, cat pulls the mean its
     way; normalized, both count alike."""
     plain = _apply(tmp_path, _model(tmp_path / "m"), ["cat fish"])
     even = _apply(tmp_path, _model(tmp_path / "m"), ["cat fish"], normalize_words=True)
@@ -591,7 +591,7 @@ def test_a_bad_family_or_weighting_is_refused_by_name(tmp_path):
 
 @needs_gensim
 def test_the_text_settings_travel_with_the_model(tmp_path):
-    """A model trained lemmatised reads new text lemmatised: "dinners" and
+    """A model trained lemmatized reads new text lemmatized: "dinners" and
     "dinner" are one word to it."""
     _train(tmp_path, lemmatize=True)
     model = tmp_path / "features" / "models" / "word_vectors.json"

@@ -1075,8 +1075,7 @@ def test_the_word_counting_steps_lemmatize_by_default(tmp_path):
     # has to hold is the default: on, for every one of them.
     for rid, var in (("topic_model_mem", "mem_lemmatize"),
                      ("topic_model_lda", "lda_lemmatize"),
-                     ("topic_model_nmf", "nmf_lemmatize"),
-                     ("topic_count_sweep", "sweep_lemmatize")):
+                     ("topic_model_nmf", "nmf_lemmatize")):
         recipe = _r.by_id(rid)
         assert recipe.with_["lemmatize"] == f"{{{{var:{var}}}}}", rid
         assert recipe.vars[var]["default"] is True, rid

@@ -2713,15 +2713,18 @@ def _gate_open(recipe: _recipes.Recipe, spec, name: str,
     the two can never disagree about a row. Fails open twice over: no gate,
     or a gate parameter the step's signature does not have, shows the row.
     """
-    gate = _recipes.gate_of(recipe, name)
-    if gate is None:
+    gates = _recipes.gates_of(recipe, name)
+    if gates is None:
         return True
-    gate_param = spec.get(gate[0])
-    if gate_param is None:
-        return True
-    current, _var, _widget = _live_value(recipe, gate_param, var_specs,
-                                         overrides, var_values)
-    return _recipes.gate_holds(gate, current)
+    for gate in gates:
+        gate_param = spec.get(gate[0])
+        if gate_param is None:
+            continue
+        current, _var, _widget = _live_value(recipe, gate_param, var_specs,
+                                             overrides, var_values)
+        if not _recipes.gate_holds(gate, current):
+            return False
+    return True
 
 
 def _menu_order(recipe: _recipes.Recipe, everyday: Sequence[str],

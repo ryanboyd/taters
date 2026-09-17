@@ -23,6 +23,13 @@ them. The stage is optional for exactly that reason. But if you have a
 spreadsheet with a group label or a score sitting next to your text, you are two
 questions away from an answer, and this page is about which question to ask.
 
+Read as far as **"That is the whole core"** and you have everything you need to
+run one. The two parts after it are for when you come back with something
+harder, and you can ignore them until you do. The collapsed boxes are the same deal:
+the practical answer is always outside them, and what is inside is the evidence
+if you want to argue with it. For how any of this actually works underneath —
+the folds, the shrinkage, the exact tests — see [Statistics](stats.md).
+
 ---
 
 ## First, a word about word counts
@@ -138,6 +145,8 @@ know of in this literature.
 
 Which brings us to:
 
+---
+
 ### Testing hundreds of things at once
 
 If you extract 200 features and test each at *p* < .05, then even if nothing
@@ -189,18 +198,20 @@ you. A cross-validated model tells you how well language would do on people it
 has never seen — which is the claim you need if you want to *measure* something
 rather than describe it.
 
-This is the tradition the World Well-Being Project built, and it is worth
-understanding why it looks the way it does. Language features are many, they
-are heavily collinear (three readability indices are three views of sentence
-length), and there are usually more of them than you have participants —
-literally so with transformer features, where "the number of observations is
-often smaller than the standard 768+ hidden state sizes"
-(Ganesan et al., 2021). Ordinary regression is at its worst in exactly those
-conditions: when predictors are not independent of each other, least-squares
-estimates "have a high probability of being unsatisfactory, if not incorrect"
-(Hoerl & Kennard, 1970). Ridge adds a penalty that shrinks the coefficients,
-deliberately accepting a little bias to buy a large reduction in error, and
-never has to invert a singular matrix.
+??? info "Why ridge, and not ordinary regression"
+
+    This is the tradition the World Well-Being Project built, and it is worth
+    understanding why it looks the way it does. Language features are many, they
+    are heavily collinear (three readability indices are three views of sentence
+    length), and there are usually more of them than you have participants —
+    literally so with transformer features, where "the number of observations is
+    often smaller than the standard 768+ hidden state sizes"
+    (Ganesan et al., 2021). Ordinary regression is at its worst in exactly those
+    conditions: when predictors are not independent of each other, least-squares
+    estimates "have a high probability of being unsatisfactory, if not incorrect"
+    (Hoerl & Kennard, 1970). Ridge adds a penalty that shrinks the coefficients,
+    deliberately accepting a little bias to buy a large reduction in error, and
+    never has to invert a singular matrix.
 
 Which features you hand it is your call, and the two families are worth
 telling apart. Dictionary counts, readability, cohesion and the like are
@@ -213,35 +224,39 @@ regime ridge exists for, and it is the table you would reduce to components
 first if you want something you can name afterwards. Tick it on the feature
 checklist like anything else; it joins the analysis table under its own name.
 
-The canonical demonstration of what you get for that is Park et al. (2015):
-they fitted a ridge model to the Facebook language of 66,732 people, applied
-it to 4,824 people it had never seen, and then treated its output as a
-*measurement instrument* — it agreed with self-reports at an average *r* = .38,
-matched or beat what a friend's ratings achieve (.39 against .32), told traits
-apart, and stayed stable over six months. That is the shape of the thing
-Taters' save-and-apply step is for. One thing to note about it, because it
-matters for what you can claim: those 4,824 were a held-out split of the
-*same* collection, so it shows generalization to new **people from the same
-population**.
+??? info "What this can be claimed to measure — two studies worth reading"
 
-The strongest demonstration I know of the harder version — a model fixed in
-advance and then applied to a sample collected afterwards — is
-Kjell et al. (2026). They built a language assessment of PTSD severity on a
-development sample of 1,437 people describing their lives in automated
-interviews, **preregistered the models**, and then applied them unchanged to a
-prospective sample of 346. The preregistered models correlated with
-established PTSD measures at *r* = .38, reached AUC = .76 against a baseline
-of .61, and each standard-deviation increase in the language score was
-associated with $696.50 more mental-health-care expenditure.
+    The canonical demonstration of what you get for that is Park et al. (2015):
+    they fitted a ridge model to the Facebook language of 66,732 people, applied
+    it to 4,824 people it had never seen, and then treated its output as a
+    *measurement instrument* — it agreed with self-reports at an average *r* = .38,
+    matched or beat what a friend's ratings achieve (.39 against .32), told traits
+    apart, and stayed stable over six months. That is the shape of the thing
+    Taters' save-and-apply step is for. One thing to note about it, because it
+    matters for what you can claim: those 4,824 were a held-out split of the
+    *same* collection, so it shows generalization to new **people from the same
+    population**.
 
-That paper is worth reading for the *method* as much as the result, because it
-answers an objection this whole section invites. If a model's score depends on
-choices you made after seeing the data — which features, which penalty, which
-fold seed — then a good out-of-fold number is not quite the guarantee it looks
-like. Preregistering the model closes that door: the instrument is fixed
-before the new sample exists, and what happens next is a test rather than a
-search. If you intend to publish a language-based measure, this is the
-standard to aim at.
+    The strongest demonstration I know of the harder version — a model fixed in
+    advance and then applied to a sample collected afterwards — is
+    Kjell et al. (2026). They built a language assessment of PTSD severity on a
+    development sample of 1,437 people describing their lives in automated
+    interviews, **preregistered the models**, and then applied them unchanged to a
+    prospective sample of 346. The preregistered models correlated with
+    established PTSD measures at *r* = .38, reached AUC = .76 against a baseline
+    of .61, and each standard-deviation increase in the language score was
+    associated with $696.50 more mental-health-care expenditure.
+
+    That paper is worth reading for the *method* as much as the result, because it
+    answers an objection this whole section invites. If a model's score depends on
+    choices you made after seeing the data — which features, which penalty, which
+    fold seed — then a good out-of-fold number is not quite the guarantee it looks
+    like. Preregistering the model closes that door: the instrument is fixed
+    before the new sample exists, and what happens next is a test rather than a
+    search. If you intend to publish a language-based measure, this is the
+    standard to aim at.
+
+---
 
 ### What does each feature table add?
 
@@ -256,104 +271,7 @@ own saved model too, so the one that earned its keep can be taken to the
 next study. Turn it down to each-and-all, or off, with `set_combos` if the
 run is large; it is fitted for up to five tables as it is.
 
-### Taking a model to a different kind of text
-
-Crossing platforms *is* done in this literature, and done well. Giorgi et al.
-(2022) took the personality models trained on roughly 66,000 Facebook
-participants — the Park et al. models above — and applied them to 6,064,267
-Twitter users, aggregated to 2,041 counties. Across 13 outcomes the resulting
-county-level estimates "replicated patterns that have been observed in
-individual-level and geographic studies", including higher Republican vote
-share in less agreeable counties. So a saved model genuinely can travel.
-
-But note *how* they did it, because this is the part that matters for you. The
-models were **not applied unchanged.** To adjust for the differences between
-the Facebook source and the Twitter target, they applied a domain-adaptation
-step (Target Side Domain Adaptation, as cited there), correcting both for
-geographically-specific word usage and for the different word distributions of
-the two platforms. Someone doing this carefully treated the platform shift as
-a problem requiring an explicit correction — not as something that comes out
-in the wash.
-
-**Taters has no domain-adaptation step.** Applying a saved model to a
-different kind of text here is the naive version of what that paper did
-carefully, so the burden of showing the scores still mean something is yours.
-
-And keep the size of the hop in view. Facebook to Twitter is a *short* one:
-both are short, informal, public posts written to a loosely-known audience.
-Twitter to political speeches, or to private diary entries, is a much bigger
-shift — different register, different audience, different purpose, wildly
-different length — and a model has no way to tell you it has left the
-territory where it was validated. It will return numbers. The numbers will be
-arithmetically correct. Whether they still measure the construct is an
-empirical question about *your* corpus, and the honest thing is to treat a
-cross-domain score as a hypothesis to be validated against something external
-rather than as a measurement you can report.
-
-**What it tells you.** Every headline number is **out-of-fold**: each text is
-predicted by a model that never saw it. That is the whole discipline of this
-section, and it is worth being precise about why. Overfitting is "the tendency
-for statistical models to mistakenly fit sample-specific noise as if it were
-signal", and an in-sample R² does not estimate how your *fitted equation* will
-do on new data — it estimates the average performance of the model *form*
-across hypothetical samples, which is "virtually always an overly optimistic
-estimate" of the thing you actually care about. K-fold cross-validation is "a
-minimally biased way of estimating the true generalization performance of any
-model" (Yarkoni & Westfall, 2017).
-
-So the in-sample R² sits in the next column, and the gap between the two is the
-difference between a model that learned something and a model that memorized
-your participants. A cross-validated R² can be *negative*, and when it is, it
-is telling you something clear and useful: this model is worse than just
-guessing the mean.
-
-You also get the coefficients, one row per predictor and one column per
-outcome, sorted so the features that did something are at the top of the file.
-
-**What to do with the results.** Two things, and they pull in opposite
-directions.
-
-The first is to look at the coefficients and interpret them — and to be careful
-here, because a ridge coefficient on one of 200 collinear features is not "the
-effect of that feature". Use them to see the shape of the thing, and lean on
-the correlations for claims about individual features.
-
-The second is to *keep the model*. A fit is an instrument, not a result. The
-saved model carries the predictor names, the training means and standard
-deviations, the chosen penalty and the fold seed, so it can score a new corpus
-standardized against the original sample — which is what makes two datasets'
-scores comparable at all. That fit-once, apply-many discipline is how a finding
-becomes a measure.
-
-Which raises the honest warning, and it is one I have made in print before: being
-able to **predict** something is conceptually quite different from
-**understanding** it. A model that reports "these 200 features together predict
-depression at R² = .12" is a real result and it is also, by itself, not an
-insight about depression. The most actionable findings in this field have
-usually come from transparent models that a domain expert could reason about,
-not from the most powerful algorithm available. Taters gives you the predictive
-machinery because you often need it; it puts the interpretable analyses first
-because that is usually where the understanding comes from.
-
-**Expect small numbers.** This is the single most useful thing to know before
-you look at your first result. Eichstaedt et al. (2021) put five feature sets
-through the same 10-fold cross-validated pipeline on 65,896 people's Facebook
-posts and reported what each actually achieved: DICTION *r* = .23, LIWC2015
-*r* = .28, General Inquirer *r* = .29, and 2,000 LDA topics *r* = .37. So a
-well-built cross-validated language model of a personality-like outcome lands
-somewhere around *r* = .2 to .4 — **not** .8. A model claiming *r* = .9 on new
-data is far more likely to have a leak than a discovery.
-
-If you are coming from experimental psychology those numbers look
-disappointing. They are not, and there are two separate reasons why. An *r* of
-.20 is a medium effect by the field's own calibrated benchmarks, and
-practically useful; *r* ≥ .40 in psychology "is likely to be a gross
-overestimate" (Funder & Ozer, 2019 — whose benchmarks assume, as they are
-careful to say, that your estimates are reliable in the first place).
-Separately: complex outcomes have many causes each contributing a little, which
-makes small effects the ones "most likely to be real", and they "can have
-substantial consequences, especially when considered at scale and over time"
-(Götz et al., 2022).
+---
 
 ### When the outcome is a category
 
@@ -379,153 +297,73 @@ excellent on the majority class and useless on the one you actually care about,
 and every average hides that. And you get the confusion matrix, which is the
 only output that tells you *what* the mistakes were.
 
-For a worked example of exactly this — a ridge-penalized logistic regression,
-evaluated by 10-fold cross-validation, scored by AUC, on a real clinical
-outcome — see Eichstaedt et al. (2018). Using only the Facebook posts that 683
-emergency-department patients wrote *before* any depression diagnosis appeared
-in their medical records, it identified the 114 who would go on to be
-diagnosed at AUC = 0.69, which the authors note "falls just short of the
-customary threshold for good discrimination", and roughly matches how well
-screening questionnaires do against the same records. It still beat chance
-three months before the diagnosis was recorded (AUC = 0.62). Read it as a
-proof-of-concept complement to screening at about questionnaire accuracy —
-not as a deployed clinical tool, and not as a save-and-score-a-new-dataset
-example, since all of its results are out-of-fold within one sample.
+??? info "A worked example: predicting depression from Facebook posts"
+
+    For a worked example of exactly this — a ridge-penalized logistic regression,
+    evaluated by 10-fold cross-validation, scored by AUC, on a real clinical
+    outcome — see Eichstaedt et al. (2018). Using only the Facebook posts that 683
+    emergency-department patients wrote *before* any depression diagnosis appeared
+    in their medical records, it identified the 114 who would go on to be
+    diagnosed at AUC = 0.69, which the authors note "falls just short of the
+    customary threshold for good discrimination", and roughly matches how well
+    screening questionnaires do against the same records. It still beat chance
+    three months before the diagnosis was recorded (AUC = 0.62). Read it as a
+    proof-of-concept complement to screening at about questionnaire accuracy —
+    not as a deployed clinical tool, and not as a save-and-score-a-new-dataset
+    example, since all of its results are out-of-fold within one sample.
 
 ---
 
-## Scoring with a model that was built differently
+## What you actually end up with
 
-A saved model was fitted on features measured with particular settings, and
-those settings are part of the instrument. Score it against features measured
-some other way and you get a number that looks exactly like a prediction and
-is not one — the column names match, the values do not. In a real run that
-moved a mean predicted age from 36.5 to 44.0 years and reported 904
-predictions without a word of complaint.
+Every analysis writes tidy CSVs *and* contributes to a single `report.md` in
+plain English — what was run, on how many rows, with what corrections, and what
+it found. The report is written to be readable by a collaborator who was not
+there when you ran it, which in practice means yourself in six months.
 
-So Taters records how every feature table was measured, in a small
-`<name>_settings.json` beside it, and a saved model carries the same record
-for the features it was fitted on. When you score, the two are compared:
+Every feature table also gets a table of descriptive statistics — n, missing,
+mean, SD, quartiles, range, skewness, kurtosis — under `stats_descriptives/`,
+whether or not you ran any statistics; it is the methods-table paragraph
+written for you, and the first place to look when a measure behaves oddly.
 
-- **They match** — it scores, silently. Nothing to say.
-- **They differ, and both are known** — refused, naming every setting and both
-  values. Not overridable: the model was fitted on other numbers, and there is
-  nothing to interpret.
-- **One side has no record** — refused, but waivable one table at a time
-  (`unverified_ok=("cohesion",)`). "I cannot check this" is a different claim
-  from "these disagree", and only the first is yours to wave through.
+Every result is also drawn as a word cloud, under `figures/wordclouds/`, and
+the report ends with them: the features predicting a higher and a lower
+score, correlated positively and negatively with each outcome, higher in one
+group than another, loading on each component. Size and shade follow the
+statistic, blue is positive and red negative. They are the quickest first
+read of a result there is; the tables are what you cite. The
+[statistics guide](stats.md#word-clouds) lists exactly what is drawn from
+what.
 
-You may well want it both ways at once: your own cohesion features measured
-how *you* want them, and a colleague's model applied to the same corpus even
-though it was fitted differently. That works. Taters measures the feature a
-second time using the model's own settings, into a private folder of its own,
-and scores the model against that — leaving your table untouched and out of
-it. The review screen says so before anything runs:
+Two things in it are worth reading before the results:
 
-```text
-Parts of speech                             you picked
-Parts of speech — for age_blogs [ridge]     the model needs it
-Score with models I already have            you picked
-```
+**How much of your data was used.** Every table carries the number of rows the
+analysis actually used beside the number it *could* have used, and the report
+says so out loud whenever those differ by much. This matters more than it
+sounds: some measures are undefined for some texts rather than merely absent,
+and the textbook response — drop any row with a missing value — can quietly
+throw away most of a corpus. A model fitted on 52 of 938 texts will report an
+R² as confidently as any other. Taters tells you.
 
-If your settings already happen to match the model's, nothing extra runs and
-both share the one extraction. And a model that carries its own word lists —
-which is how they are saved — can do this on a machine that has never seen
-them. That portability is also why exporting a model warns you what is inside
-it: a word list can be licensed, or can hold material you would rather not
-publish.
+**What was set aside.** A predictor that is missing for most of your texts is
+dropped, rather than being allowed to drop the texts. The report names what
+went and why.
 
-Three kinds of feature table depend on the corpus itself rather than only on
-settings, and each is handled so a model fitted on one can still meet a new
-study:
+---
 
-- **A document-term matrix** has one column per vocabulary term, and the
-  vocabulary came from *your* texts. The model carries that vocabulary, and
-  the new study is scanned against it — so a word the new texts never use is
-  a column of zeros, as it should be, rather than a missing predictor. Your
-  own matrix, built from the new study's vocabulary, is left alone.
-- **Topic-model themes** were fitted to your texts; refitting them on another
-  study gives different themes, or a different number of them. The model
-  carries the fitted theme model and *applies* it to the new texts, which is
-  the only honest way to score the same themes twice.
-- **Parts of speech** (and any other table whose columns are whatever
-  occurred) may lack a tag no text in the new study happens to use. That
-  absence is the measurement: the column is scored as zero.
+!!! success "That is the whole core"
 
-A model fitted before the settings record changed shape is refused with
-that reason — "recorded under different versions of the settings record;
-re-fit the model" — rather than as a settings mismatch. The two records
-hash their word lists differently and cannot be compared setting by setting,
-and telling you a dictionary had changed when nobody touched it sent one
-user looking for a change that never happened.
+    Three questions, the answers, and the files they leave behind. If one of
+    those was your question, you are done — go and read your report.
 
-A model fitted with **controls** — `age` and `gender` held constant, say —
-also needs those two columns to score anything, and no feature step produces
-them: they are the spreadsheet's own. When a chosen model needs controls,
-the run carries them from the spreadsheet you are scoring (the same
-metadata step the statistics use), and the wizard checks the spreadsheet
-actually has those columns before anything runs. A folder of documents has
-no such columns, so a controlled model cannot score one.
+    What follows is for when you come back with a harder one: controlling for
+    something, reducing hundreds of measures to a few, or taking a model you
+    fitted here and pointing it at a different corpus. None of it is needed to
+    run an analysis, and the last part in particular is where studies go wrong.
 
-Some differences cannot be fixed this way, and are refused rather than
-guessed at. A model fitted on acoustic or transcript-embedding features needs
-a per-file chain that cannot be re-run inside one pass. And a difference in
-how the *text* was assembled — which columns were read, how several were
-joined — changes every number while the measuring settings agree; a model
-records that its text was prepared differently without recording how, so that
-one needs your judgment rather than an automatic replay.
+---
 
-The thing not to expect from any of it: this checks that features were
-*measured* the same way, not that they mean the same thing. Identical settings
-over a `large-v3` transcript and a `base.en` one give different numbers and
-this deliberately says nothing, because the transcript is the text, and a
-model exists in order to meet new text.
-
-### Several models at once
-
-Tick as many saved models as you like on the "Score with models I already
-have" row -- a ridge, two classifiers, your word vectors, a fine-tuned
-predictor. Each is scored on its own, against the feature tables *it* was
-fitted on, into `features/model_scores/<model name>.csv` with its own
-unscored-row accounting; and everything is merged into
-`features/model_scores.csv`, an outer join on `text_id` in which every score
-column carries the model's name in front -- `openness_ridge__pred_openness`,
-`condition_clf__p_condition_A` -- the way several dictionaries' categories
-carry the dictionary's name, so two models predicting the same outcome
-never collide. With a single model the table is exactly what it always was,
-plain names and no subfolder. Every model's provenance gate runs before any
-scoring, so a run with five models refuses up front, naming every model
-with a problem, rather than failing on the fourth after scoring three; and
-two models whose names read the same are refused too (rename one under
-Settings → Manage Taters data → Manage saved models), because the name is the file name, the
-column prefix and the private-table folder.
-
-### Classifiers from Hugging Face
-
-A model you did not train works the same way. Thousands of finished text
-classifiers and regressors are published on the Hugging Face hub -- sentiment,
-emotion, stance, toxicity, a rating predicted from text -- and if you have
-used one elsewhere it is probably already in your Hugging Face cache. Under
-Settings → Manage Taters data → Manage saved models, *Import a classifier from Hugging Face* lists
-the text classifiers in that cache with their labels, or takes a checkpoint
-folder, or a hub name to download on first use. It asks two things: what the
-model predicts (the stem of its columns, so `sentiment` rather than the
-model's file name) and what to call it. A folder is copied into your library
-so the model travels with it; a hub name is loaded from the model cache.
-
-From then on it is a saved model like any other: tick it on "Score with
-models I already have", alone or with a ridge and a fine-tuned predictor, and
-it writes `pred_sentiment`, `prob_sentiment` and one `p_sentiment_<class>`
-column per class (one `pred_` column for a regression head), with the
-checkpoint's own labels -- renamable per model in Settings. A multi-label
-head (an emotion model where a text can be both *joy* and *surprise*) writes
-one `p_<outcome>_<label>` column per label and, in `pred_`, every label whose
-probability reaches the model's threshold (0.5 unless you change it under
-"Change how the ticked model is applied"), joined with `|`. Long texts are
-read in windows and averaged, as the fine-tuned predictor reads them. Text
-classifiers, multi-label heads and regression heads import; a bare encoder is
-something to adapt or fine-tune under "Train a model", and an audio or image
-classifier is refused by name until Taters reads those.
+# When you need more than the three questions
 
 ## Holding something constant
 
@@ -648,6 +486,8 @@ instead, which this used to do, is worse than it sounds: it pulls every
 incomplete row toward the center on that feature, which is precisely the spread
 a PCA is there to measure.
 
+---
+
 ## Finding structure instead of testing it
 
 Sometimes you do not have an outcome yet. You have 400 correlated columns and
@@ -683,40 +523,249 @@ way.
 
 ---
 
-## What you actually end up with
+# Taking a model somewhere else
 
-Every analysis writes tidy CSVs *and* contributes to a single `report.md` in
-plain English — what was run, on how many rows, with what corrections, and what
-it found. The report is written to be readable by a collaborator who was not
-there when you ran it, which in practice means yourself in six months.
+A fitted model is a file, and a file can be pointed at any corpus you like.
+Whether the numbers that come back still *mean* anything is a separate
+question, and it is the one this part is about.
 
-Every feature table also gets a table of descriptive statistics — n, missing,
-mean, SD, quartiles, range, skewness, kurtosis — under `stats_descriptives/`,
-whether or not you ran any statistics; it is the methods-table paragraph
-written for you, and the first place to look when a measure behaves oddly.
+## Taking a model to a different kind of text
 
-Every result is also drawn as a word cloud, under `figures/wordclouds/`, and
-the report ends with them: the features predicting a higher and a lower
-score, correlated positively and negatively with each outcome, higher in one
-group than another, loading on each component. Size and shade follow the
-statistic, blue is positive and red negative. They are the quickest first
-read of a result there is; the tables are what you cite. The
-[statistics guide](stats.md#word-clouds) lists exactly what is drawn from
-what.
+Crossing platforms *is* done in this literature, and done well. Giorgi et al.
+(2022) took the personality models trained on roughly 66,000 Facebook
+participants — the Park et al. models above — and applied them to 6,064,267
+Twitter users, aggregated to 2,041 counties. Across 13 outcomes the resulting
+county-level estimates "replicated patterns that have been observed in
+individual-level and geographic studies", including higher Republican vote
+share in less agreeable counties. So a saved model genuinely can travel.
 
-Two things in it are worth reading before the results:
+But note *how* they did it, because this is the part that matters for you. The
+models were **not applied unchanged.** To adjust for the differences between
+the Facebook source and the Twitter target, they applied a domain-adaptation
+step (Target Side Domain Adaptation, as cited there), correcting both for
+geographically-specific word usage and for the different word distributions of
+the two platforms. Someone doing this carefully treated the platform shift as
+a problem requiring an explicit correction — not as something that comes out
+in the wash.
 
-**How much of your data was used.** Every table carries the number of rows the
-analysis actually used beside the number it *could* have used, and the report
-says so out loud whenever those differ by much. This matters more than it
-sounds: some measures are undefined for some texts rather than merely absent,
-and the textbook response — drop any row with a missing value — can quietly
-throw away most of a corpus. A model fitted on 52 of 938 texts will report an
-R² as confidently as any other. Taters tells you.
+**Taters has no domain-adaptation step.** Applying a saved model to a
+different kind of text here is the naive version of what that paper did
+carefully, so the burden of showing the scores still mean something is yours.
 
-**What was set aside.** A predictor that is missing for most of your texts is
-dropped, rather than being allowed to drop the texts. The report names what
-went and why.
+And keep the size of the hop in view. Facebook to Twitter is a *short* one:
+both are short, informal, public posts written to a loosely-known audience.
+Twitter to political speeches, or to private diary entries, is a much bigger
+shift — different register, different audience, different purpose, wildly
+different length — and a model has no way to tell you it has left the
+territory where it was validated. It will return numbers. The numbers will be
+arithmetically correct. Whether they still measure the construct is an
+empirical question about *your* corpus, and the honest thing is to treat a
+cross-domain score as a hypothesis to be validated against something external
+rather than as a measurement you can report.
+
+**What it tells you.** Every headline number is **out-of-fold**: each text is
+predicted by a model that never saw it. That is the whole discipline of this
+section, and it is worth being precise about why. Overfitting is "the tendency
+for statistical models to mistakenly fit sample-specific noise as if it were
+signal", and an in-sample R² does not estimate how your *fitted equation* will
+do on new data — it estimates the average performance of the model *form*
+across hypothetical samples, which is "virtually always an overly optimistic
+estimate" of the thing you actually care about. K-fold cross-validation is "a
+minimally biased way of estimating the true generalization performance of any
+model" (Yarkoni & Westfall, 2017).
+
+So the in-sample R² sits in the next column, and the gap between the two is the
+difference between a model that learned something and a model that memorized
+your participants. A cross-validated R² can be *negative*, and when it is, it
+is telling you something clear and useful: this model is worse than just
+guessing the mean.
+
+You also get the coefficients, one row per predictor and one column per
+outcome, sorted so the features that did something are at the top of the file.
+
+**What to do with the results.** Two things, and they pull in opposite
+directions.
+
+The first is to look at the coefficients and interpret them — and to be careful
+here, because a ridge coefficient on one of 200 collinear features is not "the
+effect of that feature". Use them to see the shape of the thing, and lean on
+the correlations for claims about individual features.
+
+The second is to *keep the model*. A fit is an instrument, not a result. The
+saved model carries the predictor names, the training means and standard
+deviations, the chosen penalty and the fold seed, so it can score a new corpus
+standardized against the original sample — which is what makes two datasets'
+scores comparable at all. That fit-once, apply-many discipline is how a finding
+becomes a measure.
+
+Which raises the honest warning, and it is one I have made in print before: being
+able to **predict** something is conceptually quite different from
+**understanding** it. A model that reports "these 200 features together predict
+depression at R² = .12" is a real result and it is also, by itself, not an
+insight about depression. The most actionable findings in this field have
+usually come from transparent models that a domain expert could reason about,
+not from the most powerful algorithm available. Taters gives you the predictive
+machinery because you often need it; it puts the interpretable analyses first
+because that is usually where the understanding comes from.
+
+**Expect small numbers.** This is the single most useful thing to know before
+you look at your first result. Eichstaedt et al. (2021) put five feature sets
+through the same 10-fold cross-validated pipeline on 65,896 people's Facebook
+posts and reported what each actually achieved: DICTION *r* = .23, LIWC2015
+*r* = .28, General Inquirer *r* = .29, and 2,000 LDA topics *r* = .37. So a
+well-built cross-validated language model of a personality-like outcome lands
+somewhere around *r* = .2 to .4 — **not** .8. A model claiming *r* = .9 on new
+data is far more likely to have a leak than a discovery.
+
+If you are coming from experimental psychology those numbers look
+disappointing. They are not, and there are two separate reasons why. An *r* of
+.20 is a medium effect by the field's own calibrated benchmarks, and
+practically useful; *r* ≥ .40 in psychology "is likely to be a gross
+overestimate" (Funder & Ozer, 2019 — whose benchmarks assume, as they are
+careful to say, that your estimates are reliable in the first place).
+Separately: complex outcomes have many causes each contributing a little, which
+makes small effects the ones "most likely to be real", and they "can have
+substantial consequences, especially when considered at scale and over time"
+(Götz et al., 2022).
+
+---
+
+## Scoring with a model that was built differently
+
+A saved model was fitted on features measured with particular settings, and
+those settings are part of the instrument. Score it against features measured
+some other way and you get a number that looks exactly like a prediction and
+is not one — the column names match, the values do not. In a real run that
+moved a mean predicted age from 36.5 to 44.0 years and reported 904
+predictions without a word of complaint.
+
+So Taters records how every feature table was measured, in a small
+`<name>_settings.json` beside it, and a saved model carries the same record
+for the features it was fitted on. When you score, the two are compared:
+
+- **They match** — it scores, silently. Nothing to say.
+- **They differ, and both are known** — refused, naming every setting and both
+  values. Not overridable: the model was fitted on other numbers, and there is
+  nothing to interpret.
+- **One side has no record** — refused, but waivable one table at a time
+  (`unverified_ok=("cohesion",)`). "I cannot check this" is a different claim
+  from "these disagree", and only the first is yours to wave through.
+
+You may well want it both ways at once: your own cohesion features measured
+how *you* want them, and a colleague's model applied to the same corpus even
+though it was fitted differently. That works. Taters measures the feature a
+second time using the model's own settings, into a private folder of its own,
+and scores the model against that — leaving your table untouched and out of
+it. The review screen says so before anything runs:
+
+```text
+Parts of speech                             you picked
+Parts of speech — for age_blogs [ridge]     the model needs it
+Score with models I already have            you picked
+```
+
+If your settings already happen to match the model's, nothing extra runs and
+both share the one extraction. And a model that carries its own word lists —
+which is how they are saved — can do this on a machine that has never seen
+them. That portability is also why exporting a model warns you what is inside
+it: a word list can be licensed, or can hold material you would rather not
+publish.
+
+Three kinds of feature table depend on the corpus itself rather than only on
+settings, and each is handled so a model fitted on one can still meet a new
+study:
+
+- **A document-term matrix** has one column per vocabulary term, and the
+  vocabulary came from *your* texts. The model carries that vocabulary, and
+  the new study is scanned against it — so a word the new texts never use is
+  a column of zeros, as it should be, rather than a missing predictor. Your
+  own matrix, built from the new study's vocabulary, is left alone.
+- **Topic-model themes** were fitted to your texts; refitting them on another
+  study gives different themes, or a different number of them. The model
+  carries the fitted theme model and *applies* it to the new texts, which is
+  the only honest way to score the same themes twice.
+- **Parts of speech** (and any other table whose columns are whatever
+  occurred) may lack a tag no text in the new study happens to use. That
+  absence is the measurement: the column is scored as zero.
+
+A model fitted before the settings record changed shape is refused with
+that reason — "recorded under different versions of the settings record;
+re-fit the model" — rather than as a settings mismatch. The two records
+hash their word lists differently and cannot be compared setting by setting,
+and telling you a dictionary had changed when nobody touched it sent one
+user looking for a change that never happened.
+
+A model fitted with **controls** — `age` and `gender` held constant, say —
+also needs those two columns to score anything, and no feature step produces
+them: they are the spreadsheet's own. When a chosen model needs controls,
+the run carries them from the spreadsheet you are scoring (the same
+metadata step the statistics use), and the wizard checks the spreadsheet
+actually has those columns before anything runs. A folder of documents has
+no such columns, so a controlled model cannot score one.
+
+Some differences cannot be fixed this way, and are refused rather than
+guessed at. A model fitted on acoustic or transcript-embedding features needs
+a per-file chain that cannot be re-run inside one pass. And a difference in
+how the *text* was assembled — which columns were read, how several were
+joined — changes every number while the measuring settings agree; a model
+records that its text was prepared differently without recording how, so that
+one needs your judgment rather than an automatic replay.
+
+The thing not to expect from any of it: this checks that features were
+*measured* the same way, not that they mean the same thing. Identical settings
+over a `large-v3` transcript and a `base.en` one give different numbers and
+this deliberately says nothing, because the transcript is the text, and a
+model exists in order to meet new text.
+
+---
+
+### Several models at once
+
+Tick as many saved models as you like on the "Score with models I already
+have" row -- a ridge, two classifiers, your word vectors, a fine-tuned
+predictor. Each is scored on its own, against the feature tables *it* was
+fitted on, into `features/model_scores/<model name>.csv` with its own
+unscored-row accounting; and everything is merged into
+`features/model_scores.csv`, an outer join on `text_id` in which every score
+column carries the model's name in front -- `openness_ridge__pred_openness`,
+`condition_clf__p_condition_A` -- the way several dictionaries' categories
+carry the dictionary's name, so two models predicting the same outcome
+never collide. With a single model the table is exactly what it always was,
+plain names and no subfolder. Every model's provenance gate runs before any
+scoring, so a run with five models refuses up front, naming every model
+with a problem, rather than failing on the fourth after scoring three; and
+two models whose names read the same are refused too (rename one under
+Settings → Manage Taters data → Manage saved models), because the name is the file name, the
+column prefix and the private-table folder.
+
+---
+
+### Classifiers from Hugging Face
+
+A model you did not train works the same way. Thousands of finished text
+classifiers and regressors are published on the Hugging Face hub -- sentiment,
+emotion, stance, toxicity, a rating predicted from text -- and if you have
+used one elsewhere it is probably already in your Hugging Face cache. Under
+Settings → Manage Taters data → Manage saved models, *Import a classifier from Hugging Face* lists
+the text classifiers in that cache with their labels, or takes a checkpoint
+folder, or a hub name to download on first use. It asks two things: what the
+model predicts (the stem of its columns, so `sentiment` rather than the
+model's file name) and what to call it. A folder is copied into your library
+so the model travels with it; a hub name is loaded from the model cache.
+
+From then on it is a saved model like any other: tick it on "Score with
+models I already have", alone or with a ridge and a fine-tuned predictor, and
+it writes `pred_sentiment`, `prob_sentiment` and one `p_sentiment_<class>`
+column per class (one `pred_` column for a regression head), with the
+checkpoint's own labels -- renamable per model in Settings. A multi-label
+head (an emotion model where a text can be both *joy* and *surprise*) writes
+one `p_<outcome>_<label>` column per label and, in `pred_`, every label whose
+probability reaches the model's threshold (0.5 unless you change it under
+"Change how the ticked model is applied"), joined with `|`. Long texts are
+read in windows and averaged, as the fine-tuned predictor reads them. Text
+classifiers, multi-label heads and regression heads import; a bare encoder is
+something to adapt or fine-tune under "Train a model", and an audio or image
+classifier is refused by name until Taters reads those.
 
 ---
 

@@ -191,6 +191,9 @@ def topic_model_lda(
 
     # ----- LDA options -----
     n_topics: int = 20,
+    k_selection: Literal["coherence", "coherence_exclusivity"] = "coherence_exclusivity",
+    k_values: Union[str, Sequence[int]] = _topics.DEFAULT_K_VALUES,
+    coherence_metric: Literal["npmi", "umass"] = "npmi",
     alpha: float = 0.1,
     eta: float = 0.01,
     passes: int = 10,
@@ -287,9 +290,25 @@ def topic_model_lda(
         frequency, because a *feature* table usually does want the commonest
         terms.)
     n_topics : int, default=20
-        How many topics to fit. The one setting with no good default -- see
-        :func:`taters.text.topic_count_sweep.sweep_topic_count` for help
-        choosing, and expect to read the topics before believing a number.
+        How many topics to fit. ``0`` chooses for you by ``k_selection``,
+        which costs one fit per candidate count and is the expensive path --
+        see the ``<stem>_k_selection`` files it leaves behind for the
+        evidence.
+    k_selection : {"coherence", "coherence_exclusivity"}, default="coherence_exclusivity"
+        How ``0`` chooses. ``coherence`` maximizes how often a topic's top
+        words turn up in the same documents. ``coherence_exclusivity`` takes
+        the harmonic mean of that and exclusivity -- whether those are this
+        topic's words rather than everybody's -- because coherence alone is
+        maximized by a few topics made of common words. Needs
+        ``coherence_metric="npmi"``.
+    k_values : str or sequence of int
+        The counts to try. ``"5,10,20"`` as well as a list, since this
+        arrives from a pipeline file and from a command line. Counts the
+        corpus is too small to support are skipped and named rather than
+        ending the run.
+    coherence_metric : {"npmi", "umass"}, default="npmi"
+        Which coherence. NPMI is bounded, which is what lets it be balanced
+        against exclusivity without rescaling.
     alpha : float, default=0.1
         Prior on the document-topic mixtures. Smaller makes each document
         commit to fewer topics.
@@ -399,9 +418,24 @@ def topic_model_lda(
     def batches():
         return _topics.stream_counts(dtm_csv, encoding=encoding, skip_cols=2)
 
-    lam, trace = _topics.fit_lda(
-        batches, len(terms), n_topics, alpha=alpha, eta=eta, passes=passes,
-        seed=seed, on_progress=on_progress)
+    def fit_at(k):
+        return _topics.fit_lda(batches, len(terms), k, alpha=alpha, eta=eta,
+                               passes=passes, seed=seed)[0]
+
+    trace: list = []
+    if n_topics:
+        lam, trace = _topics.fit_lda(
+            batches, len(terms), n_topics, alpha=alpha, eta=eta, passes=passes,
+            seed=seed, on_progress=on_progress)
+    else:
+        # the sweep hands back the winner's own fit rather than making us do
+        # the same deterministic work a second time
+        n_topics, lam = _topics.select_k(
+            k_values=k_values, fit=fit_at, terms=terms, batches=batches,
+            engine="lda", rule=k_selection, metric=coherence_metric,
+            top_terms=top_terms, rounding=rounding,
+            out_stem=out_features_csv.with_name(f"{stem}_k_selection"),
+            encoding=encoding, on_progress=on_progress)
     topic_names = _topic_names(n_topics)
 
     n_documents = sum(len(block) for block in batches())

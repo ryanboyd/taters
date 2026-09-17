@@ -73,7 +73,13 @@ ROW_INDENT = f"  {glyphs.INDENT} "
 
 _KEY_HINTS = {
     "select": "[↑↓] move · [enter] picks the highlighted row · [1-9] jump · [esc] back",
-    # too many rows to number, so the hint had better not offer a digit
+    # too many rows to number, so the hint had better not offer a digit.
+    # [pgup]/[pgdn] work on every list and are deliberately NOT named here:
+    # this bar is one clipped line, and with the "[←→] change type" variant
+    # it already runs to 77 of the ~78 columns an 80-wide terminal leaves.
+    # Naming another key would push "[esc] back" off the end, and a way out
+    # nobody can see is worse than a jump key they have to guess -- which is
+    # a guess most people make anyway. The wizard guide lists them.
     "select_long": "[↑↓] move · [enter] picks the highlighted row · [esc] back",
     # tick screens: entries toggle, actions choose
     "tick": "[↑↓] move · [space] tick · [enter] picks the highlighted row · [esc] back",
@@ -200,6 +206,31 @@ def _row_titled(control, value, mark: str) -> None:
         if getattr(row, "value", None) == value:
             row.title = set_tick_mark(row.title, mark)
             return
+
+
+def _point_at(control, index: int) -> None:
+    """Put the pointer on `index`, clamped to the list and nudged off any row
+    that cannot be selected.
+
+    Separators and grayed-out rows are not landing places, and a page jump is
+    far more likely to come down on one than a single step is -- so it looks
+    outward from where it landed for the nearest row that *is* one, rather
+    than marching in one direction and possibly falling off the end.
+    """
+    count = int(getattr(control, "choice_count", 0) or 0)
+    if count <= 0:
+        return
+    target = max(0, min(int(index), count - 1))
+    control.pointed_at = target
+    if control.is_selection_valid():
+        return
+    for step in range(1, count):
+        for candidate in (target + step, target - step):
+            if 0 <= candidate < count:
+                control.pointed_at = candidate
+                if control.is_selection_valid():
+                    return
+    control.pointed_at = target
 
 
 def _heading_mark(children, ticked) -> str:
@@ -703,6 +734,7 @@ class LivePrompter(QuestionaryPrompter):
         )
         if numbered:
             self._bind_number_keys(question_obj.application, choices)
+        self._bind_page_keys(question_obj.application)
         # one shared, mutable set: navigation swaps its contents when the rows
         # change, and the space binding reads it live -- so a folder we enter
         # mid-walk brings its files' tickability along with it.
@@ -896,6 +928,55 @@ class LivePrompter(QuestionaryPrompter):
             toggles.clear()
             toggles.update(swap.get("toggle_values", ()))
             event.app.invalidate()
+
+        existing = application.key_bindings
+        application.key_bindings = (
+            bindings if existing is None
+            else merge_key_bindings([existing, bindings])
+        )
+
+    def _bind_page_keys(self, application) -> None:
+        """
+        [PgUp] and [PgDn] move a screenful at a time.
+
+        Arrow keys are fine for a menu and miserable for a vocabulary: a
+        five-hundred-term list is five hundred keypresses from end to end, and
+        the scrolling window means you cannot even see where you are going.
+        A page is what the window shows, less one row so something you were
+        just looking at stays on screen -- the usual overlap, and the thing
+        that makes paging feel like moving rather than teleporting.
+
+        Clamped to the ends rather than wrapping. The arrows wrap, and that is
+        right for them: one step past the last row is a small, obvious move.
+        A page that wraps takes you somewhere you did not ask to go and gives
+        no hint that it did.
+        """
+        from prompt_toolkit.key_binding import KeyBindings
+        from prompt_toolkit.key_binding.key_bindings import merge_key_bindings
+
+        from .prompts import visible_rows
+
+        bindings = KeyBindings()
+
+        def _jump(event, direction: int) -> None:
+            control = _inquirer_control(application)
+            if control is None:
+                return
+            count = int(getattr(control, "choice_count", 0) or 0)
+            if count <= 1:
+                return
+            page = max(1, visible_rows() - 1)
+            _point_at(control, int(getattr(control, "pointed_at", 0) or 0)
+                      + direction * page)
+            event.app.invalidate()
+
+        @bindings.add("pagedown", eager=True)
+        def _(event):
+            _jump(event, 1)
+
+        @bindings.add("pageup", eager=True)
+        def _(event):
+            _jump(event, -1)
 
         existing = application.key_bindings
         application.key_bindings = (

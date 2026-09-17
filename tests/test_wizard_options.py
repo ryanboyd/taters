@@ -955,16 +955,37 @@ def test_every_gate_hides_and_reveals_its_dependents():
             continue
         var_specs = {k: dict(v) for k, v in recipe.vars.items()}
         for name in recipe.param_when:
-            gate_param, op, value = _r.gate_of(recipe, name)
-            on = value if op == "==" else "__anything_else__"
-            off = f"not-{value}" if op == "==" else value
-            for state, present in ((on, True), (off, False)):
+            gates = _r.gates_of(recipe, name)
+
+            def _state(gate, satisfy):
+                _p, op, value = gate
+                if satisfy:
+                    return value if op == "==" else "__anything_else__"
+                return f"not-{value}" if op == "==" else value
+
+            def _apply(break_at=None):
+                """Satisfy every condition, then break one on top -- on top,
+                because two conditions can name the same gate and the later
+                write would otherwise undo the break."""
                 overrides, var_values = {}, {}
-                var = w._var_behind(recipe, gate_param)
-                if var:
-                    var_values[var] = state
-                else:
-                    overrides[recipe.id] = {gate_param: state}
+                order = list(range(len(gates)))
+                if break_at is not None:
+                    order = [i for i in order if i != break_at] + [break_at]
+                for i in order:
+                    gate = gates[i]
+                    state = _state(gate, satisfy=(i != break_at))
+                    var = w._var_behind(recipe, gate[0])
+                    if var:
+                        var_values[var] = state
+                    else:
+                        overrides.setdefault(recipe.id, {})[gate[0]] = state
+                return overrides, var_values
+
+            # every condition satisfied shows the row; breaking any one hides it
+            cases = [(_apply(), True)] + [(_apply(i), False)
+                                          for i in range(len(gates))]
+            for (overrides, var_values), present in cases:
+                gate_param, _op, state = gates[0][0], None, None
                 rows = w.step_rows(recipe, spec, var_specs, overrides, var_values)
                 values = [c.value for c in rows]
                 assert (name in values) is present, (recipe.id, name, state)
@@ -1047,24 +1068,34 @@ def test_a_steps_own_word_for_a_setting_cannot_leak_onto_a_shared_row():
     sweep, and `engine_nlp` is the shared tagging engine. The shared row
     said "which topic model — nltk".
     """
+    from dataclasses import replace
+
     from taters.ui import recipes as _r
     from taters.ui import wizard as w
-    from taters.ui.compose import compose
 
-    ids = ["topic_count_sweep", "parts_of_speech"]
-    steps = [_r.by_id(i) for i in ids]
-    var_specs = compose(ids, name="x", source="csv",
-                        input_path="t.csv")["meta"]["variables"]
+    # a step that calls one of its own parameters something private, mapped to
+    # a shared variable of a different name. Built here rather than taken from
+    # the catalog: the step that used to need this was folded into the topic
+    # models, and a regression test for a real bug should not disappear with
+    # whichever recipe happened to exercise it.
+    owner = _r.by_id("parts_of_speech")
+    # this step calls its own `engine` parameter something private
+    owner = replace(owner, labels={"engine": "which topic model"})
+    spec = w._spec_for(owner, None)
 
-    rows = w.shared_rows(w.shared_variables(steps), var_specs, {}, {})
-    engine = next(c for var, _r_, _p, c in rows if var == "engine")
-    assert engine.label.startswith("tagging engine")
-    assert "topic model" not in engine.label
+    # the shared row is for a *different* parameter that happens to read a
+    # variable named `engine`. Looking the label up by the variable rather
+    # than the parameter put this step's private word on that row.
+    shared = w._setting_choice(owner, spec.get("tokenizer"), {}, {}, {},
+                               key="engine")
+    assert "topic model" not in shared.label, (
+        "a step's private word for its own parameter leaked onto the shared "
+        f"row for a different one: {shared.label!r}")
+    assert shared.label.startswith("tagging engine")
 
-    # and the sweep's own menu still gets the word the sweep asked for
-    sweep = _r.by_id("topic_count_sweep")
-    own = {c.value: c.label for c in _rows(sweep, var_specs)}
-    assert own["engine"].startswith("which topic model")
+    # while the step's own row still gets the word it asked for
+    own = w._setting_choice(owner, spec.get("engine"), {}, {}, {})
+    assert own.label.startswith("which topic model")
 
 
 # ---------------------------------------------------------------------------

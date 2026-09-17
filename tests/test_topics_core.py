@@ -235,6 +235,175 @@ def test_held_out_perplexity_prefers_the_model_that_saw_the_data():
 
 
 # ---------------------------------------------------------------------------
+# Choosing k
+# ---------------------------------------------------------------------------
+
+FOUR = [
+    "bread butter cheese dinner kitchen recipe pasta soup salad pudding".split(),
+    "office meeting deadline manager project report invoice budget memo client".split(),
+    "river forest mountain valley glacier meadow canyon prairie tundra lagoon".split(),
+    "guitar drums piano violin trumpet cello banjo oboe harp mandolin".split(),
+]
+
+
+def four_families(n_docs: int = 80, seed: int = 0):
+    """Four disjoint families, so the planted answer is four and both two and
+    eight are wrong -- in different ways, which is the point."""
+    import random
+
+    terms = [w for family in FOUR for w in family]
+    where = {w: i for i, w in enumerate(terms)}
+    rng = random.Random(seed)
+    counts = np.zeros((n_docs, len(terms)))
+    for d in range(n_docs):
+        for _ in range(25):
+            counts[d, where[rng.choice(FOUR[d % len(FOUR)])]] += 1
+    return counts, terms
+
+
+def test_exclusivity_is_one_when_topics_share_nothing():
+    """A word's share of its own mass that sits in this topic. Disjoint
+    topics own their words outright; overlapping ones do not."""
+    apart = topics.exclusivity(np.array([[1.0, 1.0, 0.0, 0.0],
+                                         [0.0, 0.0, 1.0, 1.0]]))
+    assert np.allclose(apart[0][:2], 1.0)
+    assert np.allclose(apart[0][2:], 0.0)
+
+    shared = topics.exclusivity(np.array([[1.0, 1.0, 1.0, 1.0],
+                                          [1.0, 1.0, 1.0, 1.0]]))
+    assert np.allclose(shared, 0.5)
+    assert shared.min() >= 0.0 and shared.max() <= 1.0
+
+
+def test_exclusivity_ignores_how_big_a_factor_happens_to_be():
+    """NMF's factor scale is arbitrary -- W absorbs it -- so a factor with a
+    large H must not look more exclusive for it. Rows are normalized before
+    columns, which is what makes this true."""
+    plain = topics.exclusivity(np.array([[1.0, 1.0, 0.0], [0.0, 1.0, 1.0]]))
+    scaled = topics.exclusivity(np.array([[50.0, 50.0, 0.0], [0.0, 1.0, 1.0]]))
+    assert np.allclose(plain, scaled)
+
+
+def test_the_balance_is_harmonic_so_one_score_cannot_cover_for_the_other():
+    """
+    The difference between a harmonic mean and an average, on the case that
+    separates them. Perfect coherence with hopeless exclusivity is a bad
+    model; middling on both is a real one. An average ranks the lopsided one
+    *higher* (0.53 against 0.50); the harmonic mean ranks it far lower, which
+    is the whole reason the pairing is not just added up.
+    """
+    lopsided = topics._balanced(1.0, 0.05)
+    even = topics._balanced(0.0, 0.5)
+    assert lopsided < even
+    assert 0.0 <= lopsided <= 1.0 and 0.0 <= even <= 1.0
+
+
+def test_the_balanced_rule_refuses_a_k_that_is_exclusive_but_incoherent():
+    """
+    The whole reason the two are paired, on real numbers. Fitting four
+    planted families with two topics blends two families into each: the
+    topics are still perfectly *disjoint* from each other, so exclusivity is
+    about as high as it ever gets -- while coherence goes negative, because
+    the words inside a topic genuinely do not co-occur.
+
+    Exclusivity alone would take that model. The harmonic mean throws it out,
+    which is what a harmonic mean is for: one term cannot cover for the
+    other.
+    """
+    counts, terms = four_families()
+    batches = batches_of(counts, 80)
+    pair, single, n_docs = topics.codocument_counts(batches, len(terms))
+
+    def fit(k):
+        return topics.fit_lda(batches, len(terms), k, passes=10, seed=7)[0]
+
+    rows, _words, best, _fit = topics.choose_k(
+        counts=[2, 4, 8], fit=fit, terms=terms, pair=pair, single=single,
+        n_docs=n_docs, rule="coherence_exclusivity", top_terms=4)
+    by_k = {r["n_topics"]: r for r in rows}
+
+    assert by_k[2]["exclusivity"] > by_k[4]["exclusivity"], \
+        "the blended model should be the exclusive one -- the premise is gone"
+    assert by_k[2]["coherence"] < 0 < by_k[4]["coherence"]
+    assert by_k[2]["balanced"] < by_k[4]["balanced"]
+    assert best == 4
+
+
+@pytest.mark.parametrize("rule", ["coherence", "coherence_exclusivity"])
+def test_both_rules_find_the_planted_number_of_topics(rule):
+    counts, terms = four_families()
+    batches = batches_of(counts, 80)
+    pair, single, n_docs = topics.codocument_counts(batches, len(terms))
+
+    def fit(k):
+        return topics.fit_lda(batches, len(terms), k, passes=10, seed=7)[0]
+
+    _rows, _words, best, components = topics.choose_k(
+        counts=[2, 4, 8], fit=fit, terms=terms, pair=pair, single=single,
+        n_docs=n_docs, rule=rule, top_terms=4)
+    assert best == 4
+    assert components.shape[0] == 4, "the winner's own fit should come back"
+
+
+def test_the_winning_fit_comes_back_rather_than_being_thrown_away():
+    """Refitting at the chosen count would be the same deterministic work
+    twice, and at k=2000 that is not a rounding error."""
+    counts, terms = four_families()
+    batches = batches_of(counts, 80)
+    pair, single, n_docs = topics.codocument_counts(batches, len(terms))
+    seen = []
+
+    def fit(k):
+        seen.append(k)
+        return topics.fit_lda(batches, len(terms), k, passes=6, seed=7)[0]
+
+    _rows, _words, best, components = topics.choose_k(
+        counts=[2, 4], fit=fit, terms=terms, pair=pair, single=single,
+        n_docs=n_docs, top_terms=4)
+    assert seen == [2, 4], "each count fitted exactly once"
+    assert best == 4, "the wrong count won, so the fit handed back is the wrong one"
+    again = topics.fit_lda(batches, len(terms), 4, passes=6, seed=7)[0]
+    assert np.allclose(components, again), "that is not the winner's own fit"
+
+
+def test_the_balanced_rule_refuses_umass_by_name():
+    """UMass is unbounded below, so balancing it would mean rescaling against
+    whichever counts are in the sweep -- and the winner would move when you
+    added a candidate."""
+    with pytest.raises(ValueError, match="needs metric='npmi'"):
+        topics.choose_k(counts=[2], fit=lambda k: np.ones((k, 3)),
+                        terms=["a", "b", "c"], pair=np.ones((3, 3)),
+                        single=np.ones(3), n_docs=4,
+                        rule="coherence_exclusivity", metric="umass")
+
+
+def test_an_unknown_selection_rule_is_refused():
+    with pytest.raises(ValueError, match="unknown k selection rule"):
+        topics.choose_k(counts=[2], fit=lambda k: np.ones((k, 3)),
+                        terms=["a", "b", "c"], pair=np.ones((3, 3)),
+                        single=np.ones(3), n_docs=4, rule="perplexity")
+
+
+def test_counts_a_corpus_cannot_support_are_separated_not_fatal():
+    fittable, skipped = topics.fittable_counts([2, 5, 40], n_docs=12,
+                                               n_terms=30, engine="lda")
+    assert fittable == [2, 5] and skipped == [40]
+    # NMF is bounded by the narrower of the two dimensions
+    fittable, skipped = topics.fittable_counts([2, 5, 40], n_docs=100,
+                                               n_terms=8, engine="nmf")
+    assert fittable == [2, 5] and skipped == [40]
+
+
+def test_topic_counts_can_be_written_as_a_list_or_a_string():
+    assert topics.parse_counts("5, 10;20") == [5, 10, 20]
+    assert topics.parse_counts([20, 5, 5]) == [5, 20]
+    with pytest.raises(ValueError, match="not a number of topics"):
+        topics.parse_counts("five")
+    with pytest.raises(ValueError, match="not a topic model"):
+        topics.parse_counts([1])
+
+
+# ---------------------------------------------------------------------------
 # NMF
 # ---------------------------------------------------------------------------
 

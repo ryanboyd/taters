@@ -578,7 +578,8 @@ def wanted_sets(pca, sets) -> list:
 
 def reduce_sets(sets, columns, *, pca, n_components: int, rotation: bool,
                 out_stem, encoding: str, rounding: int, verbose: bool,
-                max_missing: float = MAX_MISSING, retain: str = "parallel"):
+                max_missing: float = MAX_MISSING, retain: str = "parallel",
+                kaiser_cutoff: float = 1.0):
     """
     Replace the chosen feature sets with component scores, in place.
 
@@ -666,7 +667,8 @@ def reduce_sets(sets, columns, *, pca, n_components: int, rotation: bool,
                 f"{len(usable)} features, and a PCA needs at least three.")
         axes = _pca.fit_in_memory(matrix[complete],
                                   n_components=n_components,
-                                  rotation=rotation, retain=retain)
+                                  rotation=rotation, retain=retain,
+                                  kaiser_cutoff=kaiser_cutoff)
         scores = np.full((matrix.shape[0], axes["n_components"]), np.nan)
         scores[complete] = _pca.apply_in_memory(matrix[complete], axes)
         unscored = int((~complete).sum())

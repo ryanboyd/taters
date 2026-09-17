@@ -41,8 +41,7 @@ def rows(source: str = "media", analyses: bool = False):
 def test_ticking_a_heading_picks_everything_under_it():
     p = ScriptedPrompter([["category:topics"]])
     assert wiz.ask_features(p, source="csv") == [
-        "topic_model_mem", "topic_model_lda", "topic_model_nmf",
-        "topic_count_sweep"]
+        "topic_model_mem", "topic_model_lda", "topic_model_nmf"]
 
 
 def test_a_heading_never_escapes_as_a_pick():

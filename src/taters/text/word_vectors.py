@@ -395,7 +395,7 @@ def nearest_neighbors(model_json: PathLike, words: Sequence[str], *,
     """
     The ``top_n`` most similar vocabulary words to each word, by cosine.
 
-    A word is looked up as the model tokenizes it (lower-cased, lemmatised
+    A word is looked up as the model tokenizes it (lower-cased, lemmatized
     if the model was); a word not in the vocabulary maps to an empty list.
     The probe itself is never among its own neighbors. Computed in row
     chunks, so a large model is searched without a second copy in memory.
@@ -1209,7 +1209,7 @@ def import_word_vectors(
         never see the first.
     lemmatize, keep_punctuation, engine, tokenizer, stanza_lang
         How texts will be tokenized when the model is applied. Off for
-        lemmatising by default: pre-trained vectors were learned on
+        lemmatizing by default: pre-trained vectors were learned on
         inflected words, and "ran" is in the vocabulary while "run" alone
         would miss it.
     name, concept_dicts, weighting, normalize_words, probes, top_neighbors
@@ -1392,7 +1392,7 @@ def _methods_paragraph(doc: dict, model: _Loaded) -> str:
     text = doc["text"]
     how = []
     how.append("lower-cased" if text.get("lowercase", True) else "case-preserving")
-    how.append("lemmatised" if text.get("lemmatize") else "unlemmatised")
+    how.append("lemmatized" if text.get("lemmatize") else "unlemmatized")
     how.append(f"{text.get('tokenizer')} tokenizer")
     if text.get("keep_punctuation"):
         how.append("punctuation kept")

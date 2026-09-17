@@ -46,7 +46,7 @@ def _richness(tmp_path, out="feat.csv", **kwargs):
 
 
 # ---------------------------------------------------------------------------
-# canonicalisation
+# canonicalization
 # ---------------------------------------------------------------------------
 
 def test_the_same_settings_spelled_differently_hash_the_same():
@@ -61,8 +61,8 @@ def test_the_same_settings_spelled_differently_hash_the_same():
     assert pv.digest({"a": ["x", "y"]}) != pv.digest({"a": ["y", "x"]})
 
 
-def test_the_digest_is_pinned_so_the_canonicaliser_cannot_drift():
-    """A golden hash. If the canonicaliser changes shape without
+def test_the_digest_is_pinned_so_the_canonicalizer_cannot_drift():
+    """A golden hash. If the canonicalizer changes shape without
     PROVENANCE_VERSION being bumped, every stored record silently starts
     describing something else — so this fails and the bump gets remembered."""
     assert pv.digest({"engine": "nltk", "mattr_window": 100}) == \

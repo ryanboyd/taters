@@ -35,14 +35,11 @@ people end up adding gensim.
 
 from __future__ import annotations
 
-import csv
 from pathlib import Path
 from typing import Callable, Literal, Optional, Sequence, Union
 
-from ..helpers.atomic import atomic_write
 from ..helpers.cliargs import CliSpec
 from ..helpers.doc_text import DOCUMENT_PATTERN
-from ..helpers.progress import announce
 from ..helpers.provenance import TEXT_GRAIN, TEXT_INPUT, records_settings
 from ..helpers.text_gather import resolve_analysis_ready
 from . import _topics
@@ -142,6 +139,7 @@ def sweep_topic_count(
     # ----- the sweep -----
     engine: Literal["lda", "nmf"] = "lda",
     k_values: Union[str, Sequence[int]] = "5,10,20,40",
+    rule: Literal["coherence", "coherence_exclusivity"] = "coherence_exclusivity",
     metric: Literal["npmi", "umass"] = "npmi",
     top_terms: int = 10,
     passes: int = 10,
@@ -227,7 +225,6 @@ def sweep_topic_count(
             "sliding windows over the raw text rather than the matrix.")
     counts = _parse_counts(k_values)
 
-    import numpy as np
 
     analysis_ready = resolve_analysis_ready(
         csv_path=csv_path, txt_dir=txt_dir, analysis_csv=analysis_csv,
@@ -288,165 +285,38 @@ def sweep_topic_count(
     def batches():
         return _topics.stream_counts(dtm_csv, encoding=encoding, skip_cols=2)
 
-    announce(on_progress, "counting how often terms appear together")
-    pair, single, n_docs = _topics.codocument_counts(batches, len(terms))
-
-    # a trap worth naming, because it produces confident nonsense rather than
-    # an error: coherence is computed over each topic's top `top_terms` words,
-    # and if the vocabulary cannot supply that many *distinct* words per topic,
-    # the lists necessarily spill into each other. Every score then measures
-    # pairs of words from different topics, which do not co-occur, so every
-    # count scores badly and the "best" one is arbitrary. Found the hard way on
-    # a sixteen-term test corpus asking for ten words across eight topics.
-    crowded = [k for k in counts if k * top_terms > len(terms)]
-    if crowded:
-        import warnings
-        warnings.warn(
-            f"a {len(terms)}-term vocabulary cannot give {top_terms} distinct "
-            f"words to each of {', '.join(str(k) for k in crowded)} topics, so "
-            "their coherence is measuring words from different topics against "
-            "each other. Raise `vocab_top_n`, lower `top_terms`, or drop the "
-            "larger topic counts.")
-
-    # NMF needs the whole matrix and cannot stream, so it is read once here
-    # rather than once per topic count -- a four-count sweep was reading and
-    # materializing it four times -- and the same memory warning the fit gives
-    # is given here, where the cost is paid repeatedly.
+    # NMF needs the whole matrix at once and cannot stream, so it is read here
+    # rather than once per candidate count.
     matrix = None
     if engine == "nmf":
-        wanted = _topics.nmf_memory_gb(n_docs, len(terms), max(counts))
+        n_docs_est = sum(len(block) for block in batches())
+        wanted = _topics.nmf_memory_gb(n_docs_est, len(terms), max(counts))
         if wanted >= 1.0:
             import warnings
             warnings.warn(
                 f"NMF holds the whole matrix in memory: about {wanted:.1f} GB "
-                f"for {n_docs:,} documents by {len(terms):,} terms. Reduce "
+                f"for {n_docs_est:,} documents by {len(terms):,} terms. Reduce "
                 "`vocab_top_n` if that is more than this machine has.")
         matrix = _topics.read_matrix(dtm_csv, encoding=encoding, skip_cols=2)
 
-    # a sweep is the one place where a topic count that cannot be fitted is
-    # not a mistake: it is the question. `fit_lda` refuses k > n_docs and
-    # NNDSVD refuses k > min(n_docs, n_terms), and both fire inside the loop
-    # below -- so on a 12-document corpus the default 5,10,20,40 threw away
-    # three good fits and the whole run, after paying for the matrix. We skip
-    # what cannot be fitted, say so, and model the rest.
-    ceiling = n_docs if engine == "lda" else min(n_docs, len(terms))
-    fittable = [k for k in counts if k <= ceiling]
-    skipped = [k for k in counts if k > ceiling]
-    if skipped:
-        import warnings
-        warnings.warn(
-            f"{n_docs:,} documents and {len(terms):,} terms cannot support "
-            f"{', '.join(str(k) for k in skipped)} topics, so "
-            f"{'those counts were' if len(skipped) > 1 else 'that count was'} "
-            "skipped. A topic model needs more documents than topics, and in "
-            "practice many more.")
-    if not fittable:
-        raise ValueError(
-            f"none of the topic counts {', '.join(str(k) for k in counts)} can "
-            f"be fitted to {n_docs:,} document(s) over {len(terms):,} terms: "
-            f"the most this corpus can support is {ceiling}. Pass smaller "
-            "`k_values`, or model a bigger corpus.")
-    counts = fittable
-
-    rows = []
-    words = {}
-    for i, k in enumerate(counts):
-        announce(on_progress, f"fitting {k} topics ({i + 1} of {len(counts)})")
+    def fit_at(k):
         if engine == "lda":
-            components, _trace = _topics.fit_lda(
-                batches, len(terms), k, passes=passes, seed=seed)
-        else:
-            _w, components, _trace = _topics.fit_nmf(
-                matrix, k, beta_loss=beta_loss)
+            return _topics.fit_lda(batches, len(terms), k, passes=passes,
+                                   seed=seed)[0]
+        return _topics.fit_nmf(matrix, k, beta_loss=beta_loss)[1]
 
-        leading = [list(np.argsort(row)[::-1][:top_terms]) for row in components]
-        scores = _topics.coherence(leading, pair, single, n_docs, metric=metric)
-        rows.append({
-            "n_topics": k,
-            "coherence": round(float(np.mean(scores)), rounding),
-            "coherence_sd": round(float(np.std(scores)), rounding),
-            "worst_topic": round(float(np.min(scores)), rounding),
-        })
-        words[k] = [[terms[j] for j in topic] for topic in leading]
-
-    with atomic_write(out_csv, newline="", encoding=encoding) as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0]))
-        writer.writeheader()
-        writer.writerows(rows)
-
-    from ..figures.charts import line_chart
-    line_chart({f"{metric} coherence": [(r["n_topics"], r["coherence"])
-                                        for r in rows]},
-               chart_path, title="Topic coherence by number of topics",
-               x_label="topics", y_label=f"{metric} coherence",
-               on_progress=on_progress)
-
-    _write_report(report_path, rows=rows, words=words, engine=engine,
-                  metric=metric, n_docs=n_docs, n_terms=len(terms),
-                  skipped=skipped, encoding=encoding)
+    # everything below here -- which counts this corpus can carry, the
+    # co-occurrence pass, the scoring, the table, the charts and the write-up
+    # -- is the same machinery the three topic models use when their own count
+    # is left at 0. This function is the standalone door onto it, for looking
+    # at the curve without committing to a model.
+    _best_k, _components = _topics.select_k(
+        k_values=counts, fit=fit_at, terms=terms, batches=batches,
+        engine=engine, rule=rule, metric=metric, top_terms=top_terms,
+        rounding=rounding, out_stem=out_csv.with_suffix(""),
+        chart=chart_path, report=report_path,
+        encoding=encoding, on_progress=on_progress)
     return out_csv
-
-
-def _write_report(path: Path, *, rows, words, engine: str, metric: str,
-                  n_docs: int, n_terms: int, skipped=(), encoding: str) -> None:
-    """The write-up: the numbers, then the words, then the caveat."""
-    best = max(rows, key=lambda r: r["coherence"])
-    lines = [
-        "# How many topics?",
-        "",
-        f"Fitted **{engine.upper()}** at {len(rows)} topic counts over "
-        f"{n_docs:,} documents and a {n_terms:,}-term vocabulary, scoring each "
-        f"with **{metric}** coherence.",
-        "",
-        f"The highest average coherence was at **{best['n_topics']} topics** "
-        f"({best['coherence']}).",
-        "",
-    ]
-    # said here and not only in a warning, because the report is what somebody
-    # reads a week later, and a curve that silently stops short of what they
-    # asked for reads as a curve that peaked there.
-    if skipped:
-        lines += [
-            f"{', '.join(str(k) for k in skipped)} "
-            f"{'topics were' if len(skipped) > 1 else 'topics was'} asked for "
-            f"and skipped: this corpus is too small to fit "
-            f"{'them' if len(skipped) > 1 else 'it'}.",
-            "",
-        ]
-    lines += [
-        "| topics | coherence | spread | worst topic |",
-        "|---:|---:|---:|---:|",
-    ]
-    for row in rows:
-        marker = " **<-**" if row is best else ""
-        lines.append(f"| {row['n_topics']}{marker} | {row['coherence']} | "
-                     f"{row['coherence_sd']} | {row['worst_topic']} |")
-
-    lines += [
-        "",
-        "## Read the words before believing the number",
-        "",
-        "Coherence measures whether a topic's words turn up in the same "
-        "documents. That is related to whether a topic is *meaningful*, and it "
-        "is not the same thing: a model can score well and still cut the "
-        "corpus somewhere useless, and the highest score is often at more "
-        "topics than anybody wants to interpret.",
-        "",
-        "Use the curve to rule out counts that are clearly too few or too "
-        "many, then pick from what is left by reading the topics below.",
-        "",
-        "## The topics at each count",
-        "",
-    ]
-    for count in sorted(words):
-        lines.append(f"### {count} topics")
-        lines.append("")
-        for i, topic in enumerate(words[count], start=1):
-            lines.append(f"{i}. {', '.join(topic)}")
-        lines.append("")
-
-    with atomic_write(path, encoding=encoding) as f:
-        f.write("\n".join(lines) + "\n")
 
 
 CLI = CliSpec(
