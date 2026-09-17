@@ -239,9 +239,91 @@ def _stratified_folds(labels, classes, n_folds: int, seed: int):
     return folds
 
 
+def _select_penalty(z, labels, classes, *, grid, n_folds: int, seed: int,
+                    stratify: bool) -> int:
+    """
+    Pick a penalty from these rows and nothing else, by inner k-fold.
+
+    This is what scikit-learn's ``LogisticRegressionCV`` does: split the rows,
+    fit the whole grid on each split's training part, score it on the held-out
+    part, average each penalty's score across the splits, and take the best.
+    Nothing exotic -- and unlike the ridge next door there is no closed form
+    to shortcut it with, because a penalized logistic fit has to iterate. So
+    the grid costs real fits here where the ridge gets it from one
+    decomposition, which is the whole of the difference between them.
+
+    Largest penalty first with each fit warm-started from the last, the same
+    trick the outer loop uses: neighboring penalties have neighboring
+    solutions, so Newton takes a step or two rather than starting from zero.
+
+    An inner split that loses a class has no log loss worth averaging, so it
+    is skipped; if every one of them does, the answer falls back to scoring
+    the grid in-sample, which is weak but is not a crash.
+    """
+    import numpy as np
+
+    n = len(labels)
+    inner = (_stratified_folds(labels, classes, n_folds, seed + 1) if stratify
+             else random_folds(n, n_folds, seed + 1))
+    totals = np.zeros(len(grid))
+    scored = 0
+    for j in range(n_folds):
+        held, rest = inner == j, inner != j
+        if not held.any() or not rest.any():
+            continue
+        if any((labels[rest] == c).sum() == 0 for c in classes):
+            continue
+        indicators = np.column_stack([(labels[held] == c).astype(float)
+                                      for c in classes])
+        fits = None
+        for a_i in sorted(range(len(grid)), key=lambda i: -grid[i]):
+            fits = _fit_one_vs_rest(z[rest], labels[rest], classes, grid[a_i],
+                                    starts=fits)
+            totals[a_i] += _log_loss(indicators, _probabilities(z[held], fits))
+        scored += 1
+    if not scored:                             # pragma: no cover - tiny sample
+        indicators = np.column_stack([(labels == c).astype(float)
+                                      for c in classes])
+        fits = None
+        for a_i in sorted(range(len(grid)), key=lambda i: -grid[i]):
+            fits = _fit_one_vs_rest(z, labels, classes, grid[a_i], starts=fits)
+            totals[a_i] = _log_loss(indicators, _probabilities(z, fits))
+        scored = 1
+    mean = totals / scored
+    # ties go to the larger penalty, same as we do in the ridge next door.
+    return int(np.max(np.flatnonzero(mean == np.nanmin(mean))))
+
+
 def _cv_logistic(x, labels, classes, *, grid, n_folds: int, seed: int,
                  zscore: bool, stratify: bool = True):
-    """Cross-validate a penalized logistic fit, then refit the winner."""
+    """
+    Cross-validate a penalized logistic fit, then refit the winner.
+
+    The penalty is chosen **inside** each fold, from that fold's training rows
+    alone, by the inner k-fold that scikit-learn's ``LogisticRegressionCV``
+    uses (:func:`_select_penalty`) -- so nothing about a held-out row, its
+    label included, reaches the model that predicts it, and ``log_loss`` and
+    everything read off the same probabilities are out of fold in the full
+    sense.
+
+    This used to fit the whole grid in every fold, pool the out-of-fold
+    probabilities, and pick the penalty whose pooled log loss was lowest --
+    then report that same pooled loss. Every prediction was honestly out of
+    fold; the *choice of which penalty's predictions to report* looked at all
+    of them, which is a choice made on the outcome and left the result
+    flattering.
+
+    It costs more than the ridge's version of the same fix, and the reason is
+    the model rather than the design: ridge reads its whole penalty grid off
+    one decomposition, so nesting was free, while a penalized logistic fit has
+    to iterate and every penalty is a real fit. Warm starts down the grid keep
+    the factor small.
+
+    What comes back estimates the **procedure** rather than one fixed penalty.
+    ``fold_alphas`` says what each fold picked; the model that gets saved runs
+    the same rule over every row, so its ``alpha`` need not match any single
+    fold's.
+    """
     import numpy as np
 
     n = x.shape[0]
@@ -255,7 +337,8 @@ def _cv_logistic(x, labels, classes, *, grid, n_folds: int, seed: int,
 
     folds = (_stratified_folds(labels, classes, n_folds, seed) if stratify
              else random_folds(len(labels), n_folds, seed))
-    oof = np.full((len(grid), n, len(classes)), np.nan)
+    oof = np.full((n, len(classes)), np.nan)
+    fold_alphas: list = []
     for fold in range(n_folds):
         test = folds == fold
         train = ~test
@@ -264,29 +347,29 @@ def _cv_logistic(x, labels, classes, *, grid, n_folds: int, seed: int,
         sigma = x_tr.std(axis=0) if zscore else np.ones(x_tr.shape[1])
         sigma = np.where(sigma > 0, sigma, 1.0)
         z_tr, z_te = (x_tr - mu) / sigma, (xk[test] - mu) / sigma
-        # we go largest penalty first, with each fit starting from the last
-        # one. neighboring penalties have neighboring solutions, so Newton
-        # only needs a step or two instead of starting from zero every time.
-        # we keep the grid's own order for the results, though.
-        fits = None
-        for a_i in sorted(range(len(grid)), key=lambda i: -grid[i]):
-            fits = _fit_one_vs_rest(z_tr, labels[train], classes, grid[a_i],
-                                    starts=fits)
-            oof[a_i][test] = _probabilities(z_te, fits)
+        chosen = _select_penalty(z_tr, labels[train], classes, grid=grid,
+                                 n_folds=n_folds, seed=seed, stratify=stratify)
+        fold_alphas.append(float(grid[chosen]))
+        fits = _fit_one_vs_rest(z_tr, labels[train], classes, grid[chosen])
+        oof[test] = _probabilities(z_te, fits)
 
-    losses = [_log_loss(indicator, oof[i]) for i in range(len(grid))]
-    best = float(np.nanmin(losses))
-    # ties go to the larger penalty, same as we do in the ridge next door.
-    best_i = int(np.max(np.flatnonzero(np.array(losses) == best)))
-    alpha = grid[best_i]
+    # the number we report: held-out probabilities from models whose penalties
+    # those rows had no part in choosing
+    best = _log_loss(indicator, oof)
 
     mu = xk.mean(axis=0)
     sigma = xk.std(axis=0) if zscore else np.ones(xk.shape[1])
     sigma = np.where(sigma > 0, sigma, 1.0)
+    # the model we keep: same rule, every row. It may see all the data
+    # because it is not what is being scored above.
+    best_i = _select_penalty((xk - mu) / sigma, labels, classes, grid=grid,
+                             n_folds=n_folds, seed=seed, stratify=stratify)
+    alpha = grid[best_i]
     final = _fit_one_vs_rest((xk - mu) / sigma, labels, classes, alpha)
     return {
         "n": n, "kept": kept, "alpha": alpha, "folds": folds,
-        "oof": oof[best_i], "log_loss": best, "losses": losses,
+        "fold_alphas": fold_alphas,
+        "oof": oof, "log_loss": best,
         "mu": [float(v) for v in mu], "sigma": [float(v) for v in sigma],
         "models": final,
         "train_probabilities": _probabilities((xk - mu) / sigma, final),
@@ -672,6 +755,9 @@ def fit_classifier_csv(
                             fold_rows.append(prefix + [
                                 set_name, outcome, label, str(f + 1),
                                 str(int((fit["folds"] == f).sum())),
+                                # each fold chose this from its own training
+                                # rows, by the inner k-fold
+                                fmt(fit["fold_alphas"][f], 8),
                                 fmt(m["accuracy"], rounding),
                                 fmt(m["auc"], rounding),
                                 fmt(m["macro"]["f1"], rounding)])
@@ -785,7 +871,7 @@ def fit_classifier_csv(
            lead + ["feature_set", "outcome", "model", "true_class",
                    "predicted_class", "n"], conf_rows, encoding)
     _write_csv(folder / "classifier_folds.csv",
-           lead + ["feature_set", "outcome", "model", "fold", "n",
+           lead + ["feature_set", "outcome", "model", "fold", "n", "alpha",
                    "accuracy", "auc", "f1_macro"], fold_rows, encoding)
     _write_csv(folder / "classifier_coefficients.csv",
            lead + ["feature_set", "outcome", "model", "class", "predictor",
@@ -869,7 +955,7 @@ def _section_md(*, best, outcome_cols, sets, n_folds, scores,
         lines += ["", note]
     if len(sets) > 1:
         lines += comparison_lines(metrics_rows, metrics_header, score="auc",
-                                  label="AUC")
+                                  label="AUC", se="auc_folds_se")
     if control_names:
         lines += ["", f"Fitted with {len(control_names)} control column(s): "
                   f"{', '.join('`' + c + '`' for c in control_names)}, so "

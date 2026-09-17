@@ -203,14 +203,31 @@ where ordinary least squares is least stable. Ridge trades a little bias for
 a large drop in variance and never has to invert a singular matrix.
 
 What ridge cannot do is choose its own penalty, so Taters searches a grid of
-them by k-fold cross-validation and reports performance at the chosen one.
-Every headline number is **out-of-fold**: each row is predicted by a model
-that never saw it. The in-sample R² sits in the next column, and the gap
-between the two is the whole story of whether a model learned something or
-memorized the training set. Standardizing the predictors is on by default,
+33 of them. Every headline number is **out-of-fold**, and *where the penalty
+comes from* is what lets that be said plainly: each fold picks its own
+penalty from its own training rows, by exact leave-one-out, so nothing about
+a held-out row — including its outcome — reaches the model that predicts it.
+`ridge_folds.csv` records what each fold chose; folds that disagree widely
+are telling you the penalty is not well determined. The saved model runs the
+same rule over every row, so its penalty need not match any one fold's —
+which is not an inconsistency, because the cross-validated number describes
+the *procedure*, not that one fitted object.
+
+The in-sample R² sits in the next column, and the gap between the two is the
+whole story of whether a model learned something or memorized the training
+set. Standardizing the predictors is on by default,
 which makes coefficients comparable to each other (each is per standard
 deviation); turn it off and they stay in the features' own units, where a
 coefficient on `char_count` and one on `ttr` are not remotely comparable.
+
+A ranking is an invitation, so read the spread beside it. The report's
+feature-set comparison carries the standard error of each score across folds,
+and a gap smaller than roughly twice those is not a difference between
+feature sets — it is the same number measured twice. Worth knowing too:
+because the table is sorted, *picking the winner is itself a choice made by
+looking at the outcome*, which leaves the top score a little flattering
+however wide the gap. With five sets to choose between, the best of them
+sits about one standard error above the truth on average.
 
 This is also where "one table at a time" earns its keep: fit per feature set
 and `ridge_cv_metrics.csv` becomes a ranking — one row per feature set per
@@ -411,11 +428,11 @@ other's column.
 Taters fits L2-penalized logistic regression, for the same reason ridge is the
 regression default: language features are many and collinear, and the penalty
 is what keeps the fit stable when two predictors say almost the same thing.
-The penalty is chosen by out-of-fold **log loss** rather than accuracy —
-accuracy is a step function of the probabilities, so selecting on it means
-choosing between ties. Folds are stratified by class, because a fold holding
-none of a small class has no recall and no curve to measure, which quietly
-turns five-fold validation into four-fold.
+The penalty is scored by **log loss** rather than accuracy — accuracy is a
+step function of the probabilities, so selecting on it means choosing between
+ties. Folds are stratified by class, because a fold holding none of a small
+class has no recall and no curve to measure, which quietly turns five-fold
+validation into four-fold.
 
 What comes back is deliberately more than one number:
 
@@ -424,7 +441,7 @@ What comes back is deliberately more than one number:
 | `classifier_cv_metrics.csv` | accuracy **and** the accuracy of always guessing the commonest class, AUC, macro/weighted F1 |
 | `classifier_per_class.csv` | precision, recall, F1 and support per class — where the model is good and where it is useless |
 | `classifier_confusion.csv` | what the mistakes actually were |
-| `classifier_folds.csv` | each fold's own score |
+| `classifier_folds.csv` | each fold's own score, and the penalty it chose |
 | `classifier_predictions__<set>.csv` | the saved model's prediction and the held-out one, per row, with the fold |
 
 Accuracy is never reported without that baseline beside it, because on an
@@ -432,6 +449,20 @@ outcome where 90% of people are in one class, a model that always answers
 "that one" is 90% accurate and worthless. Lead with the AUC: it asks whether
 the model *ranks* cases correctly, independent of where you put the threshold,
 and is unmoved by class imbalance.
+
+The penalty is chosen the same honest way the ridge chooses its own: inside
+each fold, from that fold's training rows only, by the inner k-fold that
+scikit-learn's `LogisticRegressionCV` uses. So the log loss — and the AUC and
+accuracy read off the same probabilities — are out of fold in the full sense,
+and `classifier_folds.csv` records what each fold picked.
+
+It costs more here than it does for the ridge, and the reason is the model
+rather than the design. Ridge reads its whole penalty grid off a single
+matrix decomposition, so choosing inside each fold was free. A penalized
+logistic fit has to iterate, so every penalty on the grid is a real fit and
+nesting multiplies them. Warm-starting down the grid — each penalty's fit
+beginning from its neighbor's answer — keeps the factor small enough not to
+matter in practice.
 
 ## Reading the coefficient table
 

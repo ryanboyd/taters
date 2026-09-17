@@ -7,16 +7,27 @@ three views of sentence length -- which is exactly the situation ordinary
 least squares handles worst and ridge handles well: the penalty trades a
 little bias for a large drop in variance, and it never has to invert a
 singular matrix. What ridge does not do is choose its own penalty, so this
-searches a grid of alphas by k-fold cross-validation and reports the
-out-of-fold performance at the chosen one. In-sample R-squared is reported
-too, next to it, because the gap between them is the whole story of whether
-a model learned anything or memorized.
+searches a grid of alphas and reports out-of-fold performance. In-sample
+R-squared is reported too, next to it, because the gap between them is the
+whole story of whether a model learned anything or memorized.
+
+**Where the penalty is chosen from is the whole of why that number can be
+called out-of-fold.** Each fold picks its own penalty from its own training
+rows, by exact leave-one-out; the held-out rows have no say in the model that
+predicts them. What comes out therefore estimates the *procedure* -- ridge,
+with the penalty chosen this way -- rather than one fixed penalty, which is
+the claim a methods section can actually support. The model that gets saved
+runs the same rule over every row, and its penalty need not match any single
+fold's; that is not an inconsistency, because the cross-validated
+number was never a statement about that one fitted object.
 
 The arithmetic is plain numpy on purpose. One economy SVD per fold serves the
-*entire* alpha grid -- coefficients for any alpha are
-``V diag(s/(s^2+a)) U' y`` -- so a 33-point grid costs one decomposition
-rather than 33 solves, and the numbers are exactly reproducible from the
-stored model rather than depending on a solver's iteration count.
+*entire* alpha grid twice over -- coefficients for any alpha are
+``V diag(s/(s^2+a)) U' y``, and the exact leave-one-out error for any alpha
+comes off the same ``U`` and ``s`` -- so choosing the penalty inside each
+fold costs no extra decomposition, which is what makes the honest version
+free. The numbers are exactly reproducible from the stored model rather than
+depending on a solver's iteration count.
 
 A fit is an instrument, not a result: the model file carries the predictor
 names, the training centering and scaling, the chosen alpha and the grid it
@@ -89,21 +100,82 @@ def _fold_assignments(n: int, n_folds: int, seed: int, y=None,
     return random_folds(n, n_folds, seed)
 
 
-def _svd_coefficients(x, y, alphas):
+def _decompose(x, y):
     """
-    Ridge coefficients for every alpha at once, from one SVD.
-
-    ``x`` and ``y`` must already be centered (and scaled, if wanted): the
-    intercept is never penalized, and recovering it from the means afterwards
-    is both cheaper and exact.
+    The one decomposition every penalty's fit *and* its leave-one-out error
+    are read off. ``x`` and ``y`` must already be centered (and scaled, if
+    wanted): the intercept is never penalized, and recovering it from the
+    means afterwards is both cheaper and exact.
     """
     import numpy as np
 
     u, s, vt = np.linalg.svd(x, full_matrices=False)
-    uty = u.T @ y
+    return u, s, vt, u.T @ y
+
+
+def _coefficients_at(parts, alpha: float):
+    """Ridge coefficients at one penalty, from an existing decomposition."""
+    _u, s, vt, uty = parts
+    return vt.T @ (s / (s * s + alpha) * uty)
+
+
+def _loo_rmse(parts, y, alphas):
+    """
+    **Exact** leave-one-out error for every penalty, without refitting once.
+
+    Ridge has a closed form for this and it falls out of the decomposition we
+    already have. The fitted values are ``U diag(s^2/(s^2+a)) U'y``, so the
+    leverage of row *i* is the matching diagonal entry, and the textbook
+    identity turns an ordinary residual into the leave-one-out one:
+
+        loo_i = (y_i - yhat_i) / (1 - h_ii)
+
+    The ``1/n`` in ``h`` is the intercept, which is not penalized and so
+    costs a full unit of leverage; leaving it out makes every number slightly
+    too small (checked against brute-force refitting, which agrees to
+    floating point only with it in).
+
+    This is what lets the penalty be chosen *inside* a training fold at no
+    extra cost -- the whole reason the choice can be honest here.
+    """
+    import numpy as np
+
+    u, s, _vt, uty = parts
+    n = u.shape[0]
+    squares = u ** 2
+    ss = s * s
+    out = np.empty(len(alphas), dtype=float)
+    for i, alpha in enumerate(alphas):
+        shrink = ss / (ss + alpha)
+        residual = y - u @ (shrink * uty)
+        leverage = 1.0 / n + squares @ shrink
+        # wider than the data (p >= n) a tiny penalty interpolates, leverage
+        # reaches one, and the division blows up. Clamping just short of it
+        # sends that penalty's error to something enormous, which is the
+        # honest answer: a model that fits every point exactly predicts none.
+        out[i] = float(np.sqrt(np.mean(
+            (residual / np.maximum(1.0 - leverage, 1e-12)) ** 2)))
+    return out
+
+
+def _best_alpha(errors, grid) -> int:
+    """The index of the winning penalty. Ties go to the larger penalty:
+    between two that predict equally well, the more regularized one is the
+    one more likely to keep it up."""
+    import numpy as np
+
+    errors = np.asarray(errors, dtype=float)
+    return int(np.max(np.flatnonzero(errors == np.nanmin(errors))))
+
+
+def _svd_coefficients(x, y, alphas):
+    """Ridge coefficients for every alpha at once, from one decomposition."""
+    import numpy as np
+
+    parts = _decompose(x, y)
     out = np.empty((len(alphas), x.shape[1]), dtype=float)
     for i, alpha in enumerate(alphas):
-        out[i] = vt.T @ (s / (s * s + alpha) * uty)
+        out[i] = _coefficients_at(parts, alpha)
     return out
 
 
@@ -184,12 +256,30 @@ def _cv_ridge(x, y, *, names, grid, n_folds: int, seed: int, zscore: bool,
     Cross-validate a ridge over one design matrix, and refit the winner.
 
     Everything that learns from the data -- the centering, the scaling, the
-    coefficients -- is fitted inside each fold and applied to the held-out
-    rows, never the other way round. Standardizing the whole sample first
-    would let the test rows influence their own predictions, which inflates
-    every number below by an amount nobody can estimate afterwards.
+    coefficients **and the penalty** -- is fitted inside each fold and
+    applied to the held-out rows, never the other way round. Standardizing
+    the whole sample first would let the test rows influence their own
+    predictions, which inflates every number below by an amount nobody can
+    estimate afterwards.
 
-"""
+    The penalty belongs on that list and did not used to be. This function
+    once fitted the whole grid in every fold, pooled the out-of-fold
+    predictions, and picked the penalty whose pooled error was lowest -- then
+    reported that same pooled error. Each individual prediction was honestly
+    out of fold; the *choice of which penalty's predictions to report* was
+    made by looking at all of them, which is a choice made on the outcome and
+    left `cv_r2` flattering. Now each fold picks its own penalty from its own
+    training rows, by exact leave-one-out (see :func:`_loo_rmse`, which costs
+    no extra decomposition), so no held-out row informs the model that
+    predicts it.
+
+    What comes back therefore estimates the **procedure** -- ridge, with the
+    penalty chosen this way -- rather than one fixed penalty, which is the
+    thing a methods section should be claiming. ``fold_alphas`` records what
+    each fold chose; a wide spread there means the penalty is not
+    well-determined and is worth knowing. The model that is kept, and its
+    ``alpha``, come from the same rule run over every row.
+    """
     import numpy as np
 
     n = int(x.shape[0])
@@ -201,7 +291,8 @@ def _cv_ridge(x, y, *, names, grid, n_folds: int, seed: int, zscore: bool,
     xk = x[:, kept]
 
     folds = _fold_assignments(n, n_folds, seed, y=y, stratify=stratify)
-    oof = np.full((len(grid), n), np.nan)
+    oof = np.full(n, np.nan)
+    fold_alphas: List[float] = []
     for fold in range(n_folds):
         test = folds == fold
         train = ~test
@@ -213,21 +304,17 @@ def _cv_ridge(x, y, *, names, grid, n_folds: int, seed: int, zscore: bool,
         # takes care of the rest.
         sigma = np.where(sigma > 0, sigma, 1.0)
         y_mean = y_tr.mean()
-        coefs = _svd_coefficients((x_tr - mu) / sigma, y_tr - y_mean, grid)
-        # (rows x alphas) comes out of the product, (alphas x rows) goes into
-        # the store -- one row per penalty, so that afterwards we can score
-        # the whole grid against y in one vectorized pass.
-        oof[:, test] = (((xk[test] - mu) / sigma) @ coefs.T + y_mean).T
+        parts = _decompose((x_tr - mu) / sigma, y_tr - y_mean)
+        # the penalty is chosen from these training rows and nothing else --
+        # the held-out fold has no say in the model that is about to predict
+        # it. Exact leave-one-out, off the decomposition already in hand.
+        chosen = _best_alpha(_loo_rmse(parts, y_tr - y_mean, grid), grid)
+        fold_alphas.append(float(grid[chosen]))
+        coefs = _coefficients_at(parts, grid[chosen])
+        oof[test] = ((xk[test] - mu) / sigma) @ coefs + y_mean
 
-    rmse_by_alpha = np.sqrt(((oof - y) ** 2).mean(axis=1))
-    # ties go to the larger penalty. between two models that predict equally
-    # well out of fold, the more regularized one is the one more likely to
-    # keep it up.
-    best_i = int(np.max(np.flatnonzero(rmse_by_alpha == rmse_by_alpha.min())))
-    alpha = grid[best_i]
-
-    cv = _metrics(y, oof[best_i])
-    per_fold = [_metrics(y[folds == f], oof[best_i][folds == f])
+    cv = _metrics(y, oof)
+    per_fold = [_metrics(y[folds == f], oof[folds == f])
                 for f in range(n_folds)]
     fold_r2 = np.array([m["r2"] for m in per_fold], dtype=float)
     fold_r = np.array([m["r"] for m in per_fold], dtype=float)
@@ -244,19 +331,29 @@ def _cv_ridge(x, y, *, names, grid, n_folds: int, seed: int, zscore: bool,
     # the outcome's own units.
     cv["baseline_mae"] = float(np.abs(y - y.mean()).mean())
 
-    # now for the model we actually keep: we refit on everything, at the
-    # chosen penalty.
+    # now for the model we actually keep: fitted on everything, with its
+    # penalty chosen by the same rule run over every row. It is allowed to
+    # see all the data because it is not being scored -- the number above is,
+    # and that came from folds this fit had no part in.
     design = xk
     mu = design.mean(axis=0)
     sigma = design.std(axis=0) if zscore else np.ones(design.shape[1])
     sigma = np.where(sigma > 0, sigma, 1.0)
     intercept = float(y.mean())
-    coef = _svd_coefficients((design - mu) / sigma, y - intercept, [alpha])[0]
+    parts = _decompose((design - mu) / sigma, y - intercept)
+    loo_by_alpha = _loo_rmse(parts, y - intercept, grid)
+    best_i = _best_alpha(loo_by_alpha, grid)
+    alpha = grid[best_i]
+    coef = _coefficients_at(parts, alpha)
     train_pred = ((design - mu) / sigma) @ coef + intercept
 
     return {
         "n": n, "kept": kept, "alpha": alpha, "cv": cv, "per_fold": per_fold,
-        "folds": folds, "rmse_by_alpha": [float(v) for v in rmse_by_alpha],
+        "folds": folds, "fold_alphas": fold_alphas,
+        # the held-out prediction for every row, which is what every cv_
+        # number above is computed from
+        "oof": oof,
+        "loo_rmse_by_alpha": [float(v) for v in loo_by_alpha],
         "mu": [float(v) for v in mu], "sigma": [float(v) for v in sigma],
         "coef": [float(v) for v in coef], "intercept": intercept,
         "train_r2": _metrics(y, train_pred)["r2"],
@@ -620,7 +717,7 @@ def fit_ridge_csv(
                         fmt(cv["baseline_mae"], rounding),
                         fmt(fit["train_r2"], rounding),
                         fmt(fit["intercept"], rounding)])
-                    for a, rmse in zip(grid, fit["rmse_by_alpha"],
+                    for a, rmse in zip(grid, fit["loo_rmse_by_alpha"],
                                        strict=True):
                         path_rows.append(prefix + [set_name, outcome, label,
                                                    fmt(a, 8),
@@ -629,6 +726,8 @@ def fit_ridge_csv(
                         fold_rows.append(prefix + [
                             set_name, outcome, label, str(f + 1),
                             str(int((fit["folds"] == f).sum())),
+                            # each fold chose this from its own training rows
+                            fmt(fit["fold_alphas"][f], 8),
                             fmt(m["r2"], rounding), fmt(m["r"], rounding),
                             fmt(m["rho"], rounding), fmt(m["mae"], rounding)])
                     coef = np.asarray(fit["coef"])
@@ -730,10 +829,11 @@ def fit_ridge_csv(
     _write_coefficients(coef_path, coef_rows, outcome_cols, lead, rounding,
                         encoding)
     _write_csv(path_path,
-           lead + ["feature_set", "outcome", "model", "alpha", "cv_rmse"],
+           lead + ["feature_set", "outcome", "model", "alpha", "loo_rmse"],
            path_rows, encoding)
     _write_csv(folder / "ridge_folds.csv",
-           lead + ["feature_set", "outcome", "model", "fold", "n", "r2", "r",
+           lead + ["feature_set", "outcome", "model", "fold", "n", "alpha",
+                   "r2", "r",
                    "rho", "mae"], fold_rows, encoding)
 
     section = _section_md(
@@ -958,11 +1058,18 @@ def _section_md(*, sets, outcome_cols, best, n_folds, zscore,
                        if r2 <= 0 else f"cross-validated R² = {r2:.3f}")
             lines.append(f"- `{outcome}`: **{set_name}** — {verdict} "
                          f"(alpha = {alpha:g})")
+        lines += ["", "The penalty beside each one is the saved model's, "
+                  "chosen by leave-one-out over every row. Each fold chose "
+                  "its own from its own training rows -- `ridge_folds.csv` "
+                  "records them -- so no held-out row helped pick the model "
+                  "that predicted it, and the R² above is out of fold in the "
+                  "full sense. Folds that disagree widely about the penalty "
+                  "are telling you it is not well determined."]
     for note in set_notes:
         lines += ["", note]
     if len(sets) > 1:
         lines += comparison_lines(metrics_rows, metrics_header, score="cv_r2",
-                                  label="CV R²")
+                                  label="CV R²", se="cv_r2_folds_se")
         lines += ["", "Sort `ridge_cv_metrics.csv` by `cv_r2` within an "
                   "outcome to compare the sets directly."]
         # feature sets fit on different numbers of rows aren't being compared

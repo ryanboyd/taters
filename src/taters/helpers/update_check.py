@@ -16,7 +16,7 @@ The rules this is built around, in order of importance:
 3. **It cannot break anything.** Every path here is wrapped. A failure leaves
    no note and no complaint; there is nothing here worth interrupting a run
    for.
-4. **It says one thing.** "newer version available: v0.7.3" under the banner,
+4. **It says one thing.** "Newer version available: v0.7.3" under the banner,
    in dim text. Not an exhortation, not something to dismiss.
 """
 
@@ -99,7 +99,7 @@ def note() -> str:
         there = _release(str(seen))
         if there is None or there <= here:
             return ""
-        return f"newer version available: v{seen}"
+        return f"Newer version available: v{seen}"
     except Exception:
         return ""
 

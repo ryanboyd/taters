@@ -12,9 +12,10 @@ import pytest
 
 np = pytest.importorskip("numpy")
 
-from taters.stats.ridge import (RIDGE_MODEL_FORMAT, _load_model,  # noqa: E402
+from taters.stats.ridge import (RIDGE_MODEL_FORMAT, _cv_ridge,  # noqa: E402
+                                _load_model, _loo_rmse, _decompose,
                                 _svd_coefficients, apply_ridge_csv,
-                                fit_ridge_csv)
+                                default_alphas, fit_ridge_csv)
 from csvhelpers import _read, _write  # noqa: E402
 
 
@@ -125,7 +126,96 @@ def test_out_of_fold_beats_in_sample_on_a_hard_problem(tmp_path):
     assert float(row["train_r2"]) > float(row["cv_r2"])
 
 
+def _planted(n=160, p=12, seed=0):
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    x = rng.normal(size=(n, p))
+    y = x @ rng.normal(size=p) + rng.normal(scale=2.0, size=n)
+    return x, y, [f"f{i}" for i in range(p)]
+
+
+def test_no_row_can_influence_the_penalty_that_predicts_it():
+    """
+    The property that makes `cv_r2` an honest out-of-fold number.
+
+    Each row is held out by exactly one fold, and that fold's model is fitted
+    on the others -- so nothing about this row, including its outcome, may
+    reach the model that predicts it. The penalty is part of that model. Move
+    one row's outcome as far as you like: its own held-out prediction must not
+    budge by a hair.
+
+    This is what the old shape could not promise. It fitted the whole grid in
+    every fold, pooled the out-of-fold predictions, and chose the penalty with
+    the lowest pooled error -- an error that included this very row. So this
+    row's outcome helped choose the penalty that then predicted it, and every
+    reported number was a little flattering for it.
+    """
+    import numpy as np
+
+    x, y, names = _planted()
+    grid = default_alphas()
+    first, _ = _cv_ridge(x, y, names=names, grid=grid, n_folds=5, seed=7,
+                         zscore=True, stratify=False)
+
+    moved = y.copy()
+    moved[0] += 50.0                       # far outside the outcome's range
+    second, _ = _cv_ridge(x, moved, names=names, grid=grid, n_folds=5, seed=7,
+                          zscore=True, stratify=False)
+
+    assert np.array_equal(first["folds"], second["folds"]), \
+        "the deal moved, so this compares two different splits"
+    mine = int(first["folds"][0])
+    assert first["fold_alphas"][mine] == second["fold_alphas"][mine], \
+        "row 0's outcome changed the penalty chosen for row 0's own fold"
+    assert first["oof"][0] == pytest.approx(second["oof"][0]), \
+        "row 0's outcome changed row 0's own held-out prediction"
+
+
+def test_each_fold_chooses_its_own_penalty_and_says_so():
+    """The reported number estimates the *procedure*, not one fixed penalty,
+    so what each fold picked is recorded -- a wide spread there means the
+    penalty is not well determined, which is worth knowing."""
+    x, y, names = _planted()
+    grid = default_alphas()
+    fit, _ = _cv_ridge(x, y, names=names, grid=grid, n_folds=5, seed=3,
+                       zscore=True, stratify=False)
+    assert len(fit["fold_alphas"]) == 5
+    assert all(a in grid for a in fit["fold_alphas"])
+    # and the kept model's own penalty comes from the same rule over every row
+    assert fit["alpha"] in grid
+
+
+def test_leave_one_out_error_is_exact_not_approximated():
+    """`_loo_rmse` is what lets the penalty be chosen inside a fold for free.
+    It is an identity, not an estimate, so it has to match actually refitting
+    without each row -- including the unpenalized intercept's leverage."""
+    import numpy as np
+
+    x, y, _names = _planted(n=45, p=10, seed=4)
+    x = x - x.mean(axis=0)
+    y = y - y.mean()
+    grid = [0.5, 5.0, 50.0]
+
+    brute = []
+    for alpha in grid:
+        errors = []
+        for i in range(len(y)):
+            keep = np.arange(len(y)) != i
+            xb, yb = x[keep], y[keep]
+            mu, ym = xb.mean(axis=0), yb.mean()
+            coef = _svd_coefficients(xb - mu, yb - ym, [alpha])[0]
+            errors.append(y[i] - ((x[i] - mu) @ coef + ym))
+        brute.append(float(np.sqrt(np.mean(np.square(errors)))))
+
+    closed = _loo_rmse(_decompose(x, y), y, grid)
+    assert closed == pytest.approx(brute, rel=1e-9)
+
+
 def test_the_alpha_path_records_every_penalty_searched(tmp_path):
+    """The path is the curve the *kept* model's penalty was chosen from --
+    exact leave-one-out over every row -- so the penalty in the metrics table
+    has to be the one that minimizes it."""
     table, _ = _table(tmp_path)
     grid = [0.1, 1.0, 10.0, 100.0]
     fit_ridge_csv(table_csv=table, outcome_cols=["outcome"], alphas=grid,
@@ -133,7 +223,7 @@ def test_the_alpha_path_records_every_penalty_searched(tmp_path):
     path = _read(tmp_path / "ridge_alpha_path.csv")
     assert [float(r["alpha"]) for r in path] == grid
     chosen = float(_read(tmp_path / "ridge_cv_metrics.csv")[0]["alpha"])
-    best = min(path, key=lambda r: float(r["cv_rmse"]))
+    best = min(path, key=lambda r: float(r["loo_rmse"]))
     assert chosen == pytest.approx(float(best["alpha"]))
 
 

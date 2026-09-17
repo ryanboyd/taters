@@ -1,5 +1,5 @@
 """
-Tests for the "newer version available" note under the main menu.
+Tests for the "Newer version available" note under the main menu.
 
 Two properties matter more than the rest, and they are the reason this is a
 file of its own rather than three assertions in test_hub.py:
@@ -70,7 +70,7 @@ def cache(latest, *, at=None, off=False):
 def test_a_newer_cached_version_becomes_one_plain_line():
     """The wording the user asked for: a fact, with no verb aimed at anybody."""
     cache("0.7.3")
-    assert uc.note() == "newer version available: v0.7.3"
+    assert uc.note() == "Newer version available: v0.7.3"
 
 
 def test_nothing_is_said_before_the_first_check_has_ever_run():
@@ -95,7 +95,7 @@ def test_versions_compare_as_numbers_rather_than_as_text():
     """The bug this pins: "0.7.10" sorts *before* "0.7.9" as a string, so a
     text comparison goes quiet exactly when there is something to say."""
     cache("0.7.10")
-    assert uc.note() == "newer version available: v0.7.10"
+    assert uc.note() == "Newer version available: v0.7.10"
 
 
 def test_a_release_candidate_on_pypi_is_passed_over_in_silence(monkeypatch):
@@ -158,7 +158,7 @@ def test_switching_it_off_is_a_setting_rather_than_a_deletion(monkeypatch):
     """`off` is stored, not `on`, so a settings.json written by an older Taters
     -- which has no key here at all -- reads as on."""
     settings_mod.save_setting(uc.SETTING_KEY, {"latest": "0.7.3"})
-    assert uc.note() == "newer version available: v0.7.3"
+    assert uc.note() == "Newer version available: v0.7.3"
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +170,7 @@ def test_the_refresh_writes_the_answer_for_next_time(monkeypatch):
     assert uc.note() == "", "nothing cached yet"
     uc.refresh_in_background().join(10)
     assert calls, "the refresh never asked"
-    assert uc.note() == "newer version available: v0.9.0"
+    assert uc.note() == "Newer version available: v0.9.0"
 
 
 def test_the_refresh_runs_where_it_cannot_hold_up_the_menu(monkeypatch):
@@ -195,7 +195,7 @@ def test_a_day_old_answer_is_asked_for_again(monkeypatch):
     calls = fake_pypi(monkeypatch, "0.9.0")
     uc.refresh_in_background().join(10)
     assert calls, "a stale answer was kept forever"
-    assert uc.note() == "newer version available: v0.9.0"
+    assert uc.note() == "Newer version available: v0.9.0"
 
 
 def test_an_unchanged_version_still_resets_the_clock(monkeypatch):
@@ -250,7 +250,7 @@ def test_the_note_is_printed_above_the_menu(monkeypatch, tmp_path):
     from taters.ui import hub
     from taters.ui.prompts import ScriptedPrompter
 
-    monkeypatch.setattr(uc, "note", lambda: "newer version available: v9.9.9")
+    monkeypatch.setattr(uc, "note", lambda: "Newer version available: v9.9.9")
     monkeypatch.setattr(uc, "refresh_in_background", lambda: None)
 
     p = ScriptedPrompter(["quit"])
@@ -314,4 +314,4 @@ def test_turning_it_back_on_keeps_the_answer_already_cached(tmp_path):
     cache("0.7.3", off=True)
     p = ScriptedPrompter(["on", "back"])
     screen.TASK.run(TaskContext(prompter=p, cwd=tmp_path))
-    assert uc.note() == "newer version available: v0.7.3"
+    assert uc.note() == "Newer version available: v0.7.3"

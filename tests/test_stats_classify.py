@@ -17,9 +17,11 @@ import pytest
 np = pytest.importorskip("numpy")
 
 from taters.stats.classify import (CLASSIFIER_MODEL_FORMAT,  # noqa: E402
-                                   MIN_PER_CLASS, _auc, _fit_logistic,
-                                   _load_model, _score, _stratified_folds,
-                                   apply_classifier_csv, fit_classifier_csv)
+                                   MIN_PER_CLASS, _auc, _cv_logistic,
+                                   _fit_logistic, _load_model, _score,
+                                   _stratified_folds, apply_classifier_csv,
+                                   fit_classifier_csv)
+from taters.stats.ridge import default_alphas  # noqa: E402
 from csvhelpers import _read, _write  # noqa: E402
 
 
@@ -40,6 +42,100 @@ def _table(tmp_path, *, n=240, seed=5, name="analysis_table.csv",
     rows = [[f"d{i}", y[i], f"{age[i]:.6f}", gender[i],
              f"{sig[i]:.10f}", f"{noise[i]:.10f}"] for i in range(n)]
     return _write(tmp_path / name, header, rows)
+
+
+def _two_class(n=240, p=3, seed=0):
+    """A clean, well-separated problem -- the case that breaks anything
+    dividing by p(1-p), so the one worth testing the selection on."""
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    signal = rng.normal(size=n)
+    x = np.column_stack([signal] + [rng.normal(size=n) for _ in range(p - 1)])
+    labels = np.array(["yes" if v > 0 else "no"
+                       for v in signal + rng.normal(scale=0.3, size=n)])
+    return x, labels, ["no", "yes"]
+
+
+def test_no_row_can_influence_the_penalty_that_predicts_it():
+    """
+    What makes the classifier's log loss -- and the AUC and accuracy read off
+    the same probabilities -- out of fold in the full sense.
+
+    Each row is held out by exactly one fold, and that fold's penalty is
+    chosen by an inner k-fold over its *training* rows only. So this row's
+    label cannot reach the model that predicts it. Flip it and its own
+    held-out probabilities must not move at all.
+
+    The old shape could not promise this: it fitted the grid in every fold,
+    pooled the out-of-fold probabilities, and chose the penalty with the
+    lowest pooled loss -- a loss that included this very row.
+    """
+    import numpy as np
+
+    x, labels, classes = _two_class()
+    grid = default_alphas()
+    first, _ = _cv_logistic(x, labels, classes, grid=grid, n_folds=5, seed=5,
+                            zscore=True, stratify=False)
+
+    # every label in one fold, flipped. That fold's training rows are all the
+    # *other* folds, so none of this touches them -- while a selection made
+    # over the pooled predictions would see fifty changed labels and move.
+    # (One flipped label is too small to shift an argmin over 33 penalties,
+    # which made an earlier version of this test pass for the wrong reason.)
+    held = first["folds"] == 0
+    flipped = labels.copy()
+    flipped[held] = np.where(labels[held] == "no", "yes", "no")
+    second, _ = _cv_logistic(x, flipped, classes, grid=grid, n_folds=5, seed=5,
+                             zscore=True, stratify=False)
+
+    assert np.array_equal(first["folds"], second["folds"]), \
+        "the deal moved, so this compares two different splits"
+    assert first["fold_alphas"][0] == second["fold_alphas"][0], \
+        "labels inside fold 0 changed the penalty chosen for fold 0"
+    assert first["oof"][held] == pytest.approx(second["oof"][held]), \
+        "labels inside fold 0 changed fold 0's own held-out probabilities"
+
+
+def test_the_penalty_is_chosen_well_on_a_separable_problem():
+    """
+    A regression test for a fix that was tried and rejected.
+
+    The one-step leave-one-out approximation (Pregibon 1981) would have made
+    this free, the way the ridge's exact identity does -- but it divides by
+    `p(1-p)`, which collapses on confident predictions, so on a clean problem
+    it drove the choice to maximum shrinkage and the classifier to a single
+    class. Brute-force leave-one-out wanted alpha near 0.01 here; the
+    approximation asked for 1e5 and a coin flip.
+
+    So: a well-separated problem has to come back with a *small* penalty, two
+    classes predicted, and a log loss nowhere near log(2).
+    """
+    import numpy as np
+
+    x, labels, classes = _two_class()
+    grid = default_alphas()
+    fit, _ = _cv_logistic(x, labels, classes, grid=grid, n_folds=5, seed=1,
+                          zscore=True, stratify=True)
+
+    assert fit["alpha"] < 100.0, (
+        f"chose alpha={fit['alpha']:g} on a separable problem -- that is the "
+        "shrink-to-nothing failure the approximation had")
+    assert fit["log_loss"] < 0.45, fit["log_loss"]
+    predicted = {classes[i] for i in np.argmax(fit["oof"], axis=1)}
+    assert predicted == set(classes), \
+        f"collapsed to {predicted} instead of predicting both classes"
+
+
+def test_each_fold_chooses_its_own_penalty_and_says_so():
+    x, labels, classes = _two_class()
+    grid = default_alphas()
+    fit, _ = _cv_logistic(x, labels, classes, grid=grid, n_folds=5, seed=2,
+                          zscore=True, stratify=True)
+    assert len(fit["fold_alphas"]) == 5
+    assert all(a in grid for a in fit["fold_alphas"])
+    assert fit["alpha"] in grid
+
 
 
 def test_every_outcome_gets_a_classifier_file_of_its_own(tmp_path):

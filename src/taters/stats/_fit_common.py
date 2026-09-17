@@ -194,7 +194,8 @@ def members_of(set_names: Sequence[str], sources: Sequence[str]) -> Dict[str, Li
 
 
 def comparison_lines(metrics_rows, metrics_header, *, score: str,
-                     label: str, higher_is_better: bool = True) -> list:
+                     label: str, higher_is_better: bool = True,
+                     se: str = "") -> list:
     """
     The report's table of feature sets against each other: per outcome, one
     row per set with its best language-bearing score, ranked.
@@ -202,6 +203,13 @@ def comparison_lines(metrics_rows, metrics_header, *, score: str,
     Written for the reader of "what does each table add?" -- the rows for
     ``dictionary``, ``matrix`` and ``dictionary+matrix`` sit together and
     the difference is the answer.
+
+    ``se`` names the column holding the standard error of that score across
+    folds, and it is shown beside it. A ranked table is an invitation to
+    report the top row, and without the spread beside it there is nothing on
+    screen to say that the top two differ by less than the noise. The
+    numbers were already being computed; they were just in the CSV rather
+    than next to the ranking that needs them.
     """
     at = {name: i for i, name in enumerate(metrics_header)}
     if not metrics_rows or score not in at:
@@ -216,20 +224,46 @@ def comparison_lines(metrics_rows, metrics_header, *, score: str,
             continue
         key = (row[at["outcome"]], row[at["feature_set"]])
         n_pred = row[at["n_predictors"]] if "n_predictors" in at else ""
+        spread = ""
+        if se and se in at:
+            try:
+                spread = f"{float(row[at[se]]):.3f}"
+            except (TypeError, ValueError):
+                spread = ""
         if key not in best or (value > best[key][0]) == higher_is_better:
-            best[key] = (value, n_pred)
+            best[key] = (value, n_pred, spread)
     if len({s for _o, s in best}) < 2:
         return []
+    shown = any(v[2] for v in best.values())
+    head = f"| outcome | feature set | predictors | {label} |"
+    rule = "|---|---|---:|---:|"
+    if shown:
+        head += " +- across folds |"
+        rule += "---:|"
     lines = ["", "How the feature sets compare (the model with the language "
-             "in it, alongside any controls):", "",
-             f"| outcome | feature set | predictors | {label} |",
-             "|---|---|---:|---:|"]
+             "in it, alongside any controls):", "", head, rule]
     outcomes = sorted({o for o, _s in best})
     for outcome in outcomes:
-        rows = sorted(((s, v, n) for (o, s), (v, n) in best.items() if o == outcome),
+        rows = sorted(((s, v, n, e) for (o, s), (v, n, e) in best.items()
+                       if o == outcome),
                       key=lambda t: -t[1] if higher_is_better else t[1])
-        for s, v, n in rows:
-            lines.append(f"| `{outcome}` | {s} | {n} | {v:.3f} |")
+        for s, v, n, e in rows:
+            line = f"| `{outcome}` | {s} | {n} | {v:.3f} |"
+            if shown:
+                line += f" {e or '--'} |"
+            lines.append(line)
+    if shown:
+        lines += [
+            "",
+            "Read the spread before the ranking. A gap between two feature "
+            "sets smaller than roughly twice these standard errors is not a "
+            "difference -- it is the same number measured twice. And because "
+            "the table is sorted, picking the winner is itself a choice made "
+            "by looking at the outcome, which leaves the top score a little "
+            "flattering however wide the gap: with five sets to choose "
+            "between, the best of them sits about one standard error above "
+            "the truth on average.",
+        ]
     return lines
 
 

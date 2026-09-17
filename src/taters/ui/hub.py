@@ -309,7 +309,12 @@ def run_hub(prompter: Prompter, *, cwd: Optional[Path] = None) -> bool:
     from ..helpers import update_check
     newer = update_check.note()
     if newer:
-        prompter.note(f"  {newer}", style="dim")
+        # yellow rather than dim: this is the one line on the opening screen
+        # that wants acting on, and `dim` is what the app uses for the things
+        # you are meant to skim past. ANSI yellow (color 3) is the dark one
+        # -- `bright_yellow` is the neon -- so it stays readable on a light
+        # terminal and degrades to a real color on an eight-color one.
+        prompter.note(f"  {newer}", style="yellow")
     update_check.refresh_in_background()
 
     prompter.note("  Ctrl-C backs out at any point. Nothing is written until you say so.\n",

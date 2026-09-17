@@ -249,9 +249,13 @@ checklist like anything else; it joins the analysis table under its own name.
 
     That paper is worth reading for the *method* as much as the result, because it
     answers an objection this whole section invites. If a model's score depends on
-    choices you made after seeing the data — which features, which penalty, which
-    fold seed — then a good out-of-fold number is not quite the guarantee it looks
-    like. Preregistering the model closes that door: the instrument is fixed
+    choices you made after seeing the data, then a good out-of-fold number is not
+    quite the guarantee it looks like. Taters closes one of those doors itself —
+    the penalty is chosen inside each fold, so no held-out row helps pick the
+    model that predicts it — but two are still yours: *which feature set* you
+    report, and *which fold seed*. Both are choices made by looking at the
+    outcome, and re-running until a number improves is the same mistake with
+    extra steps. Preregistering the model closes them all: the instrument is fixed
     before the new sample exists, and what happens next is a test rather than a
     search. If you intend to publish a language-based measure, this is the
     standard to aim at.
