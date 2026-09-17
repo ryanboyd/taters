@@ -456,7 +456,7 @@ def test_the_two_vocabulary_stages_do_not_read_alike_on_screen():
         assert not b.endswith(a) and not a.endswith(b), (a, b)
 
 
-def test_a_per_step_label_names_a_setting_that_step_actually_has():
+def test_a_per_step_label_names_a_setting_that_step_actually_has(recipe):
     """
     `Recipe.labels` renames a setting on the options screen where the shared
     word would describe the wrong thing -- `engine` meaning which topic model
@@ -466,11 +466,20 @@ def test_a_per_step_label_names_a_setting_that_step_actually_has():
     Nothing in the catalog needs an override at the moment (the step that did
     has been folded into the topic models), so this is currently vacuous --
     deliberately so, since it is the guard for the next one.
+
+    Per recipe rather than a loop over all of them, so that a step whose
+    optional dependency is not installed skips itself instead of taking the
+    whole check down with it -- which is exactly what it did on CI, where
+    there is no parselmouth and vocal acoustics cannot even be imported.
     """
-    for recipe in RECIPES:
+    if not recipe.labels:
+        return
+    try:
         spec = describe(load_target(recipe.target))
-        for name in recipe.labels:
-            assert name in spec, f"{recipe.id}: labels[{name!r}] is not a setting"
+    except ImportError as exc:
+        pytest.skip(f"{recipe.id} needs an optional dependency: {exc}")
+    for name in recipe.labels:
+        assert name in spec, f"{recipe.id}: labels[{name!r}] is not a setting"
 
 
 # ---------------------------------------------------------------------------
