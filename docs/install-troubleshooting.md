@@ -22,9 +22,9 @@ pip install git+https://github.com/MahmoudAshraf97/ctc-forced-aligner.git
 The three GitHub packages are not on PyPI, so `pip install taters[diarization]`
 cannot fetch them for you.
 
-??? note "Why the Python limit, and why not to work around it"
+??? note "Why the Python limit, and why not to work around it?"
 
-    Every NeMo release Taters can use requires
+    Every NeMo release TATERS can use requires
     `nv-one-logger-pytorch-lightning-integration`, which is published for
     Python 3.13 and below. On 3.14 there is no version to install.
 
@@ -105,8 +105,8 @@ A CUDA build of PyTorch only carries code for the graphics architectures it
 was compiled for. A card newer than the build — an RTX 50-series (Blackwell,
 `sm_120`) under a `cu126` build, say — is *visible* to PyTorch, is named
 correctly, and then has nothing to run: the first real operation fails, and
-Taters falls back to the CPU. Nothing looks broken. The run is just twenty
-times slower than it should be.
+TATERS falls back to the CPU. Nothing looks broken. The run is just twenty
+times slower.
 
 **Check my setup** catches this now: the "PyTorch can use the GPU" row says
 `sm_120, which this build has no kernels for`, and gives the reinstall

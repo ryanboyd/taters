@@ -440,6 +440,14 @@ def fit_ridge_csv(
         answer "which feature set actually predicts this?", since the
         resulting rows sit side by side in one metrics table -- or an
         explicit ``{name: [columns]}``.
+        Naming the sets yourself also turns **off** the combining that
+        ``set_combos`` describes: you get exactly the sets you named, each
+        fitted on its own, and no "all together" model. Combinations are
+        built only when this is left as ``None``, where the groups come from
+        the sidecar the assemble step writes beside the table
+        (``<name>_sets.json``) -- which is how the app runs it, and why the
+        app gets an ``__all__`` model without asking. The two read alike and
+        do not behave alike, so it is worth saying out loud.
     control_cols
         Columns to fit alongside -- and instead of -- the language, so the
         language's own contribution can be read off. With controls the run

@@ -1,16 +1,16 @@
-# Install Taters
+# Install TATERS
 
 Three steps. If you have ever installed any software in your life, you are
 overqualified.
 
 ## 1. Install Python
 
-Taters needs **Python 3.10 or newer**. If you are choosing today, take
+TATERS needs **Python 3.10 or newer**. If you are choosing today, take
 **3.13**: two things have no Python 3.14 release yet — speaker diarization and
-training word vectors — so on 3.14 everything else installs and works, and
+training word vectors — so on 3.14, everything else installs and works, and
 those two are simply missing. If you already have 3.10–3.13, skip ahead.
 
-* **Windows** — grab the installer from
+* **Windows** — grab the Python installer from
   [python.org/downloads](https://www.python.org/downloads/) and run it.
   **Tick the "Add Python to PATH" box** on the first screen; that is the one
   checkbox that saves you a headache later.
@@ -20,33 +20,34 @@ those two are simply missing. If you already have 3.10–3.13, skip ahead.
 * **Linux** — you almost certainly have it. If not:
   `sudo apt-get install python3 python3-pip`.
 
-## 2. Install Taters
+## 2. Install TATERS
 
 If you already use Python for other things, glance at **"I like keeping my
 Python installs tidy"** in the
-[notes below](#optional-notes-skip-these-unless-they-describe-you) first — a
-virtual environment costs one extra line now and saves you about 10,000
-headaches later. Trust me.
+[notes below](#optional-notes-skip-these-unless-they-describe-you) first. I
+*strongly* recommend that you run TATERS in a virtual environment (a "venv").
+Trust me: a virtual environment takes one command now to get it set up
+and saves you about 10,000 headaches later. Really, just trust me.
 
 But, if you don't want to use a virtual environment... go ahead and open a
-terminal (Windows: search for "PowerShell"; macOS: search for
+terminal (Windows: search for "PowerShell" or "cmd"; macOS: search for
 "Terminal") and type:
 
 ```bash
 pip install taters
 ```
 
-That's it. Pip fetches Taters and everything it needs.
+That's it. Pip fetches TATERS and everything it needs.
 
 ## 3. Run it
 
-In that same terminal, type:
+One installed: in that same terminal, type:
 
 ```bash
 taters
 ```
 
-Voilà — the Taters app opens right there in your terminal and walks you
+Voilà — the TATERS app opens right there in your terminal and walks you
 through everything else: what your data is, what you want out of it, and
 where the results should go. You never have to write a line of code.
 
@@ -74,13 +75,13 @@ where the results should go. You never have to write a line of code.
     going higher —
     [Installation troubleshooting](install-troubleshooting.md) explains why.
 
-    Already installed Taters first? No problem — inside the app, go to
+    Already installed TATERS first? No problem — inside the app, go to
     **Check my setup** and it will tell you exactly what to run to switch
     PyTorch onto your GPU.
 
 ??? note "I'll be working with audio or video files"
 
-    Taters uses **FFmpeg** to read media files — it is the one thing pip
+    TATERS uses **FFmpeg** to read media files — it is the one thing pip
     can't install for you.
 
     * Windows: `winget install Gyan.FFmpeg` (then close and reopen the terminal)
@@ -91,7 +92,7 @@ where the results should go. You never have to write a line of code.
 
 ??? note "I like keeping my Python installs tidy"
 
-    A virtual environment keeps Taters and its dependencies from mingling
+    A virtual environment keeps TATERS and its dependencies from mingling
     with your other Python projects — like keeping the mashed potatoes out
     of the fruit salad:
 
@@ -102,10 +103,13 @@ where the results should go. You never have to write a line of code.
     pip install taters
     ```
 
-    Just remember to `activate` again whenever you open a new terminal.
+    TATERS now lives in your virtual environment named `venv-taters` and is kept
+    isolated from the rest of your Python environment. This helps make sure that
+    TATERS doesn't overwrite anything that might be in use by your other packages.
+    Just remember to `activate` your venv again whenever you open a new terminal.
 
 ---
 
 Something not working? See [installation troubleshooting](install-troubleshooting.md),
-or run `taters` and pick **Check my setup** — it inspects your machine and
+or run `TATERS` and pick **Check my setup** — it inspects your machine and
 tells you, in plain words, what (if anything) needs fixing.
