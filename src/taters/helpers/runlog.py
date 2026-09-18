@@ -184,6 +184,19 @@ def describe_event(name: str, payload: dict) -> str:
     return f"{name}  {payload}"
 
 
+def _prints_above_a_live_display(stream) -> bool:
+    """
+    Whether this stream is rich's stand-in for one it has taken over.
+
+    A live progress display owns a region of the screen, and rich keeps
+    anything printed while it is up from landing inside that region by
+    swapping ``sys.stdout`` for a proxy of its own that prints *above* it.
+    Writing past that proxy -- straight at the terminal -- is what puts a
+    library's chatter through the middle of a progress bar.
+    """
+    return type(stream).__module__.startswith("rich.")
+
+
 def session_fallback_path() -> Path:
     """
     Where a session that never started a run leaves its record.
@@ -638,7 +651,14 @@ class RunLog:
                 terminal = os.fdopen(os.dup(pump.saved), "w", buffering=1,
                                      errors="replace")
                 pinned.append(terminal)
-                tee = _TeeStream(terminal, self, channel)
+                # if a live display has already taken this stream over, we hand
+                # our writes back to it rather than to the raw terminal: it is
+                # the thing that knows how to print above the bars instead of
+                # through them. its own writes go to the console we pinned
+                # above, so they never come back round into the capture.
+                was = saved_stdout if fd == 1 else saved_stderr
+                onward = was if _prints_above_a_live_display(was) else terminal
+                tee = _TeeStream(onward, self, channel)
                 if fd == 1:
                     sys.stdout = tee
                     if console is not None:

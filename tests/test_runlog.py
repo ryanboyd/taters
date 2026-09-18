@@ -494,3 +494,43 @@ def test_nothing_is_recorded_when_no_log_is_running():
     assert prompter._replaying is False
     prompter._log_ui("goes nowhere")                          # must not raise
     assert prompter._log_answer("ask", "q", "a") == "a"        # still returns
+
+
+def test_output_goes_through_a_live_display_rather_than_across_it(tmp_path):
+    """
+    A regression, and a visible one: the progress bars came apart.
+
+    While a live display is up, rich swaps ``sys.stdout`` for a proxy of its
+    own that prints above the region the bars occupy. Capturing output by
+    replacing that proxy, and writing to the terminal directly, put every
+    library's chatter through the middle of a bar -- half a message, then the
+    rest of the rule, then a redrawn bar at a different width.
+
+    So while something else owns the screen, captured output is handed back to
+    it rather than written past it. The log gets the line either way; this is
+    about what the person watching sees.
+    """
+    from rich.console import Console
+    from rich.progress import BarColumn, Progress, TextColumn
+
+    console = Console(force_terminal=True, width=60)
+    progress = Progress(TextColumn("{task.description}"), BarColumn(),
+                        console=console)
+    log = RunLog(console=console)
+    path = log.open_run(tmp_path / "work")
+
+    progress.start()
+    try:
+        proxy = sys.stdout
+        assert type(proxy).__module__.startswith("rich."), \
+            "rich no longer proxies stdout for a live display; premise is gone"
+        with log.capture_streams():
+            print("a library said something")
+            assert sys.stdout._terminal is proxy, (
+                "captured output is being written past the live display "
+                "instead of through it -- this is what breaks the bars")
+    finally:
+        progress.stop()
+        log.close_run()
+
+    assert "a library said something" in path.read_text(encoding="utf-8")
