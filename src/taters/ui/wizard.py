@@ -3500,6 +3500,7 @@ def execute_preset(prompter: Prompter, preset: dict, *, root_dir, file_type,
     -------
     (ok, manifest)
     """
+    from ..helpers import runlog
     from ..pipelines.run_pipeline import run_preset, summarize_manifest
     from .run_display import RunDisplay, reporter_for
 
@@ -3520,6 +3521,19 @@ def execute_preset(prompter: Prompter, preset: dict, *, root_dir, file_type,
         kwargs["vars_ctx"] = vars_ctx
 
     console = getattr(prompter, "_console", None)
+    # the console is handed to the log so that it can be pinned to the real
+    # terminal while the run's output is being captured. without that the live
+    # display would be writing into the log instead of onto the screen: a bare
+    # rich Console resolves `sys.stdout` at write time, and during a run that
+    # is the tee.
+    # the session's log if there is one, so that the menus and the run land in
+    # the same file. the console goes with it: it has to be pinned to the real
+    # terminal while output is being captured, or the live display would draw
+    # into the log instead of onto the screen.
+    log = getattr(prompter, "_runlog", None) or runlog.RunLog()
+    log._console = console
+    kwargs["run_log"] = log
+
     display = RunDisplay(console) if console is not None else None
     if display is not None:
         with display:
@@ -3535,7 +3549,8 @@ def execute_preset(prompter: Prompter, preset: dict, *, root_dir, file_type,
     prompter.stage("run", "Run", status="done",
                    detail="ok" if ok else "with problems")
     finish_screen(prompter, ok=ok, manifest=manifest, folder=work_dir,
-                  manifest_path=manifest_path, failures=failures)
+                  manifest_path=manifest_path, failures=failures,
+                  log_path=Path(manifest["log"]) if manifest.get("log") else None)
     return ok, manifest
 
 
@@ -3555,7 +3570,8 @@ def _shortened(message: object, limit: int = _ERROR_CHARS) -> str:
 
 def finish_screen(prompter: Prompter, *, ok: bool, manifest: dict,
                   folder: Optional[Path], manifest_path: Path,
-                  failures: Sequence[str] = ()) -> None:
+                  failures: Sequence[str] = (),
+                  log_path: Optional[Path] = None) -> None:
     """
     Report the outcome and ask what to do next.
 
@@ -3609,6 +3625,15 @@ def finish_screen(prompter: Prompter, *, ok: bool, manifest: dict,
         for line in outputs:
             prompter.note(f"      {line}", style="dim")
     prompter.note(f"\n  Full details: {manifest_path}", style="dim", wrap=False)
+    if log_path is not None:
+        # loud on a bad run, quiet on a good one. on a run that failed this is
+        # the file that answers "but why?", and it is no help at all if the
+        # person has to already know it exists.
+        if ok:
+            prompter.note(f"  Full log:     {log_path}", style="dim", wrap=False)
+        else:
+            prompter.note(f"  Everything this run printed, and the full error:"
+                          f"\n    {log_path}", style="yellow", wrap=False)
 
     # the verdict rides on the question itself. the red lines above can
     # scroll past or sit above a busy folder listing; the question is the one
@@ -4455,7 +4480,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(str(e), file=sys.stderr)
         return 2
 
+    from ..helpers import runlog
     from .hub import run_hub
+
+    # the log rides on the prompter because that is the one object every
+    # screen already holds. lines said in the menus are kept in memory until a
+    # run gives them somewhere to go -- an answer three screens back is as
+    # much a part of why a run failed as anything the run itself printed.
+    session_log = runlog.RunLog()
+    try:
+        prompter._runlog = session_log
+    except AttributeError:
+        # a stand-in prompter that cannot carry the attribute. the run still
+        # gets its own log; it just will not have the menu lines ahead of it.
+        pass
 
     try:
         ok = run_hub(prompter, cwd=Path(args.dir) if args.dir else None)
@@ -4465,7 +4503,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except KeyboardInterrupt:
         print("\nCancelled. Nothing was changed.")
         return 130
+    except BaseException:
+        # a crash in the menus never reached a run, so nothing has been
+        # written yet and the answers that led here are still only in memory.
+        _save_session_log(session_log)
+        raise
+    finally:
+        session_log.close_run()
     return 0 if ok else 1
+
+
+def _save_session_log(session_log) -> None:
+    """
+    Put a session that never ran anything somewhere readable.
+
+    Only for that case: once a run has opened its own file the answers are
+    already in it, and writing a second copy under the home folder would just
+    be litter.
+    """
+    from ..helpers import runlog
+
+    if session_log.ever_opened:
+        return
+    written = session_log.write_buffer_to(runlog.session_fallback_path())
+    if written is not None:
+        print(f"\nA log of this session is at {written}")
 
 
 if __name__ == "__main__":

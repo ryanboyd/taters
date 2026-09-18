@@ -208,7 +208,7 @@ put in scripts and schedulers.
 
 ---
 
-## The manifest: a log of what actually ran
+## The manifest: a record of what actually ran
 
 Every run writes a **manifest** — a JSON file, `./run_manifest.json` unless
 you pass `--out-manifest` — recording every input, every setting, what
@@ -226,6 +226,51 @@ wrong and for which file, which saves rerunning anything to find out.
 
 ---
 
+## The log: everything the run printed
+
+Beside the manifest, every run also writes a **log** —
+`logs/run-20260918-061402.log` in the same folder — and where the manifest is
+the structured summary, this is the verbatim one. It holds:
+
+* the environment the run happened in: the Taters version, the Python, and
+  the installed versions of the heavy dependencies. `torch 2.14.0+cpu` and
+  `torch 2.11.0+cu128` behave very differently, and one line here settles
+  which you had;
+* what you were asked in the app and what you answered;
+* every step as it starts and finishes;
+* **everything the run printed** — each step's own output, whatever the
+  libraries underneath it had to say, and the output of any child process it
+  started;
+* and for anything that failed, the **full traceback, including the chain of
+  causes**.
+
+That last point is the reason this file exists. When a library cannot import
+something, the error it reports is often its own vague wrapper — "could not
+import module 'RobertaModel'" — while the exception underneath, the one naming
+the module that was actually missing, sits one level down. The manifest keeps
+the short reason because that is what fits on a screen. The log keeps the
+whole chain.
+
+Each run gets its own timestamped file and old ones are kept, so the run that
+failed and the run that was meant to fix it can be read side by side.
+
+```
+my-pipeline/
+├── my-pipeline.yaml
+├── run_manifest.json          what ran, what it produced, what failed
+├── logs/
+│   ├── run-20260918-061402.log    <- the run that failed
+│   └── run-20260918-091133.log    <- the run that worked
+├── features/
+└── gathered/
+```
+
+Pass `--no-log` to turn it off for one run, or set `TATERS_RUNLOG=0` to turn
+it off for all of them. Writing the log can never fail a run: if the folder
+is not writable the run carries on without one.
+
+---
+
 ## Good habits
 
 * **Start from the app.** Let `taters` write the file, then open it. It is
@@ -239,7 +284,8 @@ wrong and for which file, which saves rerunning anything to find out.
 * **Copy before you experiment.** The two shipped pipelines are read-only on
   purpose; copy one and edit the copy, so there is always a working version
   to go back to.
-* **Read the manifest before debugging anything else.**
+* **Read the manifest before debugging anything else** — and when it says
+  something failed but not enough about why, read the log next.
 
 ---
 

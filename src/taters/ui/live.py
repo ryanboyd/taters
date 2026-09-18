@@ -357,7 +357,21 @@ class LivePrompter(QuestionaryPrompter):
         return max(_NOTES_FLOOR, rows - spoken_for)
 
     def _paint(self) -> None:
-        """Wipe and redraw everything above the question."""
+        """
+        Wipe and redraw everything above the question.
+
+        Everything replayed below already went through `note`/`table` once,
+        when it was first said. The flag stops the log from recording it again
+        on every redraw -- which would have grown the file with the square of
+        the number of screens and looked perfectly fine on the terminal.
+        """
+        self._replaying = True
+        try:
+            self._paint_body()
+        finally:
+            self._replaying = False
+
+    def _paint_body(self) -> None:
         self._console.clear()
         self._blank_last = True
         self._rows_painted = 0
@@ -767,8 +781,11 @@ class LivePrompter(QuestionaryPrompter):
         # rows, and claiming them would trim notes for nothing.
         self._reserve_rows = min(_LIST_FLOOR, len(shown))
         try:
-            return self._ask(question_obj, hint, transient=transient,
-                             breadcrumb=breadcrumb)
+            answer = self._ask(question_obj, hint, transient=transient,
+                               breadcrumb=breadcrumb)
+            if enter_gate is not None:
+                return answer
+            return self._log_answer("ask", question, answer)
         finally:
             self._reserve_rows = 0
 
@@ -1066,7 +1083,8 @@ class LivePrompter(QuestionaryPrompter):
                                        " · [esc] back",
                                        " · [←→] change type · [esc] back")),
                     cycle=cycle)
-        return [v for v in order if v in ticked]
+        return self._log_answer("tick", question,
+                                [v for v in order if v in ticked])
 
     @staticmethod
     def _pin_top_rows(application, count: int) -> None:

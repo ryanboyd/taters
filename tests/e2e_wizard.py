@@ -107,6 +107,7 @@ class Harness:
     # -------------------------------------------------------------- a flow
     def flow(self, name, answers, **kw):
         """Answer the wizard, run what it composed, report."""
+        from taters.helpers.runlog import RunLog
         from taters.pipelines.run_pipeline import run_preset
         from taters.ui import wizard as wiz
         from taters.ui.prompts import ScriptedPrompter
@@ -125,10 +126,12 @@ class Harness:
         # a media pipeline has per-file steps, so it needs to know which folder
         # they fan out over; the wizard's result carries that, same as the app's
         # own runner does.
+        run_log = RunLog()
+        p._runlog = run_log
         man = run_preset(preset, workers=2, work_dir=folder,
                          root_dir=res.root_dir, file_type=res.file_type,
                          out_manifest=folder / "run_manifest.json",
-                         verbose=False)
+                         verbose=False, run_log=run_log)
         errs = man.get("errors") or []
         if errs:
             self.bad(name, f"{len(preset['steps'])} steps -> {folder.name}")
@@ -136,6 +139,20 @@ class Harness:
                 print("    ", e)
         else:
             self.ok(name, f"{len(preset['steps'])} steps -> {folder.name}")
+        # the run log is the file someone reads when a flow above went red,
+        # so a flow that produced no log has lost the thing that explains it.
+        logged = man.get("log")
+        if not logged or not Path(logged).is_file():
+            self.bad(name, "the run wrote no log")
+        else:
+            body = Path(logged).read_text(encoding="utf-8")
+            named = sum(1 for st in preset["steps"] if str(st.get("call")) in body)
+            print(f"     log: {Path(logged).name}"
+                  f" ({len(body.splitlines())} lines,"
+                  f" {named}/{len(preset['steps'])} steps named)")
+            if errs and "trace" not in body:
+                self.bad(name, "the run failed but its log holds no traceback")
+
         rep = folder / "stats_results" / "report.md"
         if rep.exists():
             heads = [ln for ln in rep.read_text(encoding="utf-8").splitlines()

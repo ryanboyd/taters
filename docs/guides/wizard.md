@@ -258,7 +258,8 @@ readability_test/
 ├── stats_descriptives/       descriptive statistics of every feature table
 ├── stats_results/            the statistics, when you asked for them
 │   └── figures/wordclouds/   word clouds of every result, shown in report.md
-└── run_manifest.json         what ran, what it produced, what failed
+├── run_manifest.json         what ran, what it produced, what failed
+└── logs/                     everything each run printed, one file per run
 ```
 
 One folder per pipeline means three different runs do not overwrite each
@@ -282,6 +283,12 @@ When it finishes you get a summary saying what succeeded, what failed, where the
 results are, and the option to do something else or stop. An interrupted run
 leaves no half-written result files behind, so re-running redoes the work
 properly rather than resuming from a truncated file.
+
+If something did fail, the summary points at a log file in `logs/`. That file
+has everything the run printed, the versions it ran against, and the full
+error behind the one-line summary on screen — which is usually the difference
+between "a step failed" and knowing why. See
+[the log](pipelines.md#the-log-everything-the-run-printed) for what is in it.
 
 ## Settings and tools
 

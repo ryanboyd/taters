@@ -39,6 +39,7 @@ import yaml
 
 # cheap import: the facade only pulls in the heavy stuff when a method gets called.
 from taters import Taters
+from ..helpers import runlog
 from ..helpers.gpu import worker_cap
 
 _BUILTIN_PRESETS_DIR = Path(__file__).parent / "presets"
@@ -788,9 +789,11 @@ def run_item_step_for_one_input(
     except KeyError as e:
         # common case: a previous step failed for this item, so the artifact's missing
         msg = f"Templating failed (likely missing artifact): {e}"
-        return ("error", {}, {"error": f"{call} failed: {msg}"})
+        return ("error", {}, {"error": f"{call} failed: {msg}",
+                              "trace": runlog.exception_text(e)})
     except Exception as e:
-        return ("error", {}, {"error": f"{call} failed during templating: {e}"})
+        return ("error", {}, {"error": f"{call} failed during templating: {e}",
+                              "trace": runlog.exception_text(e)})
 
 
     # required keys check (post-templating)
@@ -810,7 +813,8 @@ def run_item_step_for_one_input(
         # the exception's *type* is part of the message: a bare KeyError
         # renders as just its key ("'1467-'"), which told a user nothing about
         # what happened, let alone where.
-        return ("error", {}, {"error": f"{call} failed: {type(e).__name__}: {e}"})
+        return ("error", {}, {"error": f"{call} failed: {type(e).__name__}: {e}",
+                              "trace": runlog.exception_text(e)})
 
     out: Dict[str, Any] = {}
     if "save_as" in step:
@@ -1092,9 +1096,11 @@ def run_global_step(
         )
     except KeyError as e:
         msg = f"Templating failed (likely missing global artifact): {e}"
-        return ("error", {}, {"error": f"{call} failed: {msg}"})
+        return ("error", {}, {"error": f"{call} failed: {msg}",
+                              "trace": runlog.exception_text(e)})
     except Exception as e:
-        return ("error", {}, {"error": f"{call} failed during templating: {e}"})
+        return ("error", {}, {"error": f"{call} failed during templating: {e}",
+                              "trace": runlog.exception_text(e)})
 
 
     func = resolve_call(call, potato)
@@ -1103,7 +1109,8 @@ def run_global_step(
         try:
             rendered = _materialize_assets(func, rendered, step["assets"])
         except Exception as e:
-            return ("error", {}, {"error": f"{call} failed: {type(e).__name__}: {e}"})
+            return ("error", {}, {"error": f"{call} failed: {type(e).__name__}: {e}",
+                                  "trace": runlog.exception_text(e)})
 
     # a GLOBAL step is a single call, so from out here we can't count its
     # progress: it's either not started or finished. functions that *can*
@@ -1119,7 +1126,8 @@ def run_global_step(
         # the exception's *type* is part of the message: a bare KeyError
         # renders as just its key ("'1467-'"), which told a user nothing about
         # what happened, let alone where.
-        return ("error", {}, {"error": f"{call} failed: {type(e).__name__}: {e}"})
+        return ("error", {}, {"error": f"{call} failed: {type(e).__name__}: {e}",
+                              "trace": runlog.exception_text(e)})
 
     out: Dict[str, Any] = {}
     if "save_as" in step:
@@ -1177,6 +1185,7 @@ def run_preset(
     verbose: bool = True,
     work_dir: Optional[Path] = None,
     command: Optional[str] = None,
+    run_log: Optional[runlog.RunLog] = None,
 ) -> Dict[str, Any]:
     """
     Run a loaded preset and return its manifest.
@@ -1246,14 +1255,37 @@ def run_preset(
         if root_dir is not None:
             root_dir = Path(root_dir).resolve()
         previous_cwd = Path.cwd()
+
+    # a log nobody asked for is a no-op object rather than a branch at every
+    # call site below.
+    log = run_log if run_log is not None else runlog.RunLog(enabled=False)
+
+    # opened before the chdir, for exactly the reason the paths above are
+    # resolved before it: a relative path means relative to where the caller
+    # stood, and moving first would re-anchor it under work_dir.
+    if log.active and log.path is None:
+        if work_dir is not None:
+            base = Path(work_dir)
+        elif out_manifest is not None:
+            base = Path(out_manifest).parent
+        else:
+            base = Path.cwd()
+        log.open_run(base, preset=preset_name, workers=workers, command=command)
+
+    if previous_cwd is not None:
         os.chdir(work_dir)
     try:
-        return _run_preset(
-            preset, root_dir=root_dir, file_type=file_type, vars_ctx=vars_ctx,
-            workers=workers, out_manifest=out_manifest, preset_name=preset_name,
-            on_event=on_event, verbose=verbose, command=command,
-        )
+        # the capture wraps the whole body rather than just the step loop:
+        # input discovery prints too, and a step that cannot find its files is
+        # a failure worth having the reason for.
+        with log.capture_streams():
+            return _run_preset(
+                preset, root_dir=root_dir, file_type=file_type, vars_ctx=vars_ctx,
+                workers=workers, out_manifest=out_manifest, preset_name=preset_name,
+                on_event=on_event, verbose=verbose, command=command, run_log=log,
+            )
     finally:
+        log.close_run()
         if previous_cwd is not None:
             os.chdir(previous_cwd)
 
@@ -1270,9 +1302,18 @@ def _run_preset(
     on_event: Optional[Callable[..., None]] = None,
     verbose: bool = True,
     command: Optional[str] = None,
+    run_log: Optional[runlog.RunLog] = None,
 ) -> Dict[str, Any]:
     """The body of :func:`run_preset`, with the working directory already set."""
+    log = run_log if run_log is not None else runlog.RunLog(enabled=False)
+
     def emit(name: str, **payload) -> None:
+        # the log goes first, and outside the `on_event is None` return: a
+        # command-line run supplies no observer at all, and that is precisely
+        # the run we most want a record of. `on_event` keeps its exact None
+        # semantics, because a few lines down that is what decides whether an
+        # item step pays for counting its own progress.
+        log.event(name, payload)
         if on_event is None:
             return
         try:
@@ -1328,6 +1369,9 @@ def _run_preset(
         "items": [{"input": str(p), "artifacts": {}, "status": "pending", "errors": []} for p in inputs],
         "globals": {},
         "errors": [],
+        # where the verbatim record of this run went, so that the structured
+        # file and the wordy one can each be found from the other.
+        "log": str(log.path) if log.path else None,
     }
     out_manifest_path = Path(out_manifest or (Path.cwd() / "run_manifest.json"))
 
@@ -1435,6 +1479,11 @@ def _run_preset(
                     except Exception as e:
                         itm["status"] = "error"
                         itm["errors"].append(f"Worker crashed in step '{call_name}': {e}")
+                        # under the process engine the child's own traceback
+                        # arrives as this exception's __cause__, so this is the
+                        # only place it can be read at all.
+                        log.line("run", f"FAIL   worker in step {idx} {call_name}: {e}")
+                        log.block("trace", runlog.exception_text(e))
                         _persist_manifest()
                         emit("item_done", index=idx, item=i, input=str(inputs[i]),
                              status="error", error=str(e))
@@ -1448,6 +1497,8 @@ def _run_preset(
                     else:
                         itm["status"] = "error"
                         itm["errors"].append(err.get("error", "unknown error"))
+                        if err.get("trace"):
+                            log.block("trace", err["trace"])
                         # written the moment a file fails, rather than waiting
                         # for the step to end. if the rest of the step then
                         # stalls -- and a step where one file has already failed
@@ -1492,6 +1543,8 @@ def _run_preset(
             if status != "ok":
                 say(f"[pipeline] GLOBAL step failed: {err.get('error')}")
                 manifest["errors"].append(err.get("error", "unknown error"))
+                if err.get("trace"):
+                    log.block("trace", err["trace"])
                 # persist before bailing out: a failed run is exactly when the
                 # manifest is worth reading.
                 _persist_manifest()
@@ -1625,6 +1678,11 @@ def main():
                     help="Suppress the step-by-step chatter, including each step's "
                          "own output (transcription prints a line per segment). The "
                          "final summary and the exit code are unaffected")
+    ap.add_argument("--no-log", dest="write_log", action="store_false", default=True,
+                    help="Do not write a run log. By default every run leaves one in "
+                         "logs/ beside the manifest, holding everything the run "
+                         "printed and the full traceback for anything that failed. "
+                         "TATERS_RUNLOG=0 does the same thing for every run")
 
     # discovery / docs helpers
     ap.add_argument("--list-presets", action="store_true",
@@ -1666,6 +1724,9 @@ def main():
     if not args.root_dir and any(st.get("scope", "item") == "item" for st in steps):
         raise ValueError("--root_dir is required because this preset contains ITEM-scoped steps.")
 
+    # the command line is reconstructed rather than passed through: it is what
+    # the log header and the manifest both record as "how this was run".
+    log = runlog.RunLog(enabled=args.write_log)
     manifest = run_preset(
         preset,
         root_dir=args.root_dir,
@@ -1675,7 +1736,14 @@ def main():
         out_manifest=args.out_manifest,
         preset_name=args.preset or str(args.preset_file),
         verbose=args.verbose,
+        command=" ".join([Path(sys.argv[0]).name] + sys.argv[1:]),
+        run_log=log,
     )
+
+    # named unconditionally, like the summary below it: the run that needs this
+    # file is the run whose output already scrolled past.
+    if manifest.get("log"):
+        print(f"[pipeline] Full log: {manifest['log']}")
 
     # not gated on --quiet, on purpose. this is the outcome, not the chatter:
     # a quiet run still has to say whether it worked, and which files didn't.

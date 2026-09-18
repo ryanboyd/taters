@@ -309,6 +309,40 @@ class QuestionaryPrompter:
     #: estimated so a list can be sized against the real chrome above it.
     _rows_painted: int = 0
 
+    #: The session log, when one is running. Class-level for the same reason
+    #: as the flags above: tests build renderers that never run ``__init__``,
+    #: and a missing attribute here would take `note` down with it.
+    _runlog = None
+
+    #: True while the live renderer is redrawing remembered notes. Recording
+    #: during a redraw would log every note again on every repaint -- growing
+    #: the file quadratically with nothing on screen looking wrong.
+    _replaying: bool = False
+
+    def _log_ui(self, text: str) -> None:
+        """Record one line of what the screen said, if anyone is listening."""
+        log = self._runlog
+        if log is None or self._replaying:
+            return
+        cleaned = str(text).strip()
+        if cleaned:
+            log.line("ui", cleaned)
+
+    def _log_answer(self, kind: str, question: str, answer):
+        """Record a question and what was chosen, and return the answer.
+
+        Written to *return* its argument so that adding it to a call site is
+        the return statement rather than an extra line next to one, which is
+        the version somebody deletes by accident.
+        """
+        log = self._runlog
+        if log is not None and not self._replaying:
+            asked = " ".join(str(question).split())
+            shown = ", ".join(str(a) for a in answer) \
+                if isinstance(answer, list) else str(answer)
+            log.line("ui", f"{kind:<4} {asked} -> {shown}")
+        return answer
+
     def __init__(self) -> None:
         try:
             import questionary
@@ -418,6 +452,10 @@ class QuestionaryPrompter:
         Every line of a block now starts in the same column, which is what lets
         the eye see where one block stops and the next begins.
         """
+        # recorded before wrapping, and once: the log wants the line the
+        # caller wrote, not the fragments this screen happened to fold it into.
+        self._log_ui(text)
+
         # `wrap=False` is for lines that have to survive copy-paste intact -- a
         # command with a long path in it, say. better to let those run off the
         # edge than fold them in half, so we print them exactly as given.
@@ -466,6 +504,9 @@ class QuestionaryPrompter:
         self._rows_painted += len(self._console.render_lines(table, pad=False))
         self._console.print(table)
         self._blank_last = False
+        self._log_ui(title)
+        for row in rows:
+            self._log_ui("  " + " | ".join(str(c) for c in row))
 
     def stage(self, key: str, label: str, *, status: str = "active",
               detail: str = "") -> None:
@@ -497,16 +538,19 @@ class QuestionaryPrompter:
         # the "› " sits exactly where typing will land. without it a typed
         # answer had no visual target at all -- this bit us on the delete
         # screen, where the question ends in a colon and then... nothing.
-        return self._ask(self._q.text(question, default=default,
-                                      style=self._style, instruction="› "))
+        return self._log_answer("ask", question, self._ask(
+            self._q.text(question, default=default,
+                         style=self._style, instruction="› ")))
 
     def path(self, question: str, *, default: str = "") -> str:
         # questionary's path prompt gives us filesystem tab-completion, which
         # is the single biggest quality-of-life win in the whole wizard.
-        return self._ask(self._q.path(question, default=default, style=self._style))
+        return self._log_answer("ask", question, self._ask(
+            self._q.path(question, default=default, style=self._style)))
 
     def confirm(self, question: str, *, default: bool = True) -> bool:
-        return self._ask(self._q.confirm(question, default=default, style=self._style))
+        return self._log_answer("ask", question, self._ask(
+            self._q.confirm(question, default=default, style=self._style)))
 
     def pause(self, message: str = PAUSE_MESSAGE) -> None:
         """
@@ -561,7 +605,7 @@ class QuestionaryPrompter:
                 show_description=True,
             ))
             if ticked is None or picked not in toggles:
-                return picked
+                return self._log_answer("ask", question, picked)
             # no space binding here, so enter on a tickable row flips it and we
             # re-ask the list with the pointer left on that row. before this,
             # the ticks were silently ignored: under --plain a step could use
@@ -579,14 +623,14 @@ class QuestionaryPrompter:
         # plain spaces rather than the live renderer's glyph: this is the
         # no-frills fallback, and stock questionary draws its own boxes, so
         # the indent is the only thing saying which rows sit under a heading.
-        return self._ask(self._q.checkbox(
+        return self._log_answer("tick", question, self._ask(self._q.checkbox(
             question,
             choices=[self._to_q(replace(c, label=f"{'    ' * c.depth}{c.label}")
                                 if c.depth else c)
                      for c in choices],
             style=self._style,
             show_description=True,
-        ))
+        )))
 
     def _to_q(self, choice: Choice):
         """
