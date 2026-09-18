@@ -1949,24 +1949,43 @@ def test_enter_on_an_item_glides_to_done_and_enter_there_confirms():
     choices = [Choice(f"v{i}", f"Item {i}") for i in range(1, 41)]
     buf = io.StringIO()
     out = Vt100_Output(buf, lambda: Size(rows=30, columns=90), term="xterm-256color")
+    # the confirming enter has to arrive *after* the glide has parked the
+    # pointer on Done, and how long a quarter of a second takes in wall-clock
+    # terms is up to the machine: on a loaded shared runner it stretches past
+    # any single delay we could pick here, and an enter that lands mid-glide
+    # re-aims the glide instead of confirming -- so the prompt sat there until
+    # the bail Esc turned it into a `GoBack`. So we keep offering it, spaced
+    # wider than the glide, and the first one to find the pointer parked
+    # confirms.
+    FIRST_CONFIRM = 0.8
+    offers = [FIRST_CONFIRM + 0.8 * i for i in range(5)]
+
     started = time.monotonic()
     with create_pipe_input() as pipe:
         with create_app_session(input=pipe, output=out):
-            # down four rows, tick, enter on the item (a glide, not an
-            # answer); then, once the glide is over, enter on Done.
+            # down four rows, tick, enter on the item (a glide, not an answer)
             pipe.send_text("\x1b[B\x1b[B\x1b[B\x1b[B \r")
-            threading.Timer(0.8, pipe.send_text, ["\r"]).start()
-            # if the glide didn't happen, enter on the item does nothing and
+            confirms = [threading.Timer(d, pipe.send_text, ["\r"])
+                        for d in offers]
+            for timer in confirms:
+                timer.start()
+            # if the glide never happened, enter on the item does nothing and
             # the screen would sit there forever: Esc ends it as a failure.
-            bail = threading.Timer(6.0, pipe.send_text, ["\x1b"])
+            bail = threading.Timer(offers[-1] + 3.0, pipe.send_text, ["\x1b"])
             bail.start()
             try:
                 answer = prompter.checkbox("Pick items:", choices)
             finally:
                 bail.cancel()
+                for timer in confirms:
+                    timer.cancel()
     elapsed = time.monotonic() - started
     assert answer == ["v4"]
-    assert elapsed >= 0.25, "the glide should have taken a quarter second"
+    # nothing could have confirmed before the first offer, so an earlier exit
+    # would mean enter on an *item* answered the question rather than gliding.
+    assert elapsed >= FIRST_CONFIRM, (
+        "the prompt exited before any confirming enter was sent, so enter on "
+        "an item answered instead of gliding to Done")
     drawn = ANSI.sub("", buf.getvalue())
     assert "Done" in drawn
 
