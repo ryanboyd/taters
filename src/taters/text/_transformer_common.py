@@ -20,8 +20,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
-__all__ = ["CURATED_ENCODERS", "LAYER_CHOICES", "POOLINGS", "PRECISIONS",
-           "ENCODER_MODEL_TYPES", "cached_hub_encoders",
+__all__ = ["CURATED_ENCODERS", "CURATED_SENTENCE_MODELS", "LAYER_CHOICES",
+           "POOLINGS", "PRECISIONS", "ENCODER_MODEL_TYPES",
+           "cached_hub_encoders", "cached_hub_sentence_models",
            "ResolvedEncoder", "torch_missing_reason", "resolve_encoder",
            "load_encoder", "parse_layers", "pool_hidden", "encode_sentences",
            "run_with_oom_fallback", "autocast_for", "freeze_below",
@@ -54,6 +55,29 @@ CURATED_ENCODERS: Tuple[Tuple[str, str], ...] = (
     ("microsoft/deberta-v3-base",
      "184M parameters, 12 layers. The strongest base-size encoder, and the "
      "slowest here."),
+)
+
+#: Meaning-tuned models offered by name -- sentence-transformers checkpoints,
+#: trained so that texts meaning the same get similar vectors. A different
+#: list from the raw encoders above on purpose: the two pickers used to look
+#: identical, and a person choosing a model for the meaning-tuned step should
+#: not be shown distilroberta as the first row. all-roberta-large-v1 leads
+#: because it is the step's long-standing default; mpnet is the better trade
+#: for most people; the MiniLMs are for a laptop.
+CURATED_SENTENCE_MODELS: Tuple[Tuple[str, str], ...] = (
+    ("sentence-transformers/all-roberta-large-v1",
+     "355M parameters, 1024-wide vectors. The default: the strongest here, "
+     "and the slowest."),
+    ("sentence-transformers/all-mpnet-base-v2",
+     "110M parameters, 768-wide vectors. The usual recommendation: nearly "
+     "as strong, about three times faster."),
+    ("sentence-transformers/all-MiniLM-L12-v2",
+     "33M parameters, 384-wide vectors. Fast; fine on a CPU."),
+    ("sentence-transformers/all-MiniLM-L6-v2",
+     "22M parameters, 384-wide vectors. The smallest and fastest."),
+    ("sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
+     "278M parameters, 768-wide vectors. For text in fifty-odd languages, "
+     "or several at once."),
 )
 
 #: The `model_type` values of encoders -- models this module can read
@@ -118,6 +142,42 @@ def cached_hub_encoders(cache_dir: Optional[PathLike] = None) -> List[Tuple[str,
         width = cfg.get("hidden_size") or cfg.get("dim")
         bits = [b for b in (f"{layers} layers" if layers else "",
                             f"{width} wide" if width else "") if b]
+        out.append((hub_id, "downloaded" + (f" · {' · '.join(bits)}" if bits else "")))
+    return out
+
+
+#: The file a sentence-transformers checkpoint carries and a raw encoder does
+#: not. Reading it, rather than trusting the ``sentence-transformers/`` prefix
+#: of the hub id, is what lets a meaning-tuned model from any organization --
+#: or a folder someone saved themselves -- be recognized for what it is.
+SENTENCE_MODEL_MARKER = "config_sentence_transformers.json"
+
+
+def cached_hub_sentence_models(cache_dir: Optional[PathLike] = None) -> List[Tuple[str, str]]:
+    """
+    The meaning-tuned models already downloaded to this machine: ``(hub id, note)``.
+
+    The sibling of :func:`cached_hub_encoders`, reading the same cache the
+    same offline way, but keeping only checkpoints that carry
+    :data:`SENTENCE_MODEL_MARKER` -- the file sentence-transformers writes
+    beside its weights. A raw encoder in the same cache is left out, because
+    the step this feeds promises a model trained for meaning, and offering a
+    row that quietly is not one would break that promise.
+    """
+    if cache_dir is None:
+        from ..helpers.settings import model_cache_dir
+
+        cache_dir = model_cache_dir()
+    root = Path(cache_dir)
+    out: List[Tuple[str, str]] = []
+    for hub_id, cfg in cached_hub_configs(root):
+        folder = root / f"models--{hub_id.replace('/', '--')}"
+        if not any(folder.glob(f"snapshots/*/{SENTENCE_MODEL_MARKER}")):
+            continue
+        layers = cfg.get("num_hidden_layers") or cfg.get("n_layers")
+        width = cfg.get("hidden_size") or cfg.get("dim")
+        bits = [b for b in (f"{layers} layers" if layers else "",
+                            f"{width}-wide vectors" if width else "") if b]
         out.append((hub_id, "downloaded" + (f" · {' · '.join(bits)}" if bits else "")))
     return out
 

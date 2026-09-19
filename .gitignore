@@ -201,7 +201,7 @@ src/taters/data/library/dictionaries/*.dicx
 
 # Output of trying the wizard from the repo root (the pipeline folder it
 # writes, and the runner manifest); neither is source.
-my_pipeline/
+my_pipeline*/
 run_manifest.json
 
 # mkdocs build output

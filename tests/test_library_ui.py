@@ -1338,3 +1338,87 @@ def test_the_encoder_picker_offers_the_library_the_cache_and_the_usual_names(tmp
     again = ScriptedPrompter(["distilroberta-base"])
     pick_encoder(again, current="distilroberta-base")
     assert again.select_defaults["Which encoder?"] == "distilroberta-base", "the current one is pointed at"
+
+
+def test_the_hub_cache_tells_meaning_tuned_models_by_their_marker_file(tmp_path):
+    """
+    A sentence-transformers checkpoint carries `config_sentence_transformers.json`
+    beside its weights; a raw encoder does not. Reading that, rather than
+    the ``sentence-transformers/`` prefix, is what lets a meaning-tuned model
+    from any organization -- or a folder someone saved themselves -- count.
+    And a raw encoder must not sneak in: the step this feeds promises a model
+    trained for meaning.
+    """
+    import json
+
+    from taters.text._transformer_common import (SENTENCE_MODEL_MARKER,
+                                                 cached_hub_sentence_models)
+
+    def _cached(name, cfg, *, tuned):
+        snap = tmp_path / f"models--{name}" / "snapshots" / "abc"
+        snap.mkdir(parents=True)
+        (snap / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
+        if tuned:
+            (snap / SENTENCE_MODEL_MARKER).write_text("{}", encoding="utf-8")
+
+    _cached("distilroberta-base", {"model_type": "roberta", "num_hidden_layers": 6,
+                                   "hidden_size": 768}, tuned=False)
+    _cached("sentence-transformers--all-MiniLM-L6-v2",
+            {"model_type": "bert", "num_hidden_layers": 6, "hidden_size": 384},
+            tuned=True)
+    # not under the sentence-transformers org, and still meaning-tuned
+    _cached("someone--their-own-model",
+            {"model_type": "roberta", "num_hidden_layers": 12, "hidden_size": 768},
+            tuned=True)
+
+    found = cached_hub_sentence_models(tmp_path)
+    assert found == [
+        ("sentence-transformers/all-MiniLM-L6-v2", "downloaded · 6 layers · 384-wide vectors"),
+        ("someone/their-own-model", "downloaded · 12 layers · 768-wide vectors"),
+    ]
+    assert "distilroberta-base" not in dict(found), "a raw encoder was offered as meaning-tuned"
+
+
+def test_the_meaning_tuned_picker_is_its_own_menu_not_the_encoder_one_again(tmp_path, monkeypatch):
+    """
+    Both embedding steps ask for a model, one after the other, and the two
+    screens used to be the same menu with different rows -- which is how a
+    raw encoder ends up chosen for the meaning-tuned step. So the question is
+    worded differently, the step is named above it, and only meaning-tuned
+    models are offered: no library shelf (an encoder adapted here is raw),
+    and no raw encoder from the cache however many are downloaded.
+    """
+    from taters.text import _transformer_common as tc
+    from taters.ui.library import pick_encoder
+
+    lib.import_into(lib.KINDS["encoders"], _encoder_stub(tmp_path / "e"))
+    monkeypatch.setattr(tc, "cached_hub_sentence_models",
+                        lambda cache_dir=None: [("sentence-transformers/all-MiniLM-L6-v2",
+                                                 "downloaded · 6 layers · 384-wide vectors")])
+    monkeypatch.setattr(tc, "cached_hub_encoders",
+                        lambda cache_dir=None: [("distilroberta-base", "downloaded · 6 layers")])
+
+    p = ScriptedPrompter(["sentence-transformers/all-mpnet-base-v2"])
+    picked = pick_encoder(p, "sentence-transformers/all-roberta-large-v1",
+                          meaning_tuned=True,
+                          for_step="Sentence embeddings (meaning-tuned model)")
+    assert picked == "sentence-transformers/all-mpnet-base-v2"
+
+    question, rows = p.offered[0]
+    assert question == "Which meaning-tuned model?"
+    assert question != "Which encoder?"
+    values = [c.value for c in rows]
+    assert values[0] == "sentence-transformers/all-MiniLM-L6-v2", "what is downloaded comes first"
+    assert rows[0].help.startswith("meaning-tuned · downloaded")
+    assert "sentence-transformers/all-roberta-large-v1" in values
+    assert "distilroberta-base" not in values, "a raw encoder was offered"
+    assert not any(v.endswith(".json") for v in values), "the library's raw encoders were offered"
+    assert values[-1] == ":type"
+    assert p.select_defaults["Which meaning-tuned model?"] == \
+        "sentence-transformers/all-roberta-large-v1", "the current one is pointed at"
+    assert any("Sentence embeddings (meaning-tuned model)" in r for r in p.reasons), \
+        "the line above the menu does not say which step this model is for"
+
+    typed = ScriptedPrompter([":type", "my-org/my-sentence-model"])
+    assert pick_encoder(typed, meaning_tuned=True) == "my-org/my-sentence-model"
+    assert any(q == "Model name or folder:" for _k, q in typed.asked)

@@ -2874,7 +2874,9 @@ def _edit(prompter: Prompter, recipe: _recipes.Recipe, param: ParamSpec,
         # them and keeps the text box around for anything else.
         from .library import pick_encoder
 
-        value = pick_encoder(prompter, str(current or ""))
+        value = pick_encoder(prompter, str(current or ""),
+                             meaning_tuned=recipe.encoder_kind == "meaning_tuned",
+                             for_step=recipe.label)
         if value is None or value == current:
             return
         if var_name:
@@ -3892,6 +3894,11 @@ def _ask_encoders(prompter: Prompter, steps: Sequence[_recipes.Recipe],
     """
     from .library import pick_encoder
 
+    # when both embedding steps are ticked this asks twice in a row, and the
+    # two screens must not read as one menu shown again with different rows
+    kinds = {r.encoder_kind for r in steps if r.encoder_param is not None}
+    both = len(kinds) > 1
+
     for recipe in steps:
         if recipe.encoder_param is None:
             continue
@@ -3904,11 +3911,24 @@ def _ask_encoders(prompter: Prompter, steps: Sequence[_recipes.Recipe],
             current = str(recipe.vars.get(var, {}).get("default", ""))
         else:
             current = str(recipe.with_.get(recipe.encoder_param, "") or "")
-        prompter.reason(
-            f"'{recipe.label}' runs on a language model. The default suits "
-            f"English text; your own adapted encoders, and models already on "
-            f"this machine, are listed first.")
-        picked = pick_encoder(prompter, current)
+        tuned = recipe.encoder_kind == "meaning_tuned"
+        if tuned:
+            prompter.reason(
+                f"'{recipe.label}' runs on a meaning-tuned model -- one trained "
+                f"so that texts meaning the same get similar numbers. The "
+                f"default suits English text."
+                + (" (The raw-encoder step asks for its own model separately.)"
+                   if both else ""))
+        else:
+            prompter.reason(
+                f"'{recipe.label}' runs on a raw encoder -- any language model, "
+                f"read directly. The default suits English text; your own "
+                f"adapted encoders, and models already on this machine, are "
+                f"listed first."
+                + (" (The meaning-tuned step asks for its own model separately.)"
+                   if both else ""))
+        picked = pick_encoder(prompter, current, meaning_tuned=tuned,
+                              for_step=recipe.label)
         if picked is None:
             continue
         if var is not None:

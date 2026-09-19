@@ -1449,3 +1449,71 @@ def test_a_hidden_row_cannot_be_picked():
     p = ScriptedPrompter(["stats_correlations", "pca_components", "3", ":done", ":done"])
     with pytest.raises(AssertionError, match="not among"):
         wiz.ask_tuning(p, steps, var_specs, ask_gate=False)
+
+
+def test_the_meaning_tuned_step_asks_which_model_the_way_the_raw_one_does(tmp_path):
+    """
+    Sentence embeddings took its model silently and offered a change only on
+    the options screen, where nobody looked for it -- while the raw-encoder
+    step asked right after the checklist. Now both ask, and the answer is an
+    ordinary preset variable of its own.
+    """
+    pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+    path = tmp_path / "s.csv"
+    path.write_text("id,text\n1,hello there\n2,bye now\n", encoding="utf-8")
+    p = ScriptedPrompter([
+        "csv", *browse_to(path), ["text"], True, ["id"],
+        ["sentence_embeddings"], "row",
+        "sentence-transformers/all-mpnet-base-v2",   # the model question
+        ":done", "Emb", "save",
+    ])
+    result = wiz.run_wizard(p, cwd=tmp_path, analyses=False)
+
+    questions = [q for _k, q in p.asked]
+    assert "Which meaning-tuned model?" in questions
+    assert "Which encoder?" not in questions, "the raw-encoder question was asked instead"
+    variables = result.preset["meta"]["variables"]
+    assert variables["sentence_model"]["default"] == "sentence-transformers/all-mpnet-base-v2"
+    assert "encoder" not in variables
+
+
+def test_with_both_embedding_steps_ticked_the_two_model_questions_cannot_be_confused(tmp_path):
+    """
+    The case that motivated the wording: two model menus in a row. Each has
+    its own question, each says which step it is for, each says the other
+    step asks separately, and the two answers land in two variables.
+    """
+    pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+    path = tmp_path / "s.csv"
+    path.write_text("id,text\n1,hello there\n2,bye now\n", encoding="utf-8")
+    p = ScriptedPrompter([
+        "csv", *browse_to(path), ["text"], True, ["id"],
+        ["sentence_embeddings", "transformer_embeddings"], "row",
+        "sentence-transformers/all-mpnet-base-v2",   # meaning-tuned model
+        "distilroberta-base",                        # raw encoder
+        ":done", "Emb", "save",
+    ])
+    result = wiz.run_wizard(p, cwd=tmp_path, analyses=False)
+
+    questions = [q for _k, q in p.asked]
+    assert "Which meaning-tuned model?" in questions
+    assert "Which encoder?" in questions
+    assert questions.count("Which meaning-tuned model?") == 1
+    assert questions.count("Which encoder?") == 1
+
+    reasons = [" ".join(r.split()) for r in p.reasons]
+    tuned = [r for r in reasons if "runs on a meaning-tuned model" in r]
+    raw = [r for r in reasons if "runs on a raw encoder" in r]
+    assert len(tuned) == 1 and "Sentence embeddings (meaning-tuned model)" in tuned[0]
+    assert len(raw) == 1 and "Transformer embeddings (raw, any encoder)" in raw[0]
+    assert "asks for its own model separately" in tuned[0]
+    assert "asks for its own model separately" in raw[0]
+    # and the line right above each menu names the step too
+    assert any(r.startswith("The meaning-tuned model for 'Sentence embeddings") for r in reasons)
+    assert any(r.startswith("The encoder for 'Transformer embeddings") for r in reasons)
+
+    variables = result.preset["meta"]["variables"]
+    assert variables["sentence_model"]["default"] == "sentence-transformers/all-mpnet-base-v2"
+    assert variables["encoder"]["default"] == "distilroberta-base"

@@ -182,7 +182,9 @@ _TYPE_ENCODER = ":type"
 
 
 def pick_encoder(prompter: Prompter, current: str = "",
-                 allow_predictors: bool = True) -> Optional[str]:
+                 allow_predictors: bool = True, *,
+                 meaning_tuned: bool = False,
+                 for_step: str = "") -> Optional[str]:
     """
     Choose a transformer encoder from what this machine already has.
 
@@ -194,7 +196,19 @@ def pick_encoder(prompter: Prompter, current: str = "",
     marked as such. And "something else", for any other Hugging Face name
     or checkpoint folder, typed. Returns the chosen name or path, or None
     for Esc (leave the setting as it was).
+
+    With ``meaning_tuned`` the same screen is built for a sentence-transformers
+    model instead: only meaning-tuned checkpoints are offered (the cache is
+    read for the marker file they carry, not for a name prefix), the curated
+    list is theirs, and the question is worded differently -- because when
+    both embedding steps are ticked this screen is shown twice in a row, and
+    two identical-looking menus with different rows is how someone picks a
+    raw encoder for the meaning-tuned step without noticing. ``for_step``
+    names the step in the line above the question for the same reason.
     """
+    if meaning_tuned:
+        return _pick_sentence_model(prompter, current, for_step=for_step)
+
     from ..helpers import library as _lib
     from ..helpers.model_spec import describe_all, describe_encoder
     from ..text._transformer_common import CURATED_ENCODERS, cached_hub_encoders
@@ -232,14 +246,62 @@ def pick_encoder(prompter: Prompter, current: str = "",
                                                 f"(first run fetches it) · {note}"))
     rows.append(Choice(_TYPE_ENCODER, "Something else — type a name or path",
                        "Any Hugging Face encoder name, or a folder holding a checkpoint."))
+    whose = f"The encoder for '{for_step}'." if for_step else "The encoder to start from."
     prompter.reason(
-        "The encoder to start from. Your own come first, then what is already "
+        f"{whose} Your own come first, then what is already "
         "on this machine, then the usual names.")
     default = current if any(c.value == current for c in rows) else None
     try:
         picked = str(prompter.select("Which encoder?", rows, default=default))
         if picked == _TYPE_ENCODER:
             picked = str(prompter.text("Encoder name or folder:", default=current)).strip()
+            if not picked:
+                return None
+    except GoBack:
+        return None
+    return picked
+
+
+def _pick_sentence_model(prompter: Prompter, current: str = "", *,
+                         for_step: str = "") -> Optional[str]:
+    """
+    The meaning-tuned half of :func:`pick_encoder`.
+
+    Two shelves, then the text box: the sentence-transformers models already
+    downloaded, then the curated ones that are not. No library shelf -- an
+    encoder adapted here is a raw one, and the point of this step is a model
+    trained so that similar texts get similar vectors.
+    """
+    from ..text._transformer_common import (CURATED_SENTENCE_MODELS,
+                                            cached_hub_sentence_models)
+
+    rows: List[Choice] = []
+    cached = dict(cached_hub_sentence_models())
+    curated = dict(CURATED_SENTENCE_MODELS)
+    for hub_id, note in cached.items():
+        rows.append(Choice(hub_id, hub_id, f"meaning-tuned · {note}"
+                           + (f" · {curated[hub_id]}" if hub_id in curated else "")))
+    for hub_id, note in CURATED_SENTENCE_MODELS:
+        if hub_id not in cached:
+            rows.append(Choice(hub_id, hub_id,
+                               f"meaning-tuned · not downloaded yet (first run "
+                               f"fetches it) · {note}"))
+    rows.append(Choice(_TYPE_ENCODER, "Something else — type a name or path",
+                       "Any sentence-transformers model on Hugging Face, or a "
+                       "folder holding one."))
+    whose = (f"The meaning-tuned model for '{for_step}'." if for_step
+             else "The meaning-tuned model.")
+    prompter.reason(
+        f"{whose} These are sentence-transformers models, trained so that texts "
+        "meaning the same get similar numbers; what is already on this machine "
+        "comes first.")
+    default = current if any(c.value == current for c in rows) else None
+    try:
+        picked = str(prompter.select("Which meaning-tuned model?", rows,
+                                     default=default))
+        if picked == _TYPE_ENCODER:
+            picked = str(prompter.text("Model name or folder:",
+                                       default=current)).strip()
             if not picked:
                 return None
     except GoBack:

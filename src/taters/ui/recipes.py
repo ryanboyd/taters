@@ -399,6 +399,12 @@ class Recipe:
     #: (the library's encoders and predictors, the models in the Hugging
     #: Face cache, the curated names) with a text entry for anything else.
     encoder_param: Optional[str] = None
+    #: What kind of model `encoder_param` names: "raw" for any encoder whose
+    #: hidden states are read directly, "meaning_tuned" for a
+    #: sentence-transformers model. The picker offers a different list and
+    #: asks a differently worded question for each, because the two steps
+    #: used to show what looked like the same menu twice.
+    encoder_kind: str = "raw"
     #: Whether an empty feature-table list is acceptable. False for the
     #: statistics, which have nothing to analyze without one. True for
     #: model scoring, where whether features are needed at all is a fact
@@ -627,6 +633,10 @@ _KEEP_PUNCTUATION_VAR = {
 #: `workers` and `rounding` already mean what they look like.
 SETTING_LABELS: Dict[str, str] = {
     "engine": "tagging engine",
+    # the two embedding steps each take a model, and their variables must
+    # not read as the same setting twice on the options screen
+    "encoder": "encoder (raw)",
+    "sentence_model": "meaning-tuned model",
     # the vocabulary is built in two passes and the parameter names do not say
     # so: `min_freq` decides which words are counted at all, `vocab_min_freq`
     # decides how many of the survivors the model actually sees. Four rows
@@ -2759,6 +2769,10 @@ RECIPES: List[Recipe] = [
         # loads a sentence-transformer. also a `global` step; declared for
         # the same reason as `archetypes`.
         gpu_use="gpu_one_model",
+        # asked for right after the checklist, like the raw-encoder step's
+        # model -- but from the meaning-tuned list, under its own question
+        encoder_param="model_name",
+        encoder_kind="meaning_tuned",
         label="Sentence embeddings (meaning-tuned model)",
         help="A numeric fingerprint of what was said, from a model trained so "
              "that utterances meaning the same get similar numbers. The usual "
@@ -2774,6 +2788,16 @@ RECIPES: List[Recipe] = [
         produces=frozenset({"sentence_embeddings_csv"}),
         auto_with=("gather_sentence_embeddings",),
         **_TEXT_STEP,
+        vars={
+            "sentence_model": {
+                "default": "sentence-transformers/all-roberta-large-v1",
+                "desc": "The meaning-tuned model: a sentence-transformers name "
+                        "(all-roberta-large-v1, the default; all-mpnet-base-v2, "
+                        "nearly as good and three times faster; all-MiniLM-L6-v2 "
+                        "for a laptop; paraphrase-multilingual-mpnet-base-v2 for "
+                        "other languages) or a folder holding one.",
+            },
+        },
         with_={
             "csv_path": "{{transcripts_all}}",
             "text_cols": ["text"],
@@ -2783,7 +2807,7 @@ RECIPES: List[Recipe] = [
             # statistics then called this feature set "texts". the stem is
             # the set's name everywhere downstream, so it matters.
             "out_features_csv": "{{var:features_dir}}/sentence_embeddings.csv",
-            "model_name": "sentence-transformers/all-roberta-large-v1",
+            "model_name": "{{var:sentence_model}}",
             "device": "{{var:device}}",
             "normalize_l2": True,
             "pass_through_cols": list(_ID_COLS),
