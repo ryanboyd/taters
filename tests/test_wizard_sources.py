@@ -303,9 +303,7 @@ def test_the_review_says_how_each_step_combines_its_rows(tmp_path, media):
         "audio", *browse_to(media), ["readability", "sentence_embeddings"],
         "transcribe", "speaker",
         "sentence-transformers/all-roberta-large-v1",   # the model question
-        # choosing a model counts as a change, so the options screen opens
-        # in place of the "change anything?" question the old script answered
-        ":done", "Mixed", "save",
+        False, "Mixed", "save",
     ])
     wiz.run_wizard(p, cwd=tmp_path)
 
@@ -327,9 +325,7 @@ def test_the_review_does_not_claim_a_merge_that_did_not_combine_anything(tmp_pat
         "audio", *browse_to(media), ["readability", "sentence_embeddings"],
         "transcribe", "utterance",
         "sentence-transformers/all-roberta-large-v1",   # the model question
-        # choosing a model counts as a change, so the options screen opens
-        # in place of the "change anything?" question the old script answered
-        ":done", "Raw", "save",
+        False, "Raw", "save",
     ])
     wiz.run_wizard(p, cwd=tmp_path)
 

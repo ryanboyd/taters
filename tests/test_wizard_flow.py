@@ -255,7 +255,8 @@ def test_a_transformer_step_asks_for_its_encoder_at_the_features_stage(tmp_path,
         "csv", *browse_to(path), ["text"], True, ["id"],
         ["transformer_embeddings"], "row",
         "distilroberta-base",           # the encoder question, at the features stage
-        ":done", "Emb", "save",
+        False,                          # accepting the default is not a change to review
+        "Emb", "save",
     ])
     result = wiz.run_wizard(p, cwd=tmp_path, analyses=False)
 
@@ -1517,3 +1518,31 @@ def test_with_both_embedding_steps_ticked_the_two_model_questions_cannot_be_conf
     variables = result.preset["meta"]["variables"]
     assert variables["sentence_model"]["default"] == "sentence-transformers/all-mpnet-base-v2"
     assert variables["encoder"]["default"] == "distilroberta-base"
+
+
+def test_accepting_the_default_model_is_not_a_change(tmp_path):
+    """
+    Choosing the model that was already the default used to be recorded as a
+    change, so the options screen then opened with "(1 changed)" beside a step
+    whose settings were exactly what they had been. Now the answer is kept
+    only when it differs -- the same rule the options screen applies.
+    """
+    pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+    path = tmp_path / "s.csv"
+    path.write_text("id,text\n1,hello there\n2,bye now\n", encoding="utf-8")
+    p = ScriptedPrompter([
+        "csv", *browse_to(path), ["text"], True, ["id"],
+        ["sentence_embeddings"], "row",
+        "sentence-transformers/all-roberta-large-v1",   # the default, accepted
+        False,                                           # nothing to change
+        "Emb", "save",
+    ])
+    result = wiz.run_wizard(p, cwd=tmp_path, analyses=False)
+
+    questions = [q for _k, q in p.asked]
+    assert "Which meaning-tuned model?" in questions
+    assert "What would you like to change?" not in questions, \
+        "accepting the default forced the options screen open"
+    assert result.preset["meta"]["variables"]["sentence_model"]["default"] == \
+        "sentence-transformers/all-roberta-large-v1"

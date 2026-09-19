@@ -3929,7 +3929,11 @@ def _ask_encoders(prompter: Prompter, steps: Sequence[_recipes.Recipe],
                    if both else ""))
         picked = pick_encoder(prompter, current, meaning_tuned=tuned,
                               for_step=recipe.label)
-        if picked is None:
+        # accepting the default is not a change. recording it anyway made the
+        # options screen open afterwards with "(1 changed)" beside a step whose
+        # settings were exactly what they had been -- the same guard the
+        # options screen itself applies to this question.
+        if picked is None or picked == current:
             continue
         if var is not None:
             var_values[var] = picked
