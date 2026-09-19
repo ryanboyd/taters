@@ -637,6 +637,7 @@ SETTING_LABELS: Dict[str, str] = {
     # not read as the same setting twice on the options screen
     "encoder": "encoder (raw)",
     "sentence_model": "meaning-tuned model",
+    "stats_blas_threads": "linear-algebra threads while fitting",
     # the vocabulary is built in two passes and the parameter names do not say
     # so: `min_freq` decides which words are counted at all, `vocab_min_freq`
     # decides how many of the survivors the model actually sees. Four rows
@@ -1228,6 +1229,14 @@ _STATS_CV_VARS: Dict[str, dict] = {
         "desc": "How many cross-validation folds. Every reported score is "
                 "out-of-fold: each row is predicted by a model that never "
                 "saw it. Five is the usual answer; ten for a small sample.",
+    },
+    "stats_blas_threads": {
+        "default": 1,
+        "desc": "Threads the linear-algebra library may use while fitting the "
+                "classifier. Leave at 1: the systems it solves are a few "
+                "hundred wide, and a thread pool spends longer sharing them "
+                "than solving them. 0 leaves the library's own setting alone. "
+                "Does not change the result.",
     },
     "stats_stratify": {
         "default": True,
@@ -3365,6 +3374,7 @@ RECIPES: List[Recipe] = [
             "n_folds": "{{var:stats_n_folds}}",
             "set_combos": "{{var:stats_set_combos}}",
             "stratify": "{{var:stats_stratify}}",
+            "blas_threads": "{{var:stats_blas_threads}}",
         },
         # answered by the analysis stage; see stats_group_differences.
         param_when={**_STATS_PCA_PARAM_WHEN,

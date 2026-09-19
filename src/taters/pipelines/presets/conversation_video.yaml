@@ -78,6 +78,9 @@ vars:
   # Paths to different types of dictionary resources (folders)
   dictionaries_path: "dictionaries/liwc"
   archetypes_dict_path: "dictionaries/archetypes"
+  # the meaning-tuned model behind the sentence embeddings; the app asks
+  # which one right after the checklist and writes the answer here
+  sentence_model: "sentence-transformers/all-roberta-large-v1"
 
   # Output roots (override if you want)
   transcripts_dir: "transcripts"
@@ -311,7 +314,7 @@ steps:
     csv_path: "{{transcripts_all}}"
     text_cols: ["text"]
     mode: "concat"
-    model_name: "sentence-transformers/all-roberta-large-v1"
+    model_name: "{{var:sentence_model}}"
     device: "{{var:device}}"
     normalize_l2: true
     pass_through_cols: ["source","speaker"]

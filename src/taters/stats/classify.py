@@ -46,7 +46,8 @@ from typing import Callable, List, Literal, Optional, Sequence, Union
 
 from ..helpers.atomic import atomic_write
 from ..helpers.model_spec import class_label, output_label, slug
-from ._fit_common import (load_model_doc, model_header, output_folders, comparison_lines,
+from ._fit_common import (blas_threads as _blas_threads,
+                          load_model_doc, model_header, output_folders, comparison_lines,
                           prepare_apply, prepare_fit, set_design,
                           write_predictions, random_folds)
 from ..helpers.progress import announce
@@ -481,6 +482,7 @@ def fit_classifier_csv(
     zscore: bool = True,
     max_missing: float = MAX_MISSING,
     seed: int = 0,
+    blas_threads: int = 1,
     out_dir: Optional[PathLike] = None,
     out_models_dir: Optional[PathLike] = None,
     overwrite_existing: bool = False,
@@ -558,6 +560,13 @@ def fit_classifier_csv(
     zscore
         Standardize predictors on the training statistics, so coefficients
         are per standard deviation and comparable to each other.
+    blas_threads
+        How many threads numpy's linear-algebra library may use while
+        fitting. One, by default: every Newton step solves a system only a
+        few hundred wide, and a thread pool spends longer sharing a matrix
+        that small than solving it -- on a 16-core machine the fit ran up to
+        three hundred times slower with the pool left on. ``0`` leaves the
+        library's own setting alone. The answer does not depend on it.
     max_missing
         Set aside any predictor missing for more than this fraction of the
         rows, rather than letting it delete them. See the ridge step: left
@@ -687,9 +696,11 @@ def fit_classifier_csv(
                         label = ("controls+language" if idx and with_language
                                  else "controls" if idx else "language")
 
-                        fit, dropped = _cv_logistic(
-                            np.hstack(blocks), labels, classes, grid=grid,
-                            n_folds=n_folds, seed=seed, zscore=zscore, stratify=stratify)
+                        with _blas_threads(blas_threads):
+                            fit, dropped = _cv_logistic(
+                                np.hstack(blocks), labels, classes, grid=grid,
+                                n_folds=n_folds, seed=seed, zscore=zscore,
+                                stratify=stratify)
                         if fit is None:
                             raise ValueError(
                                 f"{outcome} on feature set {set_name!r}: "

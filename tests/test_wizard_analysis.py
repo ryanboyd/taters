@@ -679,6 +679,7 @@ def test_a_measure_and_its_merge_are_one_row_on_the_table_picker(tmp_path,
     p = ScriptedPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
         ["readability", "sentence_embeddings"], "group", ["condition"],
+        "sentence-transformers/all-roberta-large-v1",   # the model question
         ["stats_correlations"], ["openness"],
         False,  # no control variables
         # ticked by id: at this level the surviving table is the merge, and

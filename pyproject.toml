@@ -40,6 +40,10 @@ dependencies = [
   # also requires. sentence-transformers 6 needs transformers>=5 and the two
   # cannot coexist.
   "sentence-transformers<6",
+  # Holds numpy's BLAS to one thread around the classifier's small solves,
+  # where a thread pool costs more than it saves. Already here through
+  # scikit-learn; declared because stats/_fit_common imports it by name.
+  "threadpoolctl",
   # Imported at module import time by helpers/feature_gather and the pipeline
   # runner, so they belong here rather than in an extra.
   "numpy",

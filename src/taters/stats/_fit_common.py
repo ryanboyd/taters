@@ -20,6 +20,7 @@ What stays in each fitter is what genuinely differs: how an outcome is read
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
@@ -33,6 +34,35 @@ from ._common import (MAX_MISSING, _write_csv, default_feature_cols,
                       zero_when_absent)
 
 PathLike = Union[str, Path]
+
+
+@contextmanager
+def blas_threads(count: Optional[int]):
+    """
+    Hold numpy's linear-algebra library to ``count`` threads for the block.
+
+    The penalized logistic fit solves a ``(p+1) x (p+1)`` system at every
+    Newton step -- a few hundred wide, thousands of times over a nested
+    cross-validation. That is far too small a matrix to share: on a 16-core
+    machine OpenBLAS spent longer handing a 301x301 solve between threads than
+    solving it, and the same fit ran thirty to three hundred times slower
+    than single-threaded. One thread is the right default for this shape of
+    work; the parameter exists because a different library, or a much wider
+    design, may want otherwise.
+
+    ``None`` or ``0`` leaves the library alone. If ``threadpoolctl`` is not
+    importable this does nothing rather than refusing to fit.
+    """
+    if not count or count < 1:
+        yield
+        return
+    try:
+        from threadpoolctl import threadpool_limits
+    except ImportError:                      # pragma: no cover - a base dep
+        yield
+        return
+    with threadpool_limits(limits=int(count)):
+        yield
 
 
 def random_folds(n: int, n_folds: int, seed: int):

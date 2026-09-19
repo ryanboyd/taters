@@ -464,6 +464,15 @@ nesting multiplies them. Warm-starting down the grid — each penalty's fit
 beginning from its neighbor's answer — keeps the factor small enough not to
 matter in practice.
 
+One more thing keeps it fast, and it is about the machine rather than the
+method. Each Newton step solves a system only a few hundred wide, and numpy's
+linear-algebra library will happily spread that across every core — where a
+thread pool spends longer sharing a matrix that small than solving it. On a
+16-core machine the fit ran up to three hundred times slower that way. So the
+classifier holds the library to one thread while it fits (`blas_threads`,
+default 1; `0` leaves the library's own setting alone). The answer does not
+depend on it.
+
 ## Reading the coefficient table
 
 `ridge_coefficients.csv` is **wide**: one row per predictor, one column per

@@ -863,3 +863,78 @@ def test_a_relabeled_class_is_written_as_its_label_in_every_column(tmp_path):
         assert b["pred_cond"] == {"no": "control", "yes": "patient"}[a["pred_cond"]]
         assert b["p_cond_control"] == a["p_cond_no"]
         assert b["prob_cond"] == a["prob_cond"]
+
+
+def test_the_classifier_fits_on_one_blas_thread_unless_told_otherwise(tmp_path, monkeypatch):
+    """
+    Every Newton step solves a system a few hundred wide, thousands of times
+    over a nested cross-validation -- far too small a matrix to share. Left to
+    itself OpenBLAS spent longer handing a 301x301 solve between sixteen
+    threads than solving it, and the fit ran up to three hundred times slower.
+    So the library is held to one thread while fitting, and the count is a
+    parameter for the machine where that is the wrong call.
+    """
+    import threadpoolctl
+
+    from taters.stats import _fit_common
+    from taters.stats.classify import fit_classifier_csv
+
+    seen = []
+    real = threadpoolctl.threadpool_limits
+
+    class _Recording:
+        def __init__(self, limits=None, **kw):
+            seen.append(limits)
+            self._inner = real(limits=limits, **kw)
+
+        def __enter__(self):
+            return self._inner.__enter__()
+
+        def __exit__(self, *exc):
+            return self._inner.__exit__(*exc)
+
+    monkeypatch.setattr(threadpoolctl, "threadpool_limits", _Recording)
+    assert _fit_common.blas_threads.__module__ == "taters.stats._fit_common"
+
+    table = _table(tmp_path)
+    fit_classifier_csv(table_csv=table, outcome_cols=["cond"],
+                       feature_sets={"lang": ["sig", "noise"]},
+                       n_folds=3, verbose=False, out_dir=tmp_path / "one")
+    assert seen and set(seen) == {1}, f"the fit ran under thread limits {seen}, not 1"
+
+    seen.clear()
+    fit_classifier_csv(table_csv=table, outcome_cols=["cond"],
+                       feature_sets={"lang": ["sig", "noise"]},
+                       n_folds=3, verbose=False, blas_threads=2,
+                       out_dir=tmp_path / "two")
+    assert set(seen) == {2}, "the parameter did not reach the thread limit"
+
+    seen.clear()
+    fit_classifier_csv(table_csv=table, outcome_cols=["cond"],
+                       feature_sets={"lang": ["sig", "noise"]},
+                       n_folds=3, verbose=False, blas_threads=0,
+                       out_dir=tmp_path / "off")
+    assert seen == [], "0 should leave the library's own setting alone"
+
+
+def test_the_thread_count_does_not_change_the_answer(tmp_path):
+    """A speed setting, not a modeling one: the same rows and seed must fit
+    the same classifier whichever way the library is allowed to run."""
+    from taters.stats.classify import fit_classifier_csv
+
+    table = _table(tmp_path)
+    one = _read(fit_classifier_csv(
+        table_csv=table, outcome_cols=["cond"],
+        feature_sets={"lang": ["sig", "noise"]}, n_folds=3, verbose=False,
+        blas_threads=1, out_dir=tmp_path / "one"))
+    two = _read(fit_classifier_csv(
+        table_csv=table, outcome_cols=["cond"],
+        feature_sets={"lang": ["sig", "noise"]}, n_folds=3, verbose=False,
+        blas_threads=2, out_dir=tmp_path / "two"))
+    assert len(one) == len(two) and one[0].keys() == two[0].keys()
+    for a, b in zip(one, two):
+        for key in a:
+            try:
+                assert float(a[key]) == pytest.approx(float(b[key]), abs=1e-6), key
+            except ValueError:                     # a label, not a number
+                assert a[key] == b[key], key
