@@ -519,9 +519,8 @@ def import_hf_classifier_ui(prompter: Prompter, kind: lib.LibraryKind) -> Option
                        "downloaded on first use."))
     prompter.reason(
         "A classifier or regressor somebody else trained and published. Once "
-        "imported it scores any dataset from the feature checklist, like a model "
-        "you trained here. What is already in this computer's Hugging Face cache "
-        "comes first.")
+        "imported it scores datasets like a model you trained here. This "
+        "computer's Hugging Face cache comes first.")
     try:
         picked = str(prompter.select("Which model?", rows))
         if picked == _HF_FOLDER:

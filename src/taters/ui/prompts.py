@@ -19,6 +19,7 @@ from typing import (Any, Callable, Dict, List, Optional, Protocol, Sequence,
                     Tuple)
 
 __all__ = ["Choice", "Stage", "Prompter", "QuestionaryPrompter", "ScriptedPrompter",
+           "MEASURE", "PROSE_MEASURE",
            "Cancelled", "GoBack", "QuitRequested", "PAUSE_MESSAGE",
            "fit", "wrap_description", "style_descriptions_separately",
            "note_lines", "scroll_long_lists", "visible_rows",
@@ -206,15 +207,20 @@ def ask_at_least_one(prompter: "Prompter", question: str,
 #: What a report screen says when it has finished and is waiting to be left.
 PAUSE_MESSAGE = "Press any key to go back"
 
-# how wide we let a column of text get, in cells, margin included.
+# how wide the banner's frame is, in cells. it's drawn art with a right-hand
+# border, so it's a fixed number rather than something that follows the window.
+MEASURE = 64
+
+# how wide we let a column of prose get, in cells, margin included.
 #
 # prose set to the full width of a maximized terminal is genuinely hard to read
-# (the eye loses its place on the way back to the start of the next line), and
-# it left every screen as text running out to column 200 underneath a banner
-# that stopped at 64, which looks like clutter rather than a layout. so notes
-# wrap to the banner's width and the screen gets one right edge instead of two.
-# `hub.banner` takes its own width from this for the same reason.
-MEASURE = 64
+# -- the eye loses its place on the way back to the start of the next line --
+# so there's a cap. it used to be the banner's 64, which gave one right edge
+# for the whole screen but cost vertical space: the paragraph above a long
+# checklist ran to nine lines and pushed the list off the bottom, and the
+# screen scrolled while you were arrowing through it. 100 is still inside the
+# range that reads comfortably, and buys back three or four rows of list.
+PROSE_MEASURE = 100
 
 # how we draw a "why you're seeing this" line. bright, and marked, because the
 # whole problem with the old treatment was that it read like more commentary.
@@ -482,8 +488,15 @@ class QuestionaryPrompter:
             self._blank_last = False
 
     def note_width(self) -> int:
-        """How wide a note's text may be, in cells."""
-        return max(min(self._console.width, MEASURE), 20)
+        """
+        How wide a note's text may be, in cells.
+
+        Follows the window up to :data:`PROSE_MEASURE` and no further, so a
+        narrow terminal wraps to what it has and a wide one stops short of the
+        far edge. The two cells held back keep the last word off the right-hand
+        column, where some terminals wrap it themselves.
+        """
+        return max(min(self._console.width - 2, PROSE_MEASURE), 20)
 
     def table(self, title: str, rows: Sequence[Sequence[str]],
               headers: Sequence[str]) -> None:

@@ -157,10 +157,8 @@ def _wrangle_csv(ctx: TaskContext) -> Optional[Path]:
     averages: List[str] = []
     if others:
         prompter.reason(
-            "Two shapes are possible. Keep every row as it is — one row of "
-            "output per row of your spreadsheet. Or combine rows that belong "
-            "together, so that (say) everything one person wrote becomes a "
-            "single row of text.")
+            "Keep every row as it is, or combine rows that belong together — so "
+            "that (say) everything one person wrote becomes a single row.")
         shape = str(prompter.select(
             "How should the finished spreadsheet be shaped?",
             [Choice("as_is", "One row out for every row in",
@@ -170,10 +168,9 @@ def _wrangle_csv(ctx: TaskContext) -> Optional[Path]:
                     "pick — texts joined together.")]))
         if shape == "combine":
             prompter.reason(
-                "Tick the column(s) that say which rows belong together. One "
-                "column (say, username) gives one row per person. Ticking "
-                "two (say, subreddit and username) gives one row per person "
-                "within each subreddit.")
+                "Tick the column(s) that say which rows belong together. "
+                "Username alone gives one row per person; subreddit and "
+                "username, one row per person within each subreddit.")
             group_by = ask_at_least_one(
                 prompter, "Which column(s) say which rows belong together?",
                 [Choice(c, c) for c in others], thing="one column")
@@ -191,10 +188,8 @@ def _wrangle_csv(ctx: TaskContext) -> Optional[Path]:
                     "Bring any other columns along unchanged?",
                     default=False):
                 prompter.reason(
-                    "A brought-along column keeps its value where every "
-                    "combined row agrees on it; where the rows disagree, the "
-                    "cell is left blank — there is no single honest value "
-                    "to write.")
+                    "A brought-along column keeps its value where the combined "
+                    "rows agree on it, and is left blank where they disagree.")
                 carry = ask_at_least_one(
                     prompter, "Bring along which column(s)?",
                     [Choice(c, c) for c in rest], thing="one column")

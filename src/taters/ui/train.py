@@ -238,10 +238,9 @@ def seed_scratch() -> Callable[..., None]:
         from ..text._transformer_common import estimate_minutes, torch_missing_reason
 
         prompter.reason(
-            "Nothing here is pretrained: the model starts from random weights and "
-            "its tokenizer is learned from your texts. A language model learns "
-            "language from quantity -- below a few million words, the result will "
-            "be worse at everything than any pretrained model you could adapt.")
+            "Nothing here is pretrained: random weights, and a tokenizer learned "
+            "from your texts. Below a few million words the result will be worse "
+            "than any pretrained model you could adapt.")
         preset = str(prompter.select("Which size?", _PRESET_ROWS,
                                      default=var_values.get("pretrain_preset", "small")))
         var_values["pretrain_preset"] = preset
@@ -289,9 +288,8 @@ def run_train(prompter: Prompter, *, cwd: Path) -> Optional[bool]:
     from .wizard import run_wizard
 
     prompter.reason(
-        "A model trained here is saved with a report of how it was trained, "
-        "can be added to your library, and then scores any dataset from the "
-        "feature checklist.")
+        "A model trained here is saved with a report of how it was trained, can "
+        "go in your library, and then scores any dataset you like.")
 
     stage = "verb"
     verb = ""
@@ -400,10 +398,9 @@ def ask_outcomes(prompter: Prompter, src, var_values: dict, overrides: dict) -> 
                       "identifiers that a model could predict.", style="yellow")
         raise GoBack()
     prompter.reason(
-        "The model learns to predict these from the text. A column of numbers "
-        "is predicted as a quantity (regression); a column of labels as a "
-        "category (classification). Several columns train one model with a "
-        "head for each.")
+        "A column of numbers is predicted as a quantity (regression), a column "
+        "of labels as a category (classification). Several columns train one "
+        "model with a head for each.")
     picked = ask_at_least_one(prompter, "Which column(s) should the model predict?",
                               rows, thing="one column")
     categorical = [c for c in picked if kinds.get(c) == "labels"]

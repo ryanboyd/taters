@@ -48,10 +48,9 @@ def _run(ctx: TaskContext):
             prompter.reason(f"{COLOR_ENV} is set in this environment, and it wins "
                             "over anything chosen here.")
         prompter.reason(
-            "If the potato in the banner looks washed out or nearly black, your "
-            "terminal is announcing fewer colors than it can draw -- set colors "
-            "higher. If parts of the screen show empty boxes instead of arrows "
-            "and ticks, your font has no glyph for them -- use plain characters.")
+            "A washed-out or nearly black potato means your terminal announces "
+            "fewer colors than it can draw. Empty boxes instead of arrows and "
+            "ticks mean your font has no glyph for them.")
 
         rows = [Choice(f"color:{name}", f"Colors: {name}", _COLOR_HELP[name])
                 for name in CHOICES]

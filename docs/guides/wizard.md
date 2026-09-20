@@ -100,6 +100,12 @@ and which were added for you.
 The checklist is also filtered by your input: vocal acoustics is not offered for
 a folder of essays, because there is no audio to measure.
 
+A few rows describe the corpus as a whole rather than one text at a time — a
+topic model's word lists, a frequency table — and are marked *(not for
+statistics)*. You can tick them alongside anything else, but the statistics need
+at least one per-text table to work from, so a run that is only corpus-wide rows
+has nothing to correlate or compare.
+
 It is grouped, too. Rows sit under headings — *Style & readability*, *Topics &
 themes*, *Embeddings & vectors* and so on — arranged by what a measure tells
 you rather than by how it is computed, so you can look for the question you

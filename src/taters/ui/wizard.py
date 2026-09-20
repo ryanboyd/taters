@@ -437,11 +437,9 @@ def _ask_csv_source(prompter: Prompter, *,
                 "statistics need columns of numbers.")
             raise _Restart
         prompter.reason(
-            "These are the measures themselves -- the columns the statistics "
-            "will relate to your outcomes. Only columns that read as numbers "
-            "are offered; press the left and right arrows on a row to change "
-            "how a column is read. Everything you leave unticked is still "
-            "available as an outcome, a group or a control.")
+            "The columns the statistics will relate to your outcomes. Numbers "
+            "only -- press the arrow keys on a row to change how it is read. "
+            "Unticked columns can still be an outcome, group or control.")
         state["feature_cols"] = ask_at_least_one(
             prompter, "Which columns are the predictors?",
             _kind_rows(numeric, state["kinds"],
@@ -606,9 +604,7 @@ def ask_source(prompter: Prompter,
             # back to a one-option menu with nothing on screen saying why.
             prompter.reason(
                 "Statistics need a spreadsheet: the groups to compare or the "
-                "outcomes to predict have to be columns sitting beside the "
-                "text. A folder of documents or recordings has no such "
-                "columns, so only the spreadsheet option is offered here.")
+                "outcomes to predict have to be columns beside the text.")
         kinds = ([c for c in SOURCE_KINDS if c.value == "csv"] if analyses
                  else [c for c in SOURCE_KINDS if c.value in ("csv", "txt_dir")]
                  if text_only else SOURCE_KINDS)
@@ -621,10 +617,9 @@ def ask_source(prompter: Prompter,
                 "in others -- can train it.")
         elif text_only and not analyses:
             prompter.reason(
-                "A model is trained on text you already have: a folder of "
-                "documents or a spreadsheet with the text in one column. To "
-                "train on recordings, transcribe them with a pipeline first "
-                "and train on the transcripts it writes.")
+                "Training reads text you already have: a folder of documents, "
+                "or a spreadsheet column. For recordings, transcribe them with "
+                "a pipeline first and train on the transcripts.")
         kind = str(prompter.select("What kind of data do you have?", kinds))
         source, file_type = SOURCE_KIND_MAP[kind]
 
@@ -744,17 +739,12 @@ def ask_features(prompter: Prompter, source: str = "media",
     # the question here used to be "What do you want out of it?", and people
     # found it vague -- it didn't say that the answer is a set of feature
     # tables, or that the steps they depend on come along for free.
-    reason = ("Each indented row here is a table of measures Taters will "
-              f"produce, one row per {'file' if source == 'media' else 'text'}"
-              ". Tick as many as you like -- ticking a heading takes "
-              "everything under it -- and anything a pick needs first -- "
-              "converting audio, transcribing it, counting words -- is added "
-              "for you.")
+    reason = ("Each indented row is a table of measures, one row per "
+              f"{'file' if source == 'media' else 'text'}. A heading ticks "
+              "everything under it, and whatever a pick needs first comes along.")
     if analyses:
-        reason += (" You asked for statistics as well, so at least one pick "
-                   f"has to be a per-text table; rows marked "
-                   f"{NOT_FOR_STATISTICS} describe the whole corpus instead, "
-                   "and can come along but not carry the statistics.")
+        reason += (" Statistics need at least one per-text table; rows marked "
+                   f"{NOT_FOR_STATISTICS} describe the whole corpus.")
     prompter.reason(reason)
     while True:
         picked = expand_categories(
@@ -884,9 +874,9 @@ def preflight(prompter: Prompter, steps: Sequence[_recipes.Recipe]) -> List[str]
 
     if any(r.needs_ffmpeg for r in steps) and shutil.which("ffmpeg") is None:
         prompter.reason(
-            "ffmpeg was not found on your PATH. Every pipeline here needs it to "
-            "read media files. Install it from https://ffmpeg.org/download.html "
-            "(or `sudo apt install ffmpeg` / `brew install ffmpeg`)."
+            "ffmpeg was not found on your PATH, and every pipeline here needs it "
+            "to read media. `sudo apt install ffmpeg`, `brew install ffmpeg`, or "
+            "https://ffmpeg.org/download.html"
         )
         try:
             carry_on = prompter.confirm("Carry on and write the pipeline anyway?",
@@ -1428,10 +1418,8 @@ def _ask_filters(prompter: Prompter, columns: Sequence[str],
     extra: List[str] = []
     values_of = values_of or (lambda c: [str(r.get(c) or "") for r in sample])
     prompter.reason(
-        "A filter drops rows before any statistics run -- the usual one is a "
-        "minimum length, because a three-word answer makes most language "
-        "measures meaningless. Rows with a blank in the filtered column are "
-        "dropped too: an unknown word count is not evidence of a long text.")
+        "A filter drops rows before the statistics run -- the usual one is a "
+        "minimum length. Rows blank in the filtered column are dropped too.")
     if not prompter.confirm("Ignore any rows before analyzing?", default=False):
         return filters, extra
 
@@ -1682,18 +1670,14 @@ def ask_analysis(prompter: Prompter, src: SourceSpec,
     spare = [c for c in columns
              if c not in src.text_cols and c not in src.feature_cols]
 
-    reason = ("Taters can also run the statistics for you, on the features "
-              "it just extracted: differences between groups, correlations "
-              "with an outcome. Results land in a stats_results folder as "
-              "tidy tables plus a plain-English report."
+    reason = ("Taters can also run the statistics on what it just extracted: "
+              "group differences, correlations with an outcome. Results land in "
+              "a stats_results folder, with a plain-English report."
               + ("" if required else
                  " Tick nothing to just get the feature tables."))
     if src.text_mode == "separate" and len(src.text_cols) > 1:
-        reason += (" You asked for each text column to be measured "
-                   "separately, so each is analyzed separately too -- one "
-                   "set of results per column, which is what keeps one "
-                   "person's several answers from counting as several "
-                   "independent observations.")
+        reason += (" Each text column was measured separately, so each is "
+                   "analyzed separately too.")
     catalog = list(_recipes.user_facing(src.source, stage="analyze"))
     # what each column gets treated as, carried over from the source stage
     # (or detected right here for a spec built without it). `could_be` is the
@@ -1952,12 +1936,9 @@ def ask_analysis(prompter: Prompter, src: SourceSpec,
             spec.control_cols, spec.categorical_controls = [], []
             return False
         prompter.reason(
-            "A control is something you want held constant so it cannot "
-            "explain your result: age, gender, how long the text is. Group "
-            "comparisons become ANCOVA and report adjusted means, "
-            "correlations become partial correlations, and the prediction "
-            "step also fits the controls on their own -- so you can see "
-            "what the language added over them rather than guessing.")
+            "A control is something held constant so it cannot explain your "
+            "result: age, gender, text length. Comparisons become ANCOVA, "
+            "correlations become partial.")
         state["controls"] = bool(prompter.confirm(
             "Control for any of your other columns?",
             default=bool(spec.control_cols)))
@@ -1969,10 +1950,9 @@ def ask_analysis(prompter: Prompter, src: SourceSpec,
         if state["stop"] or not state["controls"]:
             return False
         prompter.reason(
-            "Each column shows how it will be held constant: as numbers "
-            "(a measurement) or as labels (a category, one coefficient per "
-            "level). A category that happens to be numbered -- a 1/2 gender "
-            "code -- reads as numbers; press → on its row to make it labels.")
+            "Each column shows how it will be held constant: as numbers, or as "
+            "labels -- one coefficient per level. A numbered category reads as "
+            "numbers; press → on its row to make it labels.")
         eligible = eligible_controls()
         spec.control_cols = ask_at_least_one(
             prompter, "Which column(s) should be held constant?",
@@ -2006,9 +1986,8 @@ def ask_analysis(prompter: Prompter, src: SourceSpec,
             state["chosen"] = [r.id for r, _ in tables]
             return False
         prompter.reason(
-            "By default every feature table you extracted feeds the "
-            "statistics together. You can narrow that -- and choose whether "
-            "to analyze them as one set or one at a time.")
+            "Every feature table you extracted feeds the statistics together. "
+            "You can narrow that, or analyze them one at a time.")
         pre = set(spec.tables) if spec.tables else {r.id for r, _ in tables}
         chosen = ask_at_least_one(
             prompter, "Which feature tables should feed the statistics?",
@@ -2042,11 +2021,9 @@ def ask_analysis(prompter: Prompter, src: SourceSpec,
         from ..stats._common import P_ADJUST_METHODS
 
         prompter.reason(
-            "Testing many features at once finds things by chance: 160 "
-            "measures at p < .05 hands you eight 'findings' from noise "
-            "alone. The correction decides what counts as a finding, and "
-            "which one to use is a methodological choice, not a default "
-            "worth hiding -- so it is asked, and recorded in the report.")
+            "Testing many features at once finds things by chance: 160 measures "
+            "at p < .05 hands you eight 'findings' from noise alone. Your choice "
+            "is recorded in the report.")
         spec.p_adjust = str(prompter.select(
             "How should p-values be corrected for multiple comparisons?",
             [Choice(key, _ADJUST_LABELS[key], words)

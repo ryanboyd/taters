@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import io
 import re
+from pathlib import Path
 
 import pytest
 
@@ -877,15 +878,93 @@ def test_a_note_leaves_no_trailing_whitespace():
 
 def test_prose_wraps_to_the_measure_not_to_the_whole_terminal():
     """
-    Text run to the width of a maximized terminal is hard to read and left the
-    screen with two right edges: one at the banner, one far off to its right.
+    Text run to the width of a maximized terminal is hard to read -- the eye
+    loses its place coming back for the next line -- so there is a ceiling.
     """
-    from taters.ui.prompts import MEASURE
+    from taters.ui.prompts import PROSE_MEASURE
 
     lines = [ln for ln in painted("  " + "word " * 60, width=200) if ln.strip()]
 
     assert len(lines) > 1
-    assert max(len(ln) for ln in lines) <= MEASURE
+    assert max(len(ln) for ln in lines) <= PROSE_MEASURE
+
+
+def test_prose_takes_the_width_a_wide_window_offers_up_to_the_ceiling():
+    """
+    The ceiling used to be the banner's 64, which cost vertical space: the
+    paragraph above the checklist ran to nine lines and pushed the list off the
+    bottom of the screen, so arrowing through it scrolled the page. A wide
+    window has the room; prose takes it up to the point where it stops reading
+    comfortably.
+    """
+    from taters.ui.prompts import MEASURE
+
+    text = "  " + "word " * 60
+    wide = [ln for ln in painted(text, width=140) if ln.strip()]
+    narrow = [ln for ln in painted(text, width=66) if ln.strip()]
+
+    assert max(len(ln) for ln in wide) > MEASURE, \
+        "a wide window still wraps to the banner's width"
+    assert len(wide) < len(narrow), "the wider wrap saved no rows"
+
+
+def test_the_reason_and_the_notes_above_it_share_one_right_edge():
+    """
+    Two measures on one screen is the clutter the ceiling exists to avoid, so
+    the paragraph explaining a question wraps exactly as a note does.
+    """
+    from taters.ui.live import LivePrompter
+    from taters.ui.prompts import note_lines
+
+    p = LivePrompter.__new__(LivePrompter)
+    p._console = type("C", (), {"width": 140})()
+    p._reason = "word " * 60
+    lines = p._reason_lines()
+    # a note of the same words on the same screen: same number of rows, and a
+    # longest line within a word of it (the reason carries a marker and a
+    # deeper hanging indent, so they are not character-identical)
+    same = note_lines("  " + p._reason, p.note_width())
+    assert len(lines) > 1
+    assert len(lines) == len(same)
+    assert abs(max(len(ln) for ln in lines) - max(len(ln) for ln in same)) <= 5
+
+
+def test_no_screen_explains_itself_at_book_length():
+    """
+    A reason is the sentence that makes a question make sense, not the
+    documentation for it. They had grown: the feature checklist opened with a
+    paragraph that took nine rows of a terminal, pushed the list it was
+    explaining off the bottom, and got skipped for exactly that reason. Two
+    wrapped lines is the budget; whatever else is worth saying belongs in the
+    guides, which is where somebody reading at length is anyway.
+    """
+    import ast
+    import textwrap
+
+    import taters.ui as taters_ui
+    from taters.ui.prompts import PROSE_MEASURE
+
+    overlong = []
+    root = Path(taters_ui.__file__).parent
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "reason" and node.args):
+                continue
+            try:
+                text = ast.literal_eval(node.args[0])
+            except (ValueError, TypeError):
+                continue    # built from pieces at run time; nothing to measure
+            if not isinstance(text, str):
+                continue
+            rows = textwrap.wrap("\u203a " + " ".join(text.split()),
+                                 width=PROSE_MEASURE, initial_indent="  ",
+                                 subsequent_indent="    ")
+            if len(rows) > 2:
+                overlong.append(f"{path.name}:{node.lineno} wraps to {len(rows)} lines")
+    assert not overlong, "\n".join(overlong)
 
 
 def test_a_narrow_terminal_is_not_padded_out_to_the_measure():

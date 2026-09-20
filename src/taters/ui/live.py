@@ -35,7 +35,7 @@ from dataclasses import replace
 from typing import Any, List, Optional, Sequence
 
 from . import glyphs
-from .prompts import (MEASURE, PAUSE_MESSAGE, _REASON_MARK, _REASON_STYLE,
+from .prompts import (PAUSE_MESSAGE, _REASON_MARK, _REASON_STYLE,
                       Cancelled, Choice, GoBack, QuestionaryPrompter,
                       Stage, _MIN_VISIBLE_ROWS, description_rows,
                       flip_tick_mark, note_lines, set_chrome_rows,
@@ -528,8 +528,9 @@ class LivePrompter(QuestionaryPrompter):
             return []
         import textwrap
 
-        width = max(min(self._console.width, MEASURE), 20)
-        return textwrap.wrap(f"{_REASON_MARK} {self._reason}", width=width - 2,
+        # the same measure as a note, so the paragraph explaining a question
+        # and the commentary above it share a right edge
+        return textwrap.wrap(f"{_REASON_MARK} {self._reason}", width=self.note_width(),
                              initial_indent="  ", subsequent_indent="    ",
                              # same as in `note`: a URL or a shell command in
                              # here can't be broken across lines.
