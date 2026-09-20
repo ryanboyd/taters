@@ -1289,3 +1289,35 @@ def test_translate_is_a_yes_no_on_the_transcript_menu():
     # "the rest", since it's the kind of decision somebody makes about a run
     everyday, _rest = wiz._editable_names(recipe, spec)
     assert "translate" in everyday
+
+
+def test_the_settings_screens_come_back_to_the_row_just_edited(tmp_path):
+    """
+    From a real session: change one setting, press enter, and the pointer was
+    back at the top of the list -- on a step with forty rows, most of the work
+    of changing two settings was scrolling back to where you were. Each of the
+    three screens now points at what was just edited (or the step just left),
+    and never at a row that a gate has since removed.
+    """
+    from taters.ui import recipes as _r
+    from taters.ui.compose import compose
+
+    steps = [_r.by_id("readability"), _r.by_id("word_vectors_train")]
+    var_specs = compose(["readability", "word_vectors_train"], name="x",
+                        source="csv", input_path="t.csv")["meta"]["variables"]
+    p = ScriptedPrompter([
+        "word_vectors_train",           # into the second step...
+        "epochs", 7,                    # ...edit one setting (rows are parameter names)...
+        "vector_size", 50,              # ...and another
+        ":done",                        # back to the list of steps
+        ":done",
+    ])
+    wiz.ask_tuning(p, steps, var_specs, ask_gate=False)
+
+    screen = "Word vectors: train on these texts — change a setting:"
+    defaults = [d for q, d in p.select_default_history if q == screen]
+    assert defaults[0] is None, "the first visit has nothing to come back to"
+    assert defaults[1] == "epochs", "after editing epochs the pointer should be on epochs"
+    assert defaults[2] == "vector_size"
+    # and the list of steps points at the step just left
+    assert p.select_defaults["What would you like to change?"] == "word_vectors_train"

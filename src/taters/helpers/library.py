@@ -261,9 +261,10 @@ KINDS: Dict[str, LibraryKind] = {
     ),
     "encoders": LibraryKind(
         id="encoders", label="Text encoders",
-        help="Language models adapted to your own texts by 'Train a model' "
-             "(*.json plus its weights folder). Pick one as the base for "
-             "transformer embeddings or for fine-tuning a predictor.",
+        help="Language models adapted to your own texts, or trained from "
+             "scratch on them, under 'Wrangle Language Models' (*.json plus "
+             "its weights folder). Pick one as the base for transformer "
+             "embeddings or for fine-tuning a predictor.",
         suffixes=(".json",),
         deep_check=_encoder_problem,
         describe_entry=_describe_encoder,

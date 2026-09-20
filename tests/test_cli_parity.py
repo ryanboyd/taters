@@ -27,7 +27,7 @@ MODULES = [
     "taters.text.topic_model_lda",
     "taters.text.topic_model_nmf",
     "taters.text.topic_count_sweep", "taters.text.word_vectors",
-    "taters.text.transformer_embeddings", "taters.text.adapt_encoder",
+    "taters.text.transformer_embeddings", "taters.text.adapt_encoder", "taters.text.pretrain_encoder",
     "taters.text.finetune_predictor", "taters.text.hf_classifier", "taters.score_model",
     "taters.helpers.text_gather", "taters.helpers.feature_gather",
     "taters.audio.convert_to_wav", "taters.audio.transcribe_with_whisper",

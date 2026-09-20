@@ -51,6 +51,7 @@ import csv
 import json
 import math
 import os
+import re
 import platform
 import time
 from collections import Counter
@@ -103,8 +104,16 @@ SIF_A = 1e-3
 #: the working copy to a few tens of megabytes whatever the vocabulary.
 _CHUNK_ROWS = 65536
 
-#: How many probes the training report describes when none were named.
-_DEFAULT_PROBES = 12
+#: The probe words whose neighbors the report and the clouds show when none
+#: are named: a dozen common content words, spelled out so they can be read,
+#: argued with and replaced (``probes``). Any not in a model's vocabulary is
+#: skipped. Function words are not here on purpose -- the neighbors of "the"
+#: are the same in every corpus and diagnostic of none -- and no stoplist is
+#: involved in deciding that: the list is the whole of the rule.
+DEFAULT_PROBES: Tuple[str, ...] = (
+    "time", "people", "work", "life", "home", "family", "money", "love",
+    "food", "friend", "think", "good",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -501,6 +510,89 @@ def _gensim_missing() -> str:
     return ""
 
 
+#: gensim reports within-epoch progress only as a log line, once a second:
+#: ``EPOCH 2 - PROGRESS: at 37.50% examples, 81234 words/s, ...``. The epoch
+#: in it is zero-based.
+_PROGRESS_LINE = re.compile(r"EPOCH (\d+) - PROGRESS: at ([\d.]+)%")
+
+
+class _TrainingProgress:
+    """
+    Turns gensim's training into progress reports the runner can show.
+
+    Two sources, because neither is enough alone. gensim's callbacks fire at
+    the start and end of every epoch -- deterministic, so the display always
+    knows which epoch it is on -- but say nothing in between, and an epoch
+    over a large corpus is minutes of silence. Within an epoch gensim reports
+    only through its logger, once a second, at INFO, which the root logger
+    drops by default; so for the duration of training a handler is attached
+    to that logger, its level lowered, and both put back afterwards, the way
+    :mod:`~taters.helpers.doc_text` borrows pypdf's logger.
+
+    Progress is reported as ``(done, total, message)`` with ``total`` the
+    epochs times a hundred, so a percentage inside epoch 3 of 6 lands where
+    it should on one bar.
+    """
+
+    def __init__(self, on_progress, epochs: int, family: str):
+        import logging
+
+        from gensim.models.callbacks import CallbackAny2Vec
+
+        self._report = on_progress
+        self._epochs = int(epochs)
+        self._family = family
+        self._epoch = 0                       # the one-based epoch under way
+        outer = self
+
+        class _Cb(CallbackAny2Vec):
+            def on_epoch_begin(self, model):
+                outer._epoch += 1
+                outer._say(0.0)
+
+            def on_epoch_end(self, model):
+                outer._say(100.0)
+
+        class _Handler(logging.Handler):
+            def emit(self, record):
+                try:
+                    m = _PROGRESS_LINE.search(record.getMessage())
+                except Exception:          # pragma: no cover - a malformed record
+                    return
+                if m:
+                    # gensim counts epochs from zero; the callback above is the
+                    # authority on which epoch we are in, but a line that names
+                    # one is taken at its word
+                    outer._epoch = int(m.group(1)) + 1
+                    outer._say(min(100.0, float(m.group(2))))
+
+        self.callback = _Cb()
+        self._handler = _Handler()
+        self._logger = logging.getLogger("gensim.models.word2vec")
+        self._previous_level = self._logger.level
+
+    def _say(self, percent: float) -> None:
+        if self._report is None or self._epoch < 1:
+            return
+        done = (self._epoch - 1) * 100 + percent
+        self._report(int(round(done)), self._epochs * 100,
+                     f"training {self._family}: epoch {self._epoch}/{self._epochs}, "
+                     f"{percent:.0f}%")
+
+    def __enter__(self):
+        import logging
+
+        self._logger.addHandler(self._handler)
+        if self._logger.getEffectiveLevel() > logging.INFO:
+            self._logger.setLevel(logging.INFO)
+        return self
+
+    def __exit__(self, *exc):
+        self._logger.removeHandler(self._handler)
+        self._logger.setLevel(self._previous_level)
+        return False
+
+
 class _EpochLoss:
     """Collects gensim's running loss after each epoch as a per-epoch list."""
 
@@ -668,8 +760,10 @@ def train_word_vectors(
         frequent word with a long vector does not dominate.
     probes : str
         Comma-separated words whose nearest neighbors the report shows;
-        every concept category's neighbors are shown as well. Empty: the
-        most frequent words.
+        every concept category's neighbors are shown as well. Empty:
+        :data:`DEFAULT_PROBES`, a dozen common content words, skipping any
+        the model did not learn. Nothing about training depends on this; it
+        only decides which words the clouds are about.
     top_neighbors : int
         Neighbors per probe in the table and the clouds.
     rounding : int
@@ -783,6 +877,7 @@ def train_word_vectors(
     announce(on_progress, f"training {family} ({algorithm}) for {epochs} epoch(s)")
     threads = 1 if reproducible else max(1, (os.cpu_count() or 2) - 1)
     loss = _EpochLoss()
+    progress = _TrainingProgress(on_progress, int(epochs), family)
     common = dict(vector_size=int(vector_size), window=int(window),
                   min_count=int(min_count), sg=1 if algorithm == "skipgram" else 0,
                   negative=int(negative), epochs=int(epochs), seed=int(seed),
@@ -792,12 +887,15 @@ def train_word_vectors(
         # for us to report. the report says so rather than showing zeros
         from gensim.models import FastText
 
-        trained = FastText(corpus_file=str(tokens_path), **common)
+        with progress:
+            trained = FastText(corpus_file=str(tokens_path),
+                               callbacks=[progress.callback], **common)
     else:
         from gensim.models import Word2Vec
 
-        trained = Word2Vec(corpus_file=str(tokens_path), compute_loss=True,
-                           callbacks=[loss.callback], **common)
+        with progress:
+            trained = Word2Vec(corpus_file=str(tokens_path), compute_loss=True,
+                               callbacks=[loss.callback, progress.callback], **common)
     kv = trained.wv
     vocabulary = list(kv.index_to_key)
     counts = [int(kv.get_vecattr(w, "count")) for w in vocabulary]
@@ -877,25 +975,25 @@ def train_word_vectors(
 
 
 def _probe_words(probes: str, vocabulary: Sequence[str],
-                 counts: Optional[Sequence[int]]) -> List[str]:
-    """The words whose neighbors the report shows: those asked for, and --
-    with none asked -- the most frequent words."""
+                 counts: Optional[Sequence[int]] = None) -> List[str]:
+    """
+    The words whose neighbors the report shows: those asked for, or -- with
+    none asked -- :data:`DEFAULT_PROBES`, in that order, skipping any the
+    model never learned.
+
+    An earlier version took the corpus's most frequent words, and every
+    cloud was function words. A fixed list needs no explaining: it is on the
+    options screen, and it is the whole rule. ``counts`` is accepted for the
+    callers that have it and no longer used.
+    """
     out: List[str] = []
     for w in [p.strip() for p in str(probes or "").split(",")]:
         if w and w not in out:
             out.append(w)
-    if not out:
-        if counts is not None:
-            order = sorted(range(len(vocabulary)), key=lambda i: -int(counts[i]))
-        else:
-            order = range(len(vocabulary))
-        for i in order:
-            w = str(vocabulary[i])
-            if len(w) > 2 and w not in out:
-                out.append(w)
-            if len(out) >= _DEFAULT_PROBES:
-                break
-    return out
+    if out:
+        return out
+    known = set(str(w) for w in vocabulary)
+    return [w for w in DEFAULT_PROBES if w in known]
 
 
 def _neighbors_of_vectors(model: _Loaded, names: Sequence[str], vectors,

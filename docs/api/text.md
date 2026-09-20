@@ -42,6 +42,12 @@
       show_source: true
       show_root_heading: true
 
+::: taters.text.pretrain_encoder
+    options:
+      members_order: alphabetical
+      show_source: true
+      show_root_heading: true
+
 ::: taters.text.transformer_embeddings
     options:
       members_order: alphabetical

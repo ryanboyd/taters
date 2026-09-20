@@ -64,6 +64,7 @@ CAPABILITIES: Dict[str, str] = {
     "nmf_loadings_csv": "the NMF topic model's term-by-factor loadings",
     "transformer_embeddings_csv": "row-level transformer embeddings",
     "adapted_encoder_json": "a text encoder adapted to the corpus",
+    "scratch_encoder_json": "a text encoder trained from scratch on the corpus",
     "text_predictor_json": "a fine-tuned text predictor",
     "word_vectors_model_json": "a trained word-vector model",
     "word_vectors_neighbors_csv": "the word-vector model's nearest-neighbor table",
@@ -405,6 +406,11 @@ class Recipe:
     #: asks a differently worded question for each, because the two steps
     #: used to show what looked like the same menu twice.
     encoder_kind: str = "raw"
+    #: Whether the step runs on torch and transformers even though it names
+    #: no encoder to start from -- pretraining from scratch does. The Train
+    #: menu grays such a step out without torch; keying that on the module's
+    #: name once missed the fine-tuning entry, so it is declared here instead.
+    needs_torch: bool = False
     #: Whether an empty feature-table list is acceptable. False for the
     #: statistics, which have nothing to analyze without one. True for
     #: model scoring, where whether features are needed at all is a fact
@@ -638,6 +644,17 @@ SETTING_LABELS: Dict[str, str] = {
     "encoder": "encoder (raw)",
     "sentence_model": "meaning-tuned model",
     "stats_blas_threads": "linear-algebra threads while fitting",
+    "pretrain_preset": "architecture (size preset)",
+    # a word-vector model can score texts against dictionaries as it embeds
+    # them; the row has to say that is optional and what it is for, or it
+    # reads as a training setting somebody forgot to explain
+    "concept_dicts": "concept dictionaries to score texts against (optional)",
+    "probes": "words whose neighbors the clouds show",
+    "pretrain_vocab_size": "tokenizer vocabulary size",
+    "pretrain_hidden": "layer width (custom preset)",
+    "pretrain_heads": "attention heads (custom preset)",
+    "pretrain_layers": "layers (custom preset)",
+    "pretrain_patience": "epochs without improvement before stopping",
     # the vocabulary is built in two passes and the parameter names do not say
     # so: `min_freq` decides which words are counted at all, `vocab_min_freq`
     # decides how many of the survivors the model actually sees. Four rows
@@ -2332,19 +2349,35 @@ RECIPES: List[Recipe] = [
                             "word_vectors_neighbors_csv"}),
         auto_with=("word_vectors_wordclouds",),
         extras=("vectors",),
-        # concepts are LIWC-22 dictionaries from the library, one sim_ column
-        # per category -- and they're optional, so the default we declare is
-        # *no* dictionary rather than the whole library.
-        library={"concept_dicts": "dictionaries"},
-        library_defaults={"concept_dicts": ()},
+        # concept dictionaries are deliberately not offered here. training a
+        # model and applying it -- to extract vectors, or to score texts by
+        # their distance to concepts -- are two different things, and the
+        # dictionaries are an apply setting: set per saved model under
+        # Settings -> Manage saved models, and changeable there later without
+        # retraining anything. so the parameter is hidden, and the training
+        # run's own feature table carries the vectors alone.
         # tokenizing under engine=stanza loads one model; gensim itself is
         # CPU-only, so this declaration is really about the tokenizer.
         gpu_use="gpu_one_model",
         param_when=dict(_ENGINE_PARAM_WHEN),
-        **_TEXT_STEP,
+        sources=_TEXT_STEP["sources"],
+        text_input=True,
+        hidden=(*_TEXT_STEP["hidden"], "concept_dicts"),
         vars={
             **_FEATURES_DIR_VAR,
-            "lemmatize": _LEMMATIZE_VAR,
+            # its own variable, off by default, rather than the pipeline-wide
+            # `lemmatize`. the frequency steps want lemmas because their
+            # question is "which words does this text use"; a word-vector
+            # model wants the forms people actually wrote, because `was` and
+            # `be`, `cats` and `cat`, keep different company, and that is what
+            # it is learning
+            "wv_lemmatize": {
+                "default": False,
+                "desc": "Train on lemmas (cat for cats, be for was) rather than "
+                        "the words as written. Off: the model learns the forms "
+                        "people used, which is usually what you want from "
+                        "word vectors.",
+            },
             "keep_punctuation": _KEEP_PUNCTUATION_VAR,
             **_ENGINE_VARS,
             "wv_family": {
@@ -2385,6 +2418,16 @@ RECIPES: List[Recipe] = [
                         "or smooth inverse frequency (sif), where the "
                         "commonest words count least.",
             },
+            "wv_probes": {
+                # the same dozen the trainer falls back to, spelled out here
+                # so the options row shows the actual words and not "blank"
+                "default": "time, people, work, life, home, family, money, "
+                           "love, food, friend, think, good",
+                "desc": "Words whose nearest neighbors the report and the word "
+                        "clouds show, comma-separated; any the model did not "
+                        "learn is skipped. Replace them with the words your "
+                        "study turns on.",
+            },
             "wv_seed": {
                 "default": 42,
                 "desc": "Random seed for training. The same seed on one thread "
@@ -2402,7 +2445,7 @@ RECIPES: List[Recipe] = [
             "out_neighbors_csv":
                 "{{var:features_dir}}/models/word_vectors_neighbors.csv",
             "out_report_md": "{{var:features_dir}}/models/word_vectors_report.md",
-            "lemmatize": "{{var:lemmatize}}",
+            "lemmatize": "{{var:wv_lemmatize}}",
             "keep_punctuation": "{{var:keep_punctuation}}",
             **_ENGINE_WITH,
             "family": "{{var:wv_family}}",
@@ -2413,6 +2456,7 @@ RECIPES: List[Recipe] = [
             "epochs": "{{var:wv_epochs}}",
             "weighting": "{{var:wv_weighting}}",
             "seed": "{{var:wv_seed}}",
+            "probes": "{{var:wv_probes}}",
         },
     ),
     Recipe(
@@ -2490,6 +2534,112 @@ RECIPES: List[Recipe] = [
             "learning_rate": "{{var:adapt_learning_rate}}",
             "train_layers": "{{var:adapt_train_layers}}",
             "seed": "{{var:adapt_seed}}",
+            "device": "{{var:device}}",
+        },
+    ),
+    Recipe(
+        id="pretrain_encoder",
+        stage="train",
+        needs_torch=True,
+        label="Train a transformer from scratch",
+        help="A whole encoder from random weights, with a tokenizer learned "
+             "from your texts. Heavy-duty: hours on a GPU, days on a CPU, and "
+             "below a few million words worse than any pretrained model.",
+        call="potato.text.pretrain_encoder",
+        target="taters.text.pretrain_encoder:pretrain_encoder",
+        scope="global",
+        save_as="scratch_encoder",
+        requires=frozenset({"unified_transcripts_csv"}),
+        produces=frozenset({"scratch_encoder_json"}),
+        gpu_use="gpu_one_model",
+        **_TEXT_STEP,
+        vars={
+            **_FEATURES_DIR_VAR,
+            "encoder_name": {
+                "default": "scratch_encoder",
+                "desc": "What to call the encoder (its file name and its name "
+                        "in menus).",
+            },
+            "pretrain_preset": {
+                "default": "small",
+                "desc": "The architecture. small: 4 layers, 256 wide, about "
+                        "10M parameters -- an overnight run on one GPU. base: "
+                        "12 layers, 768 wide, the BERT/RoBERTa shape, about "
+                        "110M -- days. custom: set the numbers below.",
+            },
+            "pretrain_vocab_size": {
+                "default": 0,
+                "desc": "Symbols in the tokenizer learned from your texts. 0 "
+                        "follows the preset (8,000 small, 30,000 base). At "
+                        "least 300.",
+            },
+            "pretrain_layers": {
+                "default": 6,
+                "desc": "Transformer layers (custom preset only).",
+            },
+            "pretrain_hidden": {
+                "default": 384,
+                "desc": "Width of every layer (custom preset only). A multiple "
+                        "of the attention heads.",
+            },
+            "pretrain_heads": {
+                "default": 6,
+                "desc": "Attention heads per layer (custom preset only).",
+            },
+            "pretrain_max_length": {
+                "default": 256,
+                "desc": "Tokens per training window, and the longest input the "
+                        "finished model will read.",
+            },
+            "pretrain_epochs": {
+                "default": 40,
+                "desc": "The most passes over the corpus. Training stops "
+                        "earlier once the held-out loss stops falling, and "
+                        "keeps the best epoch.",
+            },
+            "pretrain_patience": {
+                "default": 3,
+                "desc": "Epochs without improvement that end the run.",
+            },
+            "pretrain_batch_size": {
+                "default": 32,
+                "desc": "Windows per forward pass. Halved automatically if "
+                        "the GPU runs out of memory.",
+            },
+            "pretrain_learning_rate": {
+                "default": 5e-4,
+                "desc": "Peak learning rate (AdamW, linear warm-up and decay). "
+                        "Ten times adaptation's: nothing here is worth "
+                        "preserving yet.",
+            },
+            "pretrain_seed": {
+                "default": 42,
+                "desc": "Seeds the weights, the held-out split, the shuffles "
+                        "and the masks.",
+            },
+        },
+        # the numbers behind "custom" mean nothing under a named preset, and
+        # showing them there would invite editing something that is ignored
+        param_when={"layers": ("preset", "custom"),
+                    "hidden_size": ("preset", "custom"),
+                    "attention_heads": ("preset", "custom")},
+        with_={
+            **_TEXT_INPUT_WITH,
+            "out_model_json": "{{var:features_dir}}/models/{{var:encoder_name}}.json",
+            "out_report_md":
+                "{{var:features_dir}}/models/{{var:encoder_name}}_report.md",
+            "name": "{{var:encoder_name}}",
+            "preset": "{{var:pretrain_preset}}",
+            "vocab_size": "{{var:pretrain_vocab_size}}",
+            "layers": "{{var:pretrain_layers}}",
+            "hidden_size": "{{var:pretrain_hidden}}",
+            "attention_heads": "{{var:pretrain_heads}}",
+            "max_length": "{{var:pretrain_max_length}}",
+            "epochs": "{{var:pretrain_epochs}}",
+            "patience": "{{var:pretrain_patience}}",
+            "batch_size": "{{var:pretrain_batch_size}}",
+            "learning_rate": "{{var:pretrain_learning_rate}}",
+            "seed": "{{var:pretrain_seed}}",
             "device": "{{var:device}}",
         },
     ),

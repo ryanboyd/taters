@@ -21,8 +21,9 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 __all__ = ["CURATED_ENCODERS", "CURATED_SENTENCE_MODELS", "LAYER_CHOICES",
-           "POOLINGS", "PRECISIONS", "ENCODER_MODEL_TYPES",
+           "POOLINGS", "PRECISIONS", "ENCODER_MODEL_TYPES", "PRESETS",
            "cached_hub_encoders", "cached_hub_sentence_models",
+           "preset_config", "fresh_encoder", "unwrap",
            "ResolvedEncoder", "torch_missing_reason", "resolve_encoder",
            "load_encoder", "parse_layers", "pool_hidden", "encode_sentences",
            "run_with_oom_fallback", "autocast_for", "freeze_below",
@@ -79,6 +80,84 @@ CURATED_SENTENCE_MODELS: Tuple[Tuple[str, str], ...] = (
      "278M parameters, 768-wide vectors. For text in fifty-odd languages, "
      "or several at once."),
 )
+
+#: Architectures to pretrain from scratch, by name rather than by number.
+#: ``small`` is what one GPU trains overnight; ``base`` is the BERT/RoBERTa
+#: shape and takes days. ``custom`` is the same fields, supplied by the
+#: caller. The feed-forward width is four times the hidden size, as in BERT;
+#: positions are set from ``max_length`` when the config is built.
+PRESETS: Dict[str, Dict[str, int]] = {
+    "small": {"layers": 4, "hidden_size": 256, "attention_heads": 4, "vocab_size": 8_000},
+    "base": {"layers": 12, "hidden_size": 768, "attention_heads": 12, "vocab_size": 30_000},
+    "custom": {"layers": 0, "hidden_size": 0, "attention_heads": 0, "vocab_size": 8_000},
+}
+
+
+def preset_config(shape: Dict[str, int], *, vocab_size: int, max_length: int, tokenizer):
+    """
+    A RoBERTa config for a fresh encoder of this shape.
+
+    RoBERTa's positions start at ``pad_token_id + 1``, so a model meant to read
+    ``max_length`` tokens needs two more position embeddings than that -- ask
+    for exactly ``max_length`` and the lookup runs off the end mid-window.
+    """
+    from transformers import RobertaConfig
+
+    return RobertaConfig(
+        vocab_size=int(vocab_size),
+        hidden_size=int(shape["hidden_size"]),
+        num_hidden_layers=int(shape["layers"]),
+        num_attention_heads=int(shape["attention_heads"]),
+        intermediate_size=4 * int(shape["hidden_size"]),
+        max_position_embeddings=int(max_length) + 2,
+        pad_token_id=tokenizer.pad_token_id,
+        bos_token_id=tokenizer.bos_token_id,
+        eos_token_id=tokenizer.eos_token_id,
+    )
+
+
+def fresh_encoder(config, *, device: str = "auto", seed: int = 42, verbose: bool = False):
+    """
+    A masked-language model with random weights, on the resolved device.
+
+    The counterpart of :func:`load_encoder` for a model nobody has trained:
+    ``AutoModelForMaskedLM.from_config`` under the seed, then the same device
+    rule every GPU step uses. With more than one GPU visible the model is
+    wrapped in ``torch.nn.DataParallel`` so all of them are used from this one
+    process -- not as efficient as a distributed launch, and honest about it
+    in the count returned. Returns ``(model, device_name, fallback_reason,
+    devices)``; unwrap with :func:`unwrap` before saving or reading config.
+    """
+    missing = torch_missing_reason()
+    if missing:
+        raise ImportError(missing)
+    import torch
+    from transformers import AutoModelForMaskedLM
+
+    from ..helpers.gpu import resolve_device
+
+    def probe():
+        torch.zeros(1, device="cuda") + 1
+
+    device_name, reason = resolve_device(device, backend="torch", probe=probe)
+    torch.manual_seed(int(seed))
+    model = AutoModelForMaskedLM.from_config(config)
+    model.to(device_name)
+    devices = 1
+    if device_name.startswith("cuda") and torch.cuda.device_count() > 1:
+        devices = int(torch.cuda.device_count())
+        model = torch.nn.DataParallel(model)
+        if verbose:
+            print(f"[pretrain_encoder] using {devices} GPUs from one process "
+                  f"(DataParallel)")
+    model.train()
+    return model, device_name, reason, devices
+
+
+def unwrap(model):
+    """The bare model behind a ``DataParallel`` wrapper, or the model itself."""
+    return getattr(model, "module", model)
+
 
 #: The `model_type` values of encoders -- models this module can read
 #: hidden states from and adapt. A Whisper, a Qwen or a wav2vec2 checkpoint

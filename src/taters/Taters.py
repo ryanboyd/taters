@@ -86,6 +86,7 @@ class Taters:
     def describe_word_vectors(self, **kwargs):                  return self.text.describe_word_vectors(**kwargs)
     def extract_transformer_embeddings(self, **kwargs):         return self.text.extract_transformer_embeddings(**kwargs)
     def adapt_encoder(self, **kwargs):                          return self.text.adapt_encoder(**kwargs)
+    def pretrain_encoder(self, **kwargs):                       return self.text.pretrain_encoder(**kwargs)
     def finetune_text_predictor(self, **kwargs):                return self.text.finetune_text_predictor(**kwargs)
     def apply_text_predictor(self, **kwargs):                   return self.text.apply_text_predictor(**kwargs)
     def import_hf_classifier(self, **kwargs):                   return self.text.import_hf_classifier(**kwargs)
@@ -255,6 +256,10 @@ class _TextAPI:
     def adapt_encoder(self, **kwargs):
         from .text.adapt_encoder import adapt_encoder
         return _forward(adapt_encoder, kwargs)
+
+    def pretrain_encoder(self, **kwargs):
+        from .text.pretrain_encoder import pretrain_encoder
+        return _forward(pretrain_encoder, kwargs)
 
     def finetune_text_predictor(self, **kwargs):
         from .text.finetune_predictor import finetune_text_predictor

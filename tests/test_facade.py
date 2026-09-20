@@ -77,6 +77,7 @@ FACADE_METHODS = [
     ("text", "describe_word_vectors"),
     ("text", "extract_transformer_embeddings"),
     ("text", "adapt_encoder"),
+    ("text", "pretrain_encoder"),
     ("text", "finetune_text_predictor"),
     ("text", "apply_text_predictor"),
     ("text", "import_hf_classifier"),

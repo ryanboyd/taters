@@ -610,3 +610,114 @@ def test_training_without_gensim_says_what_to_install(tmp_path, monkeypatch):
     with pytest.raises(ImportError, match=r"taters\[vectors\]"):
         wv.train_word_vectors(csv_path=_corpus(tmp_path / "c.csv", ["cat"]),
                               text_cols=["text"], verbose=False)
+
+
+@needs_gensim
+def test_training_reports_every_epoch_on_one_bar(tmp_path):
+    """
+    From a real session: the bar sat blank for the whole of a word2vec run.
+    gensim's callbacks fire at every epoch's start and end, so at the least
+    the display knows which epoch it is on and how many there are, and the
+    numbers all land on one bar (epochs times a hundred).
+    """
+    seen = []
+    _train(tmp_path, epochs=4, on_progress=lambda done, total, msg: seen.append((done, total, msg)))
+    reports = [(d, t, m) for d, t, m in seen if t is not None and "epoch" in m]
+    assert reports, "training reported no epochs at all"
+    assert {t for _d, t, _m in reports} == {400}
+    epochs = [m.split("epoch ")[1].split(",")[0] for _d, _t, m in reports]
+    assert epochs[0] == "1/4" and epochs[-1] == "4/4"
+    assert all(f"{k}/4" in epochs for k in (1, 2, 3, 4)), epochs
+    dones = [d for d, _t, _m in reports]
+    assert dones == sorted(dones), "progress went backwards"
+    assert dones[-1] == 400
+    assert all("word2vec" in m for _d, _t, m in reports)
+
+
+@needs_gensim
+def test_training_fasttext_reports_epochs_too(tmp_path):
+    """fastText keeps no running loss, so it used to get no callback at all --
+    and therefore no progress either. The bar is not a loss curve."""
+    seen = []
+    _train(tmp_path, family="fasttext", epochs=3,
+           on_progress=lambda done, total, msg: seen.append((done, total, msg)))
+    reports = [(d, t, m) for d, t, m in seen if t is not None and "epoch" in m]
+    epochs = [m.split("epoch ")[1].split(",")[0] for _d, _t, m in reports]
+    assert epochs and epochs[-1] == "3/3", epochs
+    assert all("fasttext" in m for _d, _t, m in reports)
+
+
+@needs_gensim
+def test_a_progress_line_from_gensim_moves_the_bar_within_the_epoch():
+    """
+    Between epochs gensim speaks only through its logger, once a second. On a
+    corpus of any size that is where the run spends its time, so the line is
+    read and turned into a position inside the current epoch. gensim counts
+    epochs from zero; the bar counts from one.
+    """
+    import logging
+
+    seen = []
+    prog = wv._TrainingProgress(lambda d, t, m: seen.append((d, t, m)), epochs=6, family="word2vec")
+    logger = logging.getLogger("gensim.models.word2vec")
+    # through `info`, exactly as gensim emits it -- not `handle` -- because the
+    # level check lives in `info`, and the whole point of borrowing the logger
+    # is that its default level would drop this line before any handler saw it
+    # (the first version of this test called `handle` and passed with the
+    # level left alone, which proved nothing)
+    with prog:
+        logger.info("EPOCH %i - PROGRESS: at %.2f%% examples, %.0f words/s, in_qsize %i, out_qsize %i",
+                    2, 37.5, 81234.0, -1, 0)
+    assert seen == [(int(round(2 * 100 + 37.5)), 600, "training word2vec: epoch 3/6, 38%")]
+    # and outside the borrowed window the same line goes nowhere near the bar
+    logger.info("EPOCH %i - PROGRESS: at %.2f%% examples, %.0f words/s, in_qsize %i, out_qsize %i",
+                3, 50.0, 1.0, -1, 0)
+    assert len(seen) == 1
+    # and the borrowed logger is put back the way it was found
+    assert prog._handler not in logging.getLogger("gensim.models.word2vec").handlers
+
+
+def test_default_probes_are_a_fixed_list_of_content_words_within_the_vocabulary():
+    """
+    From a real session: every cloud after training was function words,
+    because the probes were the corpus's most frequent words. The default is
+    now a fixed dozen common content words -- readable on the options screen,
+    replaceable there -- taken in order and skipping any the model never
+    learned. No stoplist decides anything; the list is the whole rule.
+    """
+    vocabulary = ["the", "and", "that", "with", "potato", "work", "was", "for",
+                  "money", "love", "2019", "..."]
+    picked = wv._probe_words("", vocabulary, [900, 800, 700, 600, 50, 40, 500, 450, 30, 25, 20, 15])
+    assert picked == ["work", "money", "love"], picked          # DEFAULT_PROBES order, vocabulary only
+    assert not {"the", "and", "that", "with", "was", "for"} & set(picked)
+    # asked for by name, anything goes -- verbatim, function words included
+    assert wv._probe_words("the, potato", vocabulary) == ["the", "potato"]
+    # and a model that learned none of the defaults gets no default probes,
+    # rather than a fallback that would bring the function words back
+    assert wv._probe_words("", ["the", "and", "zork"]) == []
+
+
+@needs_gensim
+def test_training_does_not_lemmatize_unless_asked_and_strips_nothing(tmp_path):
+    """
+    Lemmatization is the pipeline-wide default for the *frequency* steps,
+    whose question is which words a text uses. A word-vector model wants the
+    forms people wrote -- `was` and `be` keep different company -- so the
+    training step has its own variable, off by default, and no stoplist
+    touches anything in this step at all.
+    """
+    from taters.ui import recipes as _r
+    from taters.ui.compose import compose
+
+    recipe = _r.by_id("word_vectors_train")
+    preset = compose(["word_vectors_train"], name="x", source="csv", input_path="t.csv")
+    variables = preset["meta"]["variables"]
+    assert variables["wv_lemmatize"]["default"] is False
+    step = next(st for st in preset["steps"] if st["call"].endswith("train_word_vectors"))
+    assert step["with"]["lemmatize"] == "{{var:wv_lemmatize}}"
+    assert "stoplist_paths" not in step["with"], "a stoplist was applied to the training text"
+    assert recipe.library == {}, "no library setting of any kind on the training step"
+    assert variables["wv_probes"]["default"].split(", ") == list(wv.DEFAULT_PROBES)
+    # the shared variable is untouched for the steps that want lemmas
+    freq = compose(["ngram_frequencies"], name="y", source="csv", input_path="t.csv")
+    assert freq["meta"]["variables"]["lemmatize"]["default"] is True

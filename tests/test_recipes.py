@@ -702,6 +702,7 @@ def test_the_gpu_steps_are_the_ones_we_think_they_are():
         "sentence_embeddings",   # loads a sentence-transformer
         "transformer_embeddings",  # loads an encoder
         "adapt_encoder",           # trains one
+        "pretrain_encoder",        # trains one from nothing
         "finetune_text_predictor", # trains one with heads
         "text_predictor_apply", "hf_classifier_apply",    # loads the fine-tuned one
         # the n-gram family under engine=stanza: one global call, one model.

@@ -44,6 +44,10 @@ dependencies = [
   # where a thread pool costs more than it saves. Already here through
   # scikit-learn; declared because stats/_fit_common imports it by name.
   "threadpoolctl",
+  # Trains a byte-level BPE tokenizer for an encoder built from scratch.
+  # Arrives with transformers; declared because text/pretrain_encoder
+  # imports it by name.
+  "tokenizers",
   # Imported at module import time by helpers/feature_gather and the pipeline
   # runner, so they belong here rather than in an extra.
   "numpy",

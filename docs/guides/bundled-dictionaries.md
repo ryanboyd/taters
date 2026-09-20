@@ -10,10 +10,10 @@ to pick one —
   often each category's words appear in your texts;
 * **Extract features → Archetype similarity**, which scores each text by how
   close it sits to a set of seed phrases;
-* **Train a model → Word vectors: train on these texts**, where a
-  content-coding dictionary can be handed in as the **concept dictionary**
-  whose categories get expanded through the vector space your own corpus
-  produced;
+* **a saved word-vector model's apply settings** (Settings → Manage Taters
+  data → Manage saved models), where a content-coding dictionary can be set
+  as the **concept dictionary** whose categories get expanded through the
+  vector space your own corpus produced when the model scores texts;
 * **Settings and tools → Manage Taters data → Manage dictionaries**, which asks which of the two
   libraries you mean and then lets you rename, export, remove, or add to it.
 
@@ -307,7 +307,10 @@ others — each defined by prototype statements.
 
 Content-coding dictionaries and word-vector concept dictionaries are interchangeable
 Anything listed above under **Content-coding dictionaries** can be
-handed to **Train a model → Word vectors** as a concept dictionary, where its
-categories seed a search through the vector space your own corpus produced.
+set as a concept dictionary on a saved word-vector model (Settings → Manage
+saved models → the model's apply settings), where its categories seed a
+search through the vector space your own corpus produced. Training the model
+and scoring texts against concepts are separate acts: the dictionaries belong
+to the second, and can be changed without retraining.
 Archetype dictionaries cannot: they are seed *sentences* for an embedding
 model, not term lists, and are only offered where archetypes are.

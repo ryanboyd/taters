@@ -727,6 +727,10 @@ class ScriptedPrompter:
     #: starts, which is a separate fact from the order the options are listed
     #: in, and worth asserting separately.
     select_defaults: Dict[str, Optional[str]] = field(default_factory=dict)
+    #: every (question, default) in order -- `select_defaults` keeps only the
+    #: last per question, and a test about where the pointer lands on a
+    #: *return* to a screen needs the whole sequence
+    select_default_history: List[Tuple[str, Optional[str]]] = field(default_factory=list)
     #: What the breadcrumb said on each screen that had one, in order -- the
     #: browser's "you are here", one entry per listing shown.
     breadcrumbs: List[str] = field(default_factory=list)
@@ -790,6 +794,7 @@ class ScriptedPrompter:
                ) -> str:
         self.offered.append((question, list(choices)))
         self.select_defaults[question] = default
+        self.select_default_history.append((question, default))
         if breadcrumb is not None:
             self.breadcrumbs.append(breadcrumb())
         valid = {c.value for c in choices}

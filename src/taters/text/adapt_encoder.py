@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import json
 import math
-import random
 import time
 from collections import Counter
 from pathlib import Path
@@ -41,12 +40,11 @@ from ..helpers.cliargs import CliSpec
 from ..helpers.doc_text import DOCUMENT_PATTERN
 from ..helpers.progress import announce
 from ..helpers.text_gather import resolve_analysis_ready
+from ._mlm_train import split_heldout, train_mlm
 from ._report import line_plot, machine, md_table, versions, write_markdown
-from ._transformer_common import (ENCODER_KIND, CURATED_ENCODERS, autocast_for,
-                                  freeze_below, human_count, load_encoder,
-                                  payload_digests, run_with_oom_fallback,
-                                  set_threads, torch_missing_reason,
-                                  truncation_share)
+from ._transformer_common import (ENCODER_KIND, CURATED_ENCODERS, freeze_below,
+                                  human_count, load_encoder, payload_digests,
+                                  set_threads, torch_missing_reason)
 
 __all__ = ["adapt_encoder", "ENCODER_FORMAT", "split_heldout"]
 
@@ -57,33 +55,6 @@ ENCODER_FORMAT = 1
 
 #: How many training-loss points the report table shows (the plot shows all).
 _LOSS_TABLE_ROWS = 12
-
-
-def split_heldout(text_ids: Sequence[str], fraction: float, seed: int
-                  ) -> Tuple[List[int], List[int]]:
-    """
-    Indices of the training and held-out texts: a seeded shuffle, split by
-    *text*, never by chunk, so no held-out sentence has a neighbor from the
-    same document in the training set inflating the after-score. At least
-    one text is held out whenever there are two or more.
-    """
-    n = len(text_ids)
-    order = list(range(n))
-    random.Random(int(seed)).shuffle(order)
-    k = int(round(n * float(fraction)))
-    if n >= 2:
-        k = min(max(1, k), n - 1)
-    else:
-        k = 0
-    return sorted(order[k:]), sorted(order[:k])
-
-
-def _chunks(ids: List[int], body: int) -> List[List[int]]:
-    """A text's token ids in windows of at most ``body`` tokens (no overlap:
-    every token is trained on once per epoch)."""
-    from ._transformer_common import chunk_ids
-
-    return chunk_ids(ids, body)
 
 
 def _tokenizer_mismatch(texts: Sequence[str], tokenizer, top: int = 15
@@ -287,138 +258,22 @@ def adapt_encoder(
         model.gradient_checkpointing_enable()
     trainable, frozen = freeze_below(model, int(train_layers))
 
-    # chop everything into windows, then split train/held-out by text
-    announce(on_progress, "tokenizing the corpus")
-    body = max(8, int(max_length) - 2)
-    # verbose=False: we're about to window these ourselves, so the tokenizer's
-    # "longer than the specified maximum sequence length" warning is noise here
-    # (and it scared somebody into asking whether their run was broken)
-    encoded = tokenizer(texts, add_special_tokens=False, truncation=False,
-                        verbose=False)["input_ids"]
-    token_counts = [len(e) for e in encoded]
-    train_idx, held_idx = split_heldout(ids, heldout_fraction, seed)
-    if not held_idx:
-        raise ValueError("heldout_fraction left no text held out; the before/after "
-                         "measurement needs at least one (two texts or more).")
-
-    def windows_of(indices):
-        out = []
-        for i in indices:
-            for chunk in _chunks(encoded[i], body):
-                out.append(tokenizer.build_inputs_with_special_tokens(chunk))
-        return out
-
-    train_windows = windows_of(train_idx)
-    held_windows = windows_of(held_idx)
-    if not train_windows:
-        raise ValueError("no text was left to train on after the held-out split")
-
-    from transformers import DataCollatorForLanguageModeling, get_linear_schedule_with_warmup
-
-    collator = DataCollatorForLanguageModeling(tokenizer, mlm=True,
-                                               mlm_probability=float(mlm_probability))
-    def batches(windows, size: int, order: Optional[List[int]] = None):
-        idx = order if order is not None else list(range(len(windows)))
-        for start in range(0, len(idx), size):
-            chunk = [windows[i] for i in idx[start:start + size]]
-            batch = collator([{"input_ids": torch.tensor(w, dtype=torch.long)} for w in chunk])
-            yield {k: v.to(device_name) for k, v in batch.items()}
-
-    def evaluate(size: int) -> float:
-        """Mean held-out MLM loss under a fixed masking seed, so before and
-        after are compared on the same masks."""
-        model.eval()
-        state = torch.random.get_rng_state()
-        torch.manual_seed(int(seed) + 1)
-        total, n = 0.0, 0
-        with torch.inference_mode(), autocast_for(device_name, precision):
-            for batch in batches(held_windows, size):
-                out = model(**batch)
-                k = int((batch["labels"] != -100).sum().item())
-                if k:
-                    total += float(out.loss.item()) * k
-                    n += k
-        torch.random.set_rng_state(state)
-        model.train()
-        return total / n if n else float("nan")
-
-    announce(on_progress, "measuring the held-out loss before adapting")
-    loss_before = run_with_oom_fallback(evaluate, batch_size, verbose=verbose,
-                                        what="a held-out batch")
-
-    # now the optimizer and the learning-rate schedule
-    params = [p for p in model.parameters() if p.requires_grad]
-    steps_per_epoch = math.ceil(math.ceil(len(train_windows) / int(batch_size)) / int(grad_accum))
-    total_steps = max(1, steps_per_epoch * int(epochs))
-    optimizer = torch.optim.AdamW(params, lr=float(learning_rate),
-                                  weight_decay=float(weight_decay))
-    scheduler = get_linear_schedule_with_warmup(
-        optimizer, int(round(total_steps * float(warmup_fraction))), total_steps)
-    scaler = torch.amp.GradScaler("cuda") if (
-        device_name.startswith("cuda") and precision in ("auto", "fp16")) else None
-
-    step_losses: List[float] = []
-    lr_trace: List[float] = []
-    heldout_per_epoch: List[float] = []
-    state = {"batch": int(batch_size), "accum": int(grad_accum), "restarts": 0}
-    rng = random.Random(int(seed))
-    model.train()
-
-    def run_epoch(size: int):
-        # if we had to shrink the batch (OOM), we accumulate over more steps
-        # so that the effective batch size stays the same
-        if size != state["batch"]:
-            state["accum"] = max(1, int(round(state["accum"] * state["batch"] / size)))
-            state["batch"] = size
-            state["restarts"] += 1
-        order = list(range(len(train_windows)))
-        rng.shuffle(order)
-        optimizer.zero_grad(set_to_none=True)
-        accumulated = 0
-        running = 0.0
-        for b_i, batch in enumerate(batches(train_windows, size, order)):
-            with autocast_for(device_name, precision):
-                out = model(**batch)
-                loss = out.loss / state["accum"]
-            if scaler is not None:
-                scaler.scale(loss).backward()
-            else:
-                loss.backward()
-            running += float(out.loss.item())
-            accumulated += 1
-            last = (b_i + 1) * size >= len(order)
-            if accumulated == state["accum"] or last:
-                if scaler is not None:
-                    scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(params, 1.0)
-                if scaler is not None:
-                    # if the scaler skipped this step (inf gradients while it's
-                    # still finding its scale), we mustn't advance the schedule
-                    # either -- otherwise torch warns and we lose the first
-                    # learning-rate value
-                    before = scaler.get_scale()
-                    scaler.step(optimizer)
-                    scaler.update()
-                    if scaler.get_scale() >= before:
-                        scheduler.step()
-                else:
-                    optimizer.step()
-                    scheduler.step()
-                optimizer.zero_grad(set_to_none=True)
-                step_losses.append(running / accumulated)
-                lr_trace.append(float(scheduler.get_last_lr()[0]))
-                running, accumulated = 0.0, 0
-                if on_progress is not None:
-                    on_progress(len(step_losses), total_steps,
-                                f"epoch {epoch + 1}/{epochs}: loss {step_losses[-1]:.3f}")
-        return None
-
-    for epoch in range(int(epochs)):
-        run_with_oom_fallback(lambda size: run_epoch(size), state["batch"],
-                              verbose=verbose, what=f"epoch {epoch + 1}")
-        heldout_per_epoch.append(run_with_oom_fallback(
-            evaluate, state["batch"], verbose=verbose, what="a held-out batch"))
-    loss_after = heldout_per_epoch[-1]
+    run = train_mlm(
+        model=model, tokenizer=tokenizer, texts=texts, ids=ids,
+        device_name=device_name, precision=precision, seed=int(seed),
+        epochs=int(epochs), max_length=int(max_length),
+        batch_size=int(batch_size), grad_accum=int(grad_accum),
+        learning_rate=float(learning_rate), warmup_fraction=float(warmup_fraction),
+        weight_decay=float(weight_decay), mlm_probability=float(mlm_probability),
+        heldout_fraction=float(heldout_fraction),
+        # adaptation is the fall from before to after, so before is measured;
+        # and it runs the epochs it was asked for, the report showing when
+        # more stopped helping
+        measure_before=True, early_stopping=False,
+        verbose=verbose, on_progress=on_progress,
+        announce=lambda phrase: announce(on_progress, phrase))
+    loss_before, loss_after = run.loss_before, run.loss_after
+    train_idx, held_idx, token_counts = run.train_idx, run.held_idx, run.token_counts
 
     # lastly, we save: the checkpoint folder goes beside the manifest, and
     # then the manifest itself
@@ -449,8 +304,8 @@ def adapt_encoder(
         "training": {
             "epochs": int(epochs), "max_length": int(max_length),
             "batch_size": int(batch_size), "grad_accum": int(grad_accum),
-            "final_batch_size": state["batch"], "final_grad_accum": state["accum"],
-            "oom_restarts": state["restarts"],
+            "final_batch_size": run.final_batch_size, "final_grad_accum": run.final_grad_accum,
+            "oom_restarts": run.oom_restarts,
             "learning_rate": float(learning_rate),
             "warmup_fraction": float(warmup_fraction),
             "weight_decay": float(weight_decay),
@@ -460,14 +315,14 @@ def adapt_encoder(
             "frozen_parameters": frozen,
             "gradient_checkpointing": bool(gradient_checkpointing),
             "seed": int(seed), "device": device_name, "precision": precision,
-            "threads": threads, "optimizer_steps": len(step_losses),
+            "threads": threads, "optimizer_steps": run.optimizer_steps,
             "n_texts": len(texts), "n_train_texts": len(train_idx),
             "n_heldout_texts": len(held_idx), "n_tokens": int(sum(token_counts)),
-            "n_train_windows": len(train_windows), "n_heldout_windows": len(held_windows),
-            "windowed_share": truncation_share(token_counts, max_length),
-            "step_loss": [round(x, 5) for x in step_losses],
-            "learning_rate_trace": [float(f"{x:.3g}") for x in lr_trace],
-            "heldout_loss_per_epoch": [round(x, 5) for x in heldout_per_epoch],
+            "n_train_windows": run.n_train_windows, "n_heldout_windows": run.n_heldout_windows,
+            "windowed_share": run.windowed_share,
+            "step_loss": [round(x, 5) for x in run.step_losses],
+            "learning_rate_trace": [float(f"{x:.3g}") for x in run.lr_trace],
+            "heldout_loss_per_epoch": [round(x, 5) for x in run.heldout_per_epoch],
             "wall_seconds": wall,
         },
         "evaluation": {

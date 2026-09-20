@@ -768,7 +768,7 @@ probability reaches the model's threshold (0.5 unless you change it under
 "Change how the ticked model is applied"), joined with `|`. Long texts are
 read in windows and averaged, as the fine-tuned predictor reads them. Text
 classifiers, multi-label heads and regression heads import; a bare encoder is
-something to adapt or fine-tune under "Train a model", and an audio or image
+something to adapt or fine-tune under "Wrangle Language Models", and an audio or image
 classifier is refused by name until Taters reads those.
 
 ---

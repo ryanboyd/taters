@@ -3,8 +3,9 @@ Tests for "Train a model": the front-page task, the flow in `taters.ui.train`
 and the wizard hooks it rests on (a preselected step, a text-only source
 question).
 
-The first question is the task's own; everything after it is the ordinary
-wizard, so these tests check the seam -- that the checklist is not asked,
+The first two questions -- what to do, and with what -- are the task's own;
+everything after them is the ordinary wizard, so these tests check the seam
+-- that the checklist is not asked,
 that the pipeline composed carries the training step and its companions,
 that a missing extra grays the kind out with its install command -- and the
 import path, which writes a model and offers the library.
@@ -47,7 +48,7 @@ def test_training_word_vectors_runs_the_wizard_with_the_step_already_chosen(stud
     the descriptives -- so it re-runs like any other."""
     pytest.importorskip("gensim")
     p = ScriptedPrompter([
-        "word_vectors",
+        "scratch", "word_vectors",
         "csv", *browse_to(study_csv), ["text"], True, ["pid"],
         "row",                      # we still get asked the level question
         False,                      # no settings changes
@@ -78,24 +79,30 @@ def test_a_kind_this_python_cannot_have_is_grayed_with_the_python_not_a_pip_comm
     monkeypatch.setattr(importlib.util, "find_spec",
                         lambda name, *a, **k: None if name == "gensim" else real(name, *a, **k))
     monkeypatch.setattr(gpu, "unavailable_here", lambda dist: dist == "gensim")
-    p = EscapingPrompter(["__esc__"])
+    p = EscapingPrompter(["scratch", "__esc__", "__esc__"])
     with pytest.raises(GoBack):
         run_train(p, cwd=tmp_path)
-    rows = {c.value: c for c in p.offered[0][1]}
+    rows = {c.value: c for c in p.offered[1][1]}
     assert rows["word_vectors"].disabled.startswith("not available for Python")
     assert "pip install" not in rows["word_vectors"].disabled
+    # the verb above it is not grayed: a transformer from scratch still can run
+    verbs = {c.value: c for c in p.offered[0][1]}
+    assert not verbs["scratch"].disabled
 
 
 def test_a_kind_whose_extra_is_missing_is_grayed_with_the_install_command(tmp_path, monkeypatch):
     monkeypatch.setattr(wiz, "missing_extras", lambda r: list(r.extras))
     # Esc at the very first question takes us out to the menu, same as in the
     # wizard. the hub catches it (GoBack and Cancelled both)
-    p = EscapingPrompter(["__esc__"])
+    p = EscapingPrompter(["scratch", "__esc__", "wrangle", "__esc__", "__esc__"])
     with pytest.raises(GoBack):
         run_train(p, cwd=tmp_path)
-    rows = {c.value: c for c in p.offered[0][1]}
+    kinds = next(cs for q, cs in p.offered if q == "With what?")
+    rows = {c.value: c for c in kinds}
     assert rows["word_vectors"].disabled == 'needs pip install "taters[vectors]"'
-    assert not rows["import_vectors"].disabled, "text formats need numpy alone"
+    shelves = next(cs for q, cs in p.offered if q == "Which models?")
+    assert not {c.value: c for c in shelves}["import_vectors"].disabled, \
+        "text formats need numpy alone"
 
 
 def test_esc_at_the_level_question_returns_to_the_source_not_to_a_checklist(study_csv, tmp_path):
@@ -118,23 +125,25 @@ def test_importing_vectors_writes_the_model_and_offers_the_library(tmp_path, mon
 
     glove = tmp_path / "glove.6B.50d.txt"
     glove.write_text("cat 1 0\ndog 0.9 0.1\ncar 0 1\n", encoding="utf-8")
-    # a dictionary sitting in the library, so the import flow offers it as a concept
+    # a dictionary in the library, which the import flow must *not* ask about:
+    # bringing a model in is not applying it, and concept dictionaries are an
+    # apply setting, set per model later under Settings
     pets = tmp_path / "pets.dicx"
     pets.write_text("DicTerm,pets\ncat,X\ndog,X\n", encoding="utf-8")
     lib.import_into(lib.KINDS["dictionaries"], pets)
     p = ScriptedPrompter([
-        "import_vectors", *browse_to(glove), "auto",
+        "wrangle", "import_vectors", *browse_to(glove), "auto",
         "glove-tiny",               # the model's name
-        str((lib.kind_dir(lib.KINDS["dictionaries"]) / "pets.dicx").resolve()),  # a concept dictionary
         True,                       # yes, add it to the library
         False,                      # don't rename it or its columns
     ])
     assert run_train(p, cwd=tmp_path) is True
+    assert not any(q.startswith("Which content-coding dictionaries") for _k, q in p.asked), \
+        "the import flow asked about concept dictionaries"
     model = tmp_path / "models" / "glove-tiny.json"
     doc = json.loads(model.read_text(encoding="utf-8"))
     assert doc["vocabulary"] == ["cat", "dog", "car"]
-    assert [d["name"] for d in doc["apply"]["concept_dicts"]] == ["pets"]
-    assert doc["apply"]["concept_dicts"][0]["categories"]["pets"] == [["cat", 1.0], ["dog", 1.0]]
+    assert doc["apply"]["concept_dicts"] == [], "none until somebody sets them per model"
     assert (tmp_path / "models" / "glove-tiny.npy").is_file()
     assert (tmp_path / "models" / "glove-tiny_report.md").is_file()
     assert [e.name for e in lib.entries(lib.KINDS["models"])] == ["glove-tiny.json"]
@@ -142,39 +151,13 @@ def test_importing_vectors_writes_the_model_and_offers_the_library(tmp_path, mon
     assert any("Saved glove-tiny [word vectors]" in line for line in p.output)
 
 
-def test_an_empty_dictionary_library_asks_nothing_about_concepts(tmp_path, monkeypatch):
-    monkeypatch.setenv("TATERS_HOME", str(tmp_path / "home"))
-    glove = tmp_path / "g.txt"
-    glove.write_text("cat 1 0\n", encoding="utf-8")
-    p = ScriptedPrompter(["import_vectors", *browse_to(glove), "auto", "g", False])
-    assert run_train(p, cwd=tmp_path) is True
-    assert not any(q.startswith("Which content-coding dictionaries") for _k, q in p.asked)
-    doc = json.loads((tmp_path / "models" / "g.json").read_text(encoding="utf-8"))
-    assert doc["apply"]["concept_dicts"] == []
-
-
 def test_an_unreadable_vectors_file_is_a_red_note_not_a_traceback(tmp_path):
     bad = tmp_path / "vectors.txt"
     bad.write_text("", encoding="utf-8")
-    p = ScriptedPrompter(["import_vectors", *browse_to(bad), "glove", "x", ""])
+    p = ScriptedPrompter(["wrangle", "import_vectors", *browse_to(bad), "glove", "x", ""])
     assert run_train(p, cwd=tmp_path) is False
     assert any("Not imported" in line and "no readable word vectors" in line
                for line in p.output)
-
-
-def test_a_concept_the_vectors_do_not_know_is_refused_before_saving(tmp_path, monkeypatch):
-    monkeypatch.setenv("TATERS_HOME", str(tmp_path / "home"))
-    from taters.helpers import library as lib
-
-    glove = tmp_path / "g.txt"
-    glove.write_text("cat 1 0\n", encoding="utf-8")
-    zoo = tmp_path / "zoo.dicx"
-    zoo.write_text("DicTerm,exotic\nzebra,X\n", encoding="utf-8")
-    lib.import_into(lib.KINDS["dictionaries"], zoo)
-    p = ScriptedPrompter(["import_vectors", *browse_to(glove), "auto", "g",
-                          str((lib.kind_dir(lib.KINDS["dictionaries"]) / "zoo.dicx").resolve())])
-    assert run_train(p, cwd=tmp_path) is False
-    assert any("'exotic'" in line for line in p.output)
 
 
 def test_fine_tuning_asks_which_columns_to_predict_and_offers_only_spreadsheets(study_csv, tmp_path):
@@ -184,7 +167,7 @@ def test_fine_tuning_asks_which_columns_to_predict_and_offers_only_spreadsheets(
     pytest.importorskip("torch")
     pytest.importorskip("transformers")
     p = ScriptedPrompter([
-        "finetune_predictor",
+        "predict", "finetune_predictor",
         "distilroberta-base",           # the encoder, before anything else
         "csv", *browse_to(study_csv), ["text"], True, ["pid"],
         "row",
@@ -195,7 +178,8 @@ def test_fine_tuning_asks_which_columns_to_predict_and_offers_only_spreadsheets(
     assert run_train(p, cwd=tmp_path) is None
     questions = [q for _k, q in p.asked]
     assert questions.index("Which encoder?") < questions.index(
-        "What kind of data do you have?"), "the encoder is the first thing asked"
+        "What kind of data do you have?"), "the encoder comes before the wizard's questions"
+    assert questions[:3] == ["What would you like to do?", "With what?", "Which encoder?"]
     kinds = next(cs for q, cs in p.offered if q == "What kind of data do you have?")
     assert [c.value for c in kinds] == ["csv"]
     offered = next(cs for q, cs in p.offered if q.startswith("Which column(s) should the model"))
@@ -228,7 +212,7 @@ def test_adapting_asks_for_the_encoder_first_and_names_the_result_after_it(study
     pytest.importorskip("torch")
     pytest.importorskip("transformers")
     p = ScriptedPrompter([
-        "adapt_encoder",
+        "adapt", "adapt_encoder",
         "distilroberta-base",
         "csv", *browse_to(study_csv), ["text"], True, ["pid"],
         "row",
@@ -245,17 +229,20 @@ def test_adapting_asks_for_the_encoder_first_and_names_the_result_after_it(study
     assert variables["encoder_name"]["default"] == "distilroberta-base-adapted"
 
 
-def test_esc_at_the_encoder_question_returns_to_the_kind_question(tmp_path):
-    """The screen before the encoder is the list of things to train, so Esc
-    goes there -- not out of the task, and not on into the wizard with a
-    default nobody chose."""
+def test_esc_walks_back_one_screen_at_a_time(tmp_path):
+    """The screen before the encoder is the kind, and the screen before that
+    is the verb, so Esc goes there -- not out of the task, and not on into
+    the wizard with a default nobody chose."""
     pytest.importorskip("torch")
     pytest.importorskip("transformers")
-    p = EscapingPrompter(["adapt_encoder", "__esc__", "__esc__"])
+    p = EscapingPrompter(["adapt", "adapt_encoder", "__esc__",   # encoder -> kind
+                          "__esc__",                              # kind -> verb
+                          "__esc__"])                             # verb -> the hub
     with pytest.raises(GoBack):
         run_train(p, cwd=tmp_path)
-    kinds = [q for _k, q in p.asked if q == "What would you like to train?"]
-    assert len(kinds) == 2, "the kind question was asked again after Esc"
+    questions = [q for _k, q in p.asked]
+    assert questions.count("With what?") == 2, "the kind was asked again after Esc"
+    assert questions.count("What would you like to do?") == 2, "and the verb after that"
 
 
 def test_the_name_built_from_an_encoder_is_its_short_form():
@@ -303,20 +290,139 @@ def test_every_transformer_kind_is_grayed_without_torch(tmp_path, monkeypatch):
     real = importlib.util.find_spec
     monkeypatch.setattr(importlib.util, "find_spec",
                         lambda name, *a, **k: None if name == "torch" else real(name, *a, **k))
-    p = EscapingPrompter(["__esc__"])
+    p = EscapingPrompter(["scratch", "__esc__", "__esc__"])
     with pytest.raises(GoBack):
         run_train(p, cwd=tmp_path)
-    rows = {c.value: c for c in p.offered[0][1]}
-    assert rows["adapt_encoder"].disabled.startswith("needs torch")
-    assert rows["finetune_predictor"].disabled.startswith("needs torch")
-    assert not rows["import_vectors"].disabled
+    verbs = {c.value: c for c in p.offered[0][1]}
+    # a verb with nothing left under it is grayed with the reason
+    assert verbs["adapt"].disabled.startswith("needs torch")
+    assert verbs["predict"].disabled.startswith("needs torch")
+    # ...and one with a kind that still runs is not, though that kind is
+    kinds = {c.value: c for c in p.offered[1][1]}
+    assert not verbs["scratch"].disabled
+    assert kinds["scratch_transformer"].disabled.startswith("needs torch")
+    assert not verbs["wrangle"].disabled
 
 
-def test_the_concept_dictionary_setting_opens_the_library_picker_empty(tmp_path, monkeypatch):
-    """Word vectors take their concepts from the dictionaries library, and the
-    recipe declares an *empty* default: the picker opens with nothing ticked
-    (dictionary steps open full), and what is ticked lands as the step's
-    concept_dicts."""
+def test_the_first_screen_offers_the_four_verbs_and_the_second_is_always_asked(tmp_path):
+    """
+    Intention first, material second -- and the second question is asked even
+    when it has one answer. A menu of one row still tells you exactly what
+    you are about to do, and it is the scaffolding the next option slots
+    into; skipping it would make "adapt" and "fine-tune" feel like different
+    kinds of screen from "train from scratch".
+    """
+    p = EscapingPrompter(["adapt", "__esc__", "predict", "__esc__", "__esc__"])
+    with pytest.raises(GoBack):
+        run_train(p, cwd=tmp_path)
+    verbs = [c.value for c in p.offered[0][1]]
+    assert verbs == ["scratch", "adapt", "predict", "wrangle"]
+    kinds = [[c.value for c in cs] for q, cs in p.offered if q == "With what?"]
+    assert kinds == [["adapt_encoder"], ["finetune_predictor"]], \
+        "a one-row kind question was skipped"
+
+
+def test_import_or_export_hands_off_to_the_library_screen_for_the_right_shelf(tmp_path, monkeypatch):
+    """The fourth verb builds nothing new: the library screen already imports,
+    exports, renames and deletes, per shelf. This just has to reach it with
+    the shelf the person chose."""
+    from taters.ui import library as ui_lib
+
+    seen = []
+    monkeypatch.setattr(ui_lib, "manage_library", lambda prompter, kind: seen.append(kind.id))
+    assert run_train(ScriptedPrompter(["wrangle", ":encoders"]), cwd=tmp_path) is None
+    assert run_train(ScriptedPrompter(["wrangle", ":models"]), cwd=tmp_path) is None
+    assert seen == ["encoders", "models"]
+
+
+def test_training_from_scratch_asks_the_size_and_warns_about_the_cost(study_csv, tmp_path):
+    """
+    The heavy-duty option is offered, not withheld -- someone with four GPUs
+    may well want it -- but nobody should start it by accident. So after the
+    source comes the size, then an estimate in hours for this many texts on
+    this machine, then a confirm; and the size and a name built from it land
+    in the pipeline's variables.
+    """
+    pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+    pytest.importorskip("tokenizers")
+    p = ScriptedPrompter([
+        "scratch", "scratch_transformer",
+        "csv", *browse_to(study_csv), ["text"], True, ["pid"], "row",
+        "small",                        # which size
+        True,                           # go ahead
+        ":done", "Scratch", "save",
+    ])
+    assert run_train(p, cwd=tmp_path) is None
+    questions = [q for _k, q in p.asked]
+    assert "Which encoder?" not in questions, "there is no encoder to start from"
+    assert questions.index("Which size?") > questions.index("What kind of data do you have?")
+    assert "Go ahead with training from scratch?" in questions
+    assert any("random weights" in r for r in p.reasons)
+    assert any("estimate" in r and ("hours" in r or "minutes" in r) for r in p.reasons), \
+        "the cost was not said in wall-clock terms"
+    import yaml
+
+    preset = yaml.safe_load(next(tmp_path.glob("*/*.yaml")).read_text(encoding="utf-8"))
+    assert "pretrain_encoder" in _calls(preset)
+    variables = preset["meta"]["variables"]
+    assert variables["pretrain_preset"]["default"] == "small"
+    assert variables["encoder_name"]["default"] == "small-scratch"
+
+
+def test_declining_the_warning_backs_out_rather_than_training(study_csv, tmp_path):
+    pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+    p = EscapingPrompter([
+        "scratch", "scratch_transformer",
+        "csv", *browse_to(study_csv), ["text"], True, ["pid"], "row",
+        "small", False,                 # think again
+        "__esc__", "__esc__", "__esc__",   # source -> kind -> verb -> out
+    ])
+    with pytest.raises(GoBack):
+        run_train(p, cwd=tmp_path)
+    assert not list(tmp_path.glob("*/*.yaml")), "a pipeline was composed anyway"
+
+
+def test_training_word_vectors_does_not_offer_concept_dictionaries(tmp_path, monkeypatch):
+    """
+    Training a model and applying it are two different things. The concept
+    dictionaries a word-vector model scores texts against are an apply
+    setting -- set per saved model under Settings, changeable later without
+    retraining -- so the training step's options screen does not offer them,
+    and the training run's own features carry the vectors alone.
+    """
+    monkeypatch.setenv("TATERS_HOME", str(tmp_path / "home"))
+    from taters.helpers import library as lib
+    from taters.ui import recipes as _r
+    from taters.ui.compose import compose
+
+    (tmp_path / "pets.dicx").write_text("DicTerm,c\ncat,X\n", encoding="utf-8")
+    lib.import_into(lib.KINDS["dictionaries"], tmp_path / "pets.dicx")
+    recipe = _r.by_id("word_vectors_train")
+    assert "concept_dicts" in recipe.hidden and "concept_dicts" not in recipe.library
+    var_specs = compose(["word_vectors_train"], name="x", source="csv",
+                        input_path="t.csv")["meta"]["variables"]
+    p = ScriptedPrompter(["word_vectors_train", ":done", ":done"])
+    wiz.ask_tuning(p, [recipe], var_specs, ask_gate=False)
+    rows = [c.value for c in next(cs for q, cs in p.offered if "change a setting" in q)]
+    assert "concept_dicts" not in rows
+    step = compose(["word_vectors_train"], name="x", source="csv",
+                   input_path="t.csv")["steps"]
+    assert not any("concept_dicts" in (st.get("with") or {}) for st in step)
+
+
+def test_an_empty_curated_default_is_shown_as_none_not_as_everything(tmp_path, monkeypatch):
+    """
+    From a real session: a library row read "all 35 of your content-coding
+    dictionaries" while its curated default applied none of them. An empty
+    curated default is falsy, so it fell through to the wording for "no
+    curated default at all", which means everything. The two are different
+    settings and the row has to say which. No shipped recipe declares an
+    empty default any more, so one is built here.
+    """
+    import dataclasses
+
     monkeypatch.setenv("TATERS_HOME", str(tmp_path / "home"))
     from taters.helpers import library as lib
     from taters.ui import recipes as _r
@@ -326,22 +432,21 @@ def test_the_concept_dictionary_setting_opens_the_library_picker_empty(tmp_path,
     for name in ("pets.dicx", "moods.dicx"):
         (tmp_path / name).write_text("DicTerm,c\ncat,X\n", encoding="utf-8")
         lib.import_into(kind, tmp_path / name)
-    pets = str((lib.kind_dir(kind) / "pets.dicx").resolve())
-    steps = [_r.by_id("word_vectors_train")]
-    var_specs = compose(["word_vectors_train"], name="x", source="csv",
-                        input_path="t.csv")["meta"]["variables"]
-    p = ScriptedPrompter(["word_vectors_train", "concept_dicts", pets, ":done", ":done"])
-    overrides, _vars = wiz.ask_tuning(p, steps, var_specs, ask_gate=False)
-    assert overrides["word_vectors_train"]["concept_dicts"] == [pets]
-    picker = next(cs for q, cs in p.offered if q.startswith("Which content-coding dictionaries"))
-    assert all(c.label.startswith("[ ]") for c in picker if c.value.endswith(".dicx")), \
-        "nothing pre-ticked: concepts are optional"
-    # ...whereas the dictionary analyzer's own picker still opens with everything
-    # ticked
-    steps = [_r.by_id("dictionaries")]
+
+    base = _r.by_id("dictionaries")
     var_specs = compose(["dictionaries"], name="x", source="csv",
                         input_path="t.csv")["meta"]["variables"]
-    q = ScriptedPrompter(["dictionaries", "dict_paths", pets, ":done", ":done"])
-    wiz.ask_tuning(q, steps, var_specs, ask_gate=False)
-    picker = next(cs for qq, cs in q.offered if qq.startswith("Which content-coding dictionaries"))
-    assert all(c.label.startswith("[x]") for c in picker if c.value.endswith(".dicx"))
+    # as shipped: no curated default, so an untouched row really means everything
+    q = ScriptedPrompter(["dictionaries", ":done", ":done"])
+    wiz.ask_tuning(q, [base], var_specs, ask_gate=False)
+    rows = {c.value: c for c in next(cs for qq, cs in q.offered if "change a setting" in qq)}
+    assert "all 2 of your" in rows["dict_paths"].label
+
+    # the same step with an *empty* curated default must say none, not all
+    empty = dataclasses.replace(base, library_defaults={**base.library_defaults,
+                                                        "dict_paths": ()})
+    p = ScriptedPrompter(["dictionaries", ":done", ":done"])
+    wiz.ask_tuning(p, [empty], var_specs, ask_gate=False)
+    rows = {c.value: c for c in next(cs for qq, cs in p.offered if "change a setting" in qq)}
+    assert "none (optional)" in rows["dict_paths"].label, rows["dict_paths"].label
+    assert "of your" not in rows["dict_paths"].label

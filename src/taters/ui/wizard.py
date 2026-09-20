@@ -2313,7 +2313,7 @@ def _explain(prompter: Prompter, param: ParamSpec, current: Any) -> None:
 
 
 def _describe_library_value(kind_id: str, current: Any,
-                            default_names: Sequence[str] = ()) -> str:
+                            default_names: Optional[Sequence[str]] = None) -> str:
     """
     "3 of 5 dictionaries" instead of three absolute paths.
 
@@ -2328,10 +2328,15 @@ def _describe_library_value(kind_id: str, current: Any,
     total = len(in_library)
     label = kind.label.lower()
     if not isinstance(current, list) or any("{{" in str(v) for v in current):
-        if default_names:
+        if default_names is not None:
             # a curated default (see Recipe.library_defaults). left alone, we
             # apply exactly these when we compose -- so the row names them,
-            # and the picker opens with the same set ticked.
+            # and the picker opens with the same set ticked. an *empty*
+            # curated default means none: word vectors take no concept
+            # dictionary unless asked, and the row used to say "all 35 of
+            # your dictionaries" about a setting that would apply nothing
+            if not default_names:
+                return "none (optional)"
             stems = ", ".join(Path(n).stem for n in default_names)
             return f"the default set ({stems})"
         # untouched: the template is still in place, and we resolve that to
@@ -2670,7 +2675,9 @@ def _setting_choice(recipe: _recipes.Recipe, param: ParamSpec, var_specs: Dict[s
     if param.name in recipe.library:
         shown = _describe_library_value(
             recipe.library[param.name], current,
-            default_names=recipe.library_defaults.get(param.name, ()))
+            # None when the recipe declares no curated default (everything
+            # in the library); () when it declares an empty one (nothing)
+            default_names=recipe.library_defaults.get(param.name))
     # the options screen's own word for this setting, where the parameter's
     # name is a programmer's one. per-step first, because a name can mean
     # different things in different steps.
@@ -2972,6 +2979,7 @@ def tune_shared(
     if not shared_rows(shared, var_specs, overrides, var_values, prompter):
         return
 
+    last = None
     while True:
         rows = shared_rows(shared, var_specs, overrides, var_values, prompter)
         choices = [choice for _var, _recipe, _param, choice in rows]
@@ -2981,7 +2989,7 @@ def tune_shared(
         prompter.note("")
         try:
             picked = str(prompter.select(f"{_SHARED_LABEL} — change a setting:",
-                                         choices))
+                                         choices, default=_still_there(last, choices)))
         except GoBack:
             return          # up one level, to the list of steps
         if picked == _DONE:
@@ -2990,6 +2998,7 @@ def tune_shared(
             if var == picked:
                 _edit(prompter, recipe, param, var_specs, overrides, var_values,
                       tables=tables)
+                last = picked
                 break
 
 
@@ -3037,6 +3046,10 @@ def tune_one_step(
     def _is_shared(name: str) -> bool:
         return _var_behind(recipe, name) in shared
 
+    # the row that was just edited. coming back to the top of the list after
+    # every change meant scrolling back down to where you were, and on a
+    # forty-row step that was most of the work of changing two settings
+    last = None
     while True:
         # every setting, with dependents ordered under their gates and gated
         # against the live values. we re-evaluate on each repaint -- see
@@ -3061,7 +3074,7 @@ def tune_one_step(
         prompter.note("")
         try:
             picked = str(prompter.select(f"{recipe.label} — change a setting:",
-                                         choices))
+                                         choices, default=_still_there(last, choices)))
         except GoBack:
             return          # up one level, to the list of steps
         if picked == _DONE:
@@ -3071,6 +3084,7 @@ def tune_one_step(
         if param is not None:
             _edit(prompter, recipe, param, var_specs, overrides, var_values,
                   is_shared=_is_shared(picked), tables=tables)
+            last = picked
 
 
 def _changed_count(recipe_id: str, names: Sequence[str],
@@ -3169,6 +3183,7 @@ def ask_tuning(
         if not prompter.confirm("Change any settings first?", default=False):
             return overrides, var_values
 
+    last = None
     while True:
         total = sum(len(v) for v in overrides.values()) + len(var_values)
         choices: List[Choice] = [Choice(
@@ -3198,7 +3213,8 @@ def ask_tuning(
 
         prompter.note("")
         try:
-            picked = str(prompter.select("What would you like to change?", choices))
+            picked = str(prompter.select("What would you like to change?", choices,
+                                         default=_still_there(last, choices)))
         except GoBack:
             # this is the top of this screen, so back means out of it -- and
             # out with the changes intact, since they live in the caller's
@@ -3207,6 +3223,7 @@ def ask_tuning(
             raise
         if picked == _DONE:
             return overrides, var_values
+        last = picked
         if picked == _SHARED:
             tune_shared(prompter, shared, var_specs, overrides, var_values,
                         tables=tables)
@@ -3215,6 +3232,13 @@ def ask_tuning(
         if recipe is not None:
             tune_one_step(prompter, recipe, var_specs, overrides, var_values,
                           shared, tables=tables)
+
+
+def _still_there(value, choices: Sequence[Choice]):
+    """``value`` if a row still carries it, else ``None``: a setting can leave
+    the screen when a gate above it changes, and a default pointing at a row
+    that is not there is worse than none."""
+    return value if any(c.value == value for c in choices) else None
 
 
 def _label_with_count(label: str, changed: int) -> str:

@@ -21,9 +21,10 @@ def _run(ctx: TaskContext):
 
 TASK = Task(
     id="train",
-    label="Train a model (beta testing)",
-    help="Word vectors, an adapted language model, or a transformer fine-tuned "
-         "to predict your outcomes -- saved with a report, kept in your "
-         "library, applied to new data",
+    label="Wrangle Language Models (in beta)",
+    help="Train a model from scratch, adapt an existing one to your texts, "
+         "fine-tune a transformer to predict your outcomes, or import and "
+         "export models -- each saved with a report, kept in your library, "
+         "applied to new data",
     run=_run,
 )

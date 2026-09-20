@@ -1131,11 +1131,16 @@ def encoder_problem(model_json: PathLike) -> str:
 
 
 def describe_encoder(model_json: PathLike) -> Tuple[str, str]:
-    """One encoder's row: its name and base model, then what adapting did."""
+    """One encoder's row: its name and where it came from, then what training did."""
     path = Path(model_json)
     doc = _read_doc(path)
     name = str(doc.get("name") or path.stem)
-    base = str(doc.get("base_model") or "?")
+    # an encoder trained from scratch has no base model, and "[?]" would read
+    # as a broken file rather than as the deliberate absence it is
+    if doc.get("trained_from") == "scratch":
+        base = "trained from scratch"
+    else:
+        base = str(doc.get("base_model") or "?")
     bits = []
     layers = doc.get("num_hidden_layers")
     if layers:
@@ -1144,6 +1149,8 @@ def describe_encoder(model_json: PathLike) -> Tuple[str, str]:
     before, after = ev.get("perplexity_before"), ev.get("perplexity_after")
     if before is not None and after is not None:
         bits.append(f"perplexity {float(before):.1f} → {float(after):.1f}")
+    elif ev.get("perplexity_final") is not None:
+        bits.append(f"perplexity {float(ev['perplexity_final']):.1f}")
     return f"{name} [{base}]", " · ".join(bits)
 
 

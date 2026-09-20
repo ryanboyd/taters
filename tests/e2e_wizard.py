@@ -575,7 +575,29 @@ class Harness:
             print("skip T: torch is not installed", flush=True)
             return None
         from taters.helpers.library import import_into, kind_by_id, kind_dir
-        from taters.ui.train import ask_outcomes
+        from taters.ui.train import ask_outcomes, seed_scratch
+
+        # from nothing: a tokenizer learned from thirty short texts and a small
+        # encoder trained on them. it learns the corpus's habits, not the
+        # language -- the point here is that the machinery runs end to end on
+        # a real GPU, and that the report says how little it was trained on
+        s = self.flow("T0 pretrain an encoder from scratch (Wrangle Language Models)", [
+            "csv", *self.browse(self.study), ["text"], True, ["pid"], "row",
+            "small", True,                  # the size, and go ahead
+            ":done", "Flow T0", "save",
+        ], analyses=False, preselected=["pretrain_encoder"], text_only=True,
+            before_options=seed_scratch())
+        if s:
+            scratch = s[0] / "features" / "models" / "small-scratch.json"
+            rep = s[0] / "features" / "models" / "small-scratch_report.md"
+            if scratch.is_file() and rep.is_file() and "A note on size" in rep.read_text(encoding="utf-8"):
+                doc = json.loads(scratch.read_text(encoding="utf-8"))
+                self.ok("T0 outputs", f"perplexity {doc['evaluation']['perplexity_final']:.1f} "
+                                      f"after {doc['training']['epochs_run']} epoch(s), "
+                                      f"best {doc['training']['best_epoch']}")
+            else:
+                self.bad("T0 outputs", "no encoder manifest, or a report that did not "
+                                       "call a toy corpus one")
 
         a = self.flow("T1 adapt an encoder (Train a model)", [
             "csv", *self.browse(self.study), ["text"], True, ["pid"], "row",
