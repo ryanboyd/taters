@@ -73,12 +73,16 @@ def test_a_kind_this_python_cannot_have_is_grayed_with_the_python_not_a_pip_comm
     which Python would have it."""
     import importlib.util
 
+    from taters.text import _transformer_common as _common
     from taters.ui.tasks import gpu
 
     real = importlib.util.find_spec
     monkeypatch.setattr(importlib.util, "find_spec",
                         lambda name, *a, **k: None if name == "gensim" else real(name, *a, **k))
     monkeypatch.setattr(gpu, "unavailable_here", lambda dist: dist == "gensim")
+    # torch counts as present whatever this machine has: the verb's fate
+    # below turns on it, and the point here is gensim's
+    monkeypatch.setattr(_common, "torch_missing_reason", lambda: "")
     p = EscapingPrompter(["scratch", "__esc__", "__esc__"])
     with pytest.raises(GoBack):
         run_train(p, cwd=tmp_path)
@@ -287,9 +291,15 @@ def test_every_transformer_kind_is_grayed_without_torch(tmp_path, monkeypatch):
     fine-tuning entry, whose module is called finetune_predictor."""
     import importlib.util
 
+    from taters.ui import wizard as _wizard
+
     real = importlib.util.find_spec
     monkeypatch.setattr(importlib.util, "find_spec",
                         lambda name, *a, **k: None if name == "torch" else real(name, *a, **k))
+    # word vectors count as installed here whatever this machine has -- the
+    # point is torch's absence alone, and CI has no gensim either
+    monkeypatch.setattr(_wizard, "missing_extras", lambda recipe: [])
+    monkeypatch.setattr(_wizard, "unavailable_reason", lambda recipe: "")
     p = EscapingPrompter(["scratch", "__esc__", "__esc__"])
     with pytest.raises(GoBack):
         run_train(p, cwd=tmp_path)
@@ -300,7 +310,33 @@ def test_every_transformer_kind_is_grayed_without_torch(tmp_path, monkeypatch):
     # ...and one with a kind that still runs is not, though that kind is
     kinds = {c.value: c for c in p.offered[1][1]}
     assert not verbs["scratch"].disabled
+    assert not kinds["word_vectors"].disabled
     assert kinds["scratch_transformer"].disabled.startswith("needs torch")
+    assert not verbs["wrangle"].disabled
+
+
+def test_a_verb_with_nothing_left_under_it_is_grayed_with_the_first_reason(tmp_path, monkeypatch):
+    """
+    Neither gensim nor torch -- the CI machine. Both rows under "from scratch"
+    are grayed, so the verb is too, and it borrows its first row's reason
+    rather than inventing a third. Import/export never needs either.
+    """
+    import importlib.util
+
+    from taters.ui import wizard as _wizard
+
+    real = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec",
+                        lambda name, *a, **k: None if name == "torch" else real(name, *a, **k))
+    monkeypatch.setattr(_wizard, "missing_extras",
+                        lambda recipe: ["vectors"] if recipe.id == "word_vectors_train" else [])
+    monkeypatch.setattr(_wizard, "unavailable_reason", lambda recipe: "")
+    p = EscapingPrompter(["__esc__"])
+    with pytest.raises(GoBack):
+        run_train(p, cwd=tmp_path)
+    verbs = {c.value: c for c in p.offered[0][1]}
+    assert verbs["scratch"].disabled == 'needs pip install "taters[vectors]"'
+    assert verbs["adapt"].disabled.startswith("needs torch")
     assert not verbs["wrangle"].disabled
 
 
