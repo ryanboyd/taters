@@ -107,6 +107,7 @@ FACADE_METHODS = [
     ("helpers", "csv_to_analysis_ready_csv"),
     ("helpers", "find_files"),
     ("helpers", "feature_gather"),
+    ("helpers", "average_feature_table"),
 ]
 
 

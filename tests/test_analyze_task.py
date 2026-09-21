@@ -83,7 +83,7 @@ def test_the_source_stage_asks_for_predictors_rather_than_text(tmp_path):
     study = _study(tmp_path / "s.csv")
     p = ScriptedPrompter([
         "csv", *browse_to(study), ["f1", "f2"], True, ["pid"], "row",
-        ["stats_correlations"], ["openness"], False, "fdr_bh", False,
+        ["stats_correlations"], False, ["openness"], False, "fdr_bh", False,
         ":done", "Run", "save",
     ])
     wiz.run_wizard(p, cwd=tmp_path, banner=False, analyses=True,
@@ -108,7 +108,7 @@ def test_a_column_is_a_predictor_or_an_outcome_but_never_both(tmp_path):
     study = _study(tmp_path / "s.csv")
     p = ScriptedPrompter([
         "csv", *browse_to(study), ["f1", "f2"], True, ["pid"], "row",
-        ["stats_correlations", "stats_group_differences"],
+        ["stats_correlations", "stats_group_differences"], False,
         "condition",                    # the group column
         ["openness"], False, "fdr_bh", False,
         ":done", "Run", "save",
@@ -131,7 +131,7 @@ def test_the_predictors_and_the_silenced_word_clouds_reach_the_preset(tmp_path):
     study = _study(tmp_path / "s.csv")
     p = ScriptedPrompter([
         "csv", *browse_to(study), ["f1", "f2"], True, ["pid"], "row",
-        ["stats_correlations"], ["openness"], False, "fdr_bh", False,
+        ["stats_correlations"], False, ["openness"], False, "fdr_bh", False,
         ":done", "Run", "save",
     ])
     result = wiz.run_wizard(p, cwd=tmp_path, banner=False, analyses=True,
@@ -165,7 +165,7 @@ def test_the_statistics_run_on_the_spreadsheets_own_columns(tmp_path):
         # predictor, and a model that learns from a participant number has
         # learned the order people were recruited in
         "csv", *browse_to(study), ["f1", "f2"], True, ["subject_no"], "row",
-        ["stats_correlations", "stats_ridge_fit"], ["openness"], False,
+        ["stats_correlations", "stats_ridge_fit"], False, ["openness"], False,
         "fdr_bh", False, ":done", "Run", "run", "quit",
     ])
     # the finish screen's "Finish" is how a run ends; anything else escaping
@@ -199,7 +199,7 @@ def test_several_rows_per_person_are_averaged_before_anything_is_fitted(tmp_path
     p = ScriptedPrompter([
         "csv", *browse_to(study), ["f1", "f2"],
         False,                          # no single id column; pid repeats
-        "group", ["pid"],               # combine the rows of each participant
+        "group", ["pid"], False,               # combine the rows of each participant
         ["stats_ridge_fit"], ["openness"],
         False,                          # no controls
         False,                          # no row filters

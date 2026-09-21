@@ -731,3 +731,146 @@ def test_a_gathered_table_with_no_record_is_rebuilt_because_it_is_cheap(tmp_path
                               overwrite_existing=False)
     assert "age" in out.read_text(encoding="utf-8-sig").splitlines()[0]
     assert pv.read(out) is not None, "and this time it gets a record"
+
+
+# ---------------------------------------------------------------------------
+# Reshaping a table is not measuring it
+# ---------------------------------------------------------------------------
+
+def _measured(tmp_path, name="measured.csv", *, knob="fine"):
+    """A pretend feature table with a record of its own."""
+    @pv.records_settings(binding=("src",), outputs=("out",),
+                         bookkeeping=("word_count",))
+    def measure(*, src, out, knob="fine"):
+        Path(out).write_text("text_id,x,word_count\na,1,10\nb,3,20\n",
+                             encoding="utf-8")
+        return Path(out)
+
+    return measure(src=str(tmp_path / "corpus.csv"),
+                   out=str(tmp_path / name), knob=knob)
+
+
+def _reshaped(tmp_path, source, name="reshaped.csv", *, rows=1):
+    """A step that declares it reshapes its input rather than measuring it."""
+    @pv.records_settings(binding=("in_csv",), grain=("min_rows",),
+                         outputs=("out_csv",), reshapes="in_csv",
+                         bookkeeping=("rows_averaged",))
+    def reshape(*, in_csv, out_csv, min_rows=1):
+        Path(out_csv).write_text("text_id,x,word_count,rows_averaged\n"
+                                 "g,2,15,2\n", encoding="utf-8")
+        return Path(out_csv)
+
+    return reshape(in_csv=str(source), out_csv=str(tmp_path / name),
+                   min_rows=rows)
+
+
+def test_a_reshaped_table_carries_the_measuring_identity_of_its_input(tmp_path):
+    """
+    Averaging a table up is not a way of measuring it. What a later check
+    wants to know about a table of readability averaged per speaker is how
+    readability was measured -- so the record takes the measure's own call,
+    settings and bookkeeping, and only the grain differs.
+    """
+    measured = _measured(tmp_path)
+    reshaped = _reshaped(tmp_path, measured)
+    before, after = pv.read(measured), pv.read(reshaped)
+
+    assert after["call"] == before["call"]
+    assert after["instrument"] == before["instrument"]
+    assert after["reshaped_by"].endswith("reshape"), \
+        "the record has to still say who reshaped it"
+    assert after["grain"] == {"min_rows": 1}, "the grain is this step's own"
+
+
+def test_a_model_fitted_on_a_reshaped_table_is_not_locked_to_that_shape(tmp_path):
+    """
+    The requirement in one assertion. A model records the tables it was
+    fitted on and refuses features measured differently; it must not refuse
+    features merely *shaped* differently, or every model trained on
+    aggregates would be unusable on anything else -- which is the opposite
+    of what a model is for.
+    """
+    measured = _measured(tmp_path)
+    reshaped = _reshaped(tmp_path, measured)
+
+    fitted = {"measured": pv.comparable(pv.read(reshaped))}
+    scoring = {"measured": pv.comparable(pv.read(measured))}
+    mismatched, unverifiable = pv.compare_tables(fitted, scoring)
+
+    assert mismatched == [], mismatched
+    assert unverifiable == []
+
+
+def test_the_chain_digest_of_a_reshaped_table_equals_the_measured_one(tmp_path):
+    """
+    The narrower version of the test above, and the one that actually broke.
+    A measure whose only upstream step is a gather has an *empty* upstream,
+    because a gather is `defines_text` and stays out of the chain -- so
+    falling back on an empty upstream put the reshaping step's own chain in
+    instead, and the digest differed by exactly the thing being equalized.
+    """
+    measured = _measured(tmp_path)
+    reshaped = _reshaped(tmp_path, measured)
+
+    assert pv.read(reshaped)["upstream"] == pv.read(measured)["upstream"] == []
+    assert pv.read(reshaped)["digests"]["chain"] == \
+        pv.read(measured)["digests"]["chain"]
+
+
+def test_a_reshaped_table_keeps_both_lots_of_bookkeeping_columns(tmp_path):
+    """
+    The measure's own -- a word count nobody wants as a predictor -- and the
+    reshaping step's. Forgetting the first put a word count into the feature
+    sets of a real run, which is the failure `bookkeeping` exists to stop.
+    """
+    reshaped = _reshaped(tmp_path, _measured(tmp_path))
+
+    assert set(pv.read(reshaped)["bookkeeping"]) == {"word_count",
+                                                     "rows_averaged"}
+
+
+def test_reshaping_something_with_no_record_inherits_nothing(tmp_path):
+    """
+    Unknown provenance stays unknown rather than being filled in with this
+    step's own. The gate has a separate, waivable answer for "I cannot
+    check", and it is not the same claim as "these disagree".
+    """
+    plain = tmp_path / "plain.csv"
+    plain.write_text("text_id,x\na,1\n", encoding="utf-8")
+    reshaped = _reshaped(tmp_path, plain)
+    record = pv.read(reshaped)
+
+    assert "reshaped_by" not in record
+    assert record["call"].endswith("reshape")
+
+
+def test_the_digests_describe_what_the_record_ends_up_saying(tmp_path):
+    """
+    They were taken from a local variable rather than from the record, so a
+    record amended after it was assembled carried digests of settings it no
+    longer claimed. Anything that edits a record has to be digested after.
+    """
+    reshaped = pv.read(_reshaped(tmp_path, _measured(tmp_path)))
+    expected = pv.digest([reshaped["call"], reshaped["instrument"],
+                          reshaped["assets"]])
+
+    assert reshaped["digests"]["instrument"] == expected
+
+
+def test_two_tables_measured_differently_still_disagree_after_reshaping(tmp_path):
+    """
+    The other half: inheriting the measure's identity must not make
+    everything compatible with everything. Two tables measured under
+    different settings and then averaged the same way are still two
+    different measurements.
+    """
+    fine = _reshaped(tmp_path, _measured(tmp_path, "a.csv", knob="fine"),
+                     "ra.csv")
+    coarse = _reshaped(tmp_path, _measured(tmp_path, "b.csv", knob="coarse"),
+                       "rb.csv")
+    mismatched, _ = pv.compare_tables(
+        {"t": pv.comparable(pv.read(fine))},
+        {"t": pv.comparable(pv.read(coarse))})
+
+    assert mismatched, "a real difference in measurement was swallowed"
+    assert any(d[0] == "knob" for d in mismatched[0][1])

@@ -2,13 +2,13 @@
 
 <div style="display:flex; align-items:center; justify-content:center;
             gap:1.25rem; flex-wrap:wrap; margin:1.5rem 0;">
-  <img src="img/TATERS-small.png" alt="TATERS" width="200"
+  <img src="img/taters-small.png" alt="TATERS" width="200"
        style="flex:0 0 auto; max-width:45%; height:auto;">
-  <video src="img/TATERS-animation.mp4" autoplay loop muted playsinline
+  <video src="img/taters-animation.mp4" autoplay loop muted playsinline
          width="548"
          style="flex:1 1 340px; max-width:548px; height:auto; border-radius:6px;"
          aria-label="TATERS running a pipeline, from picking a source through to the finished report">
-    <a href="img/TATERS-animation.mp4">Watch TATERS run a pipeline</a>
+    <a href="img/taters-animation.mp4">Watch TATERS run a pipeline</a>
   </video>
 </div>
 

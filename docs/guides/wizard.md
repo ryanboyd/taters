@@ -130,6 +130,83 @@ When something you picked needs a transcript, the app asks how to make one:
 It asks even when you never mentioned transcription, because the two answers
 differ by a multi-gigabyte download and by what the results mean.
 
+## Combining rows: two moments, two questions
+
+A spreadsheet of survey responses, forum posts or conversation turns usually
+holds several rows per person. Combining them is not one decision, and Taters
+asks about each part where it happens.
+
+**Before measuring, you can join the text.** The wizard asks whether to
+measure every row on its own or join rows together first, and then which
+columns say which rows belong together. Joining makes all of one person's
+rows into a single document and measures that once.
+
+**Before the statistics, you can average the measures.** This is the other
+order: measure each row on its own, then average within a group you name.
+
+Nothing is combined into a single score. Every measure keeps its own column
+and is averaged on its own, so a table of readability, word count and
+sentiment for 4,000 responses becomes the same three columns for 300 people —
+each person's readability, each person's word count, each person's sentiment.
+What changes is what a row *is*, not how many columns there are. A count of
+the rows behind each average rides along as `rows_averaged`, which you can
+filter on but which never becomes a predictor.
+
+You can repeat it, and the order matters. Averaging turns to speakers and then
+speakers to conversations weights every speaker equally; averaging turns
+straight to conversations weights whoever talked most. Each round offers only a
+subset of the previous round's columns, because the rest are gone once rows
+have been averaged together.
+
+The two are genuinely different analyses, not two routes to one answer —
+joining a speaker's words before measuring and averaging their per-utterance
+scores differ by around a third on vocabulary measures, where length matters.
+Both can happen in one run: join each speaker's turns within a conversation,
+measure that, then average the speakers to conversation level.
+
+Both column pickers show how many different values each column holds, because
+that number is the decision: grouping 938 responses by a column with seven
+values leaves seven rows to analyze.
+
+```
+  [ ] Education  numbers    7 unique
+  [ ] Gender     numbers    4 unique
+  [ ] Age        numbers   55 unique
+  [ ] ResponseId text     938 unique
+```
+
+After every answer that moves the shape, the wizard says what it is now, with
+the count it leaves:
+`one row per spreadsheet row (938 rows), then one per Education (7 rows).`
+
+**Leaving rows out.** You can do it at either moment, and the two ask about
+different things because different things are known.
+
+Before joining, the only thing known is what you collected, so the question is
+about your own columns: pick a column, then tick which of its values stay. The
+values come with how many rows hold each, so what a tick costs is visible. A
+column with too many values to list asks for a threshold instead — at least or
+at most — and a free-text column asks you to type the values to drop. Add as
+many as you like; a row has to clear all of them. This is asked before joining
+because a row inside somebody else's joined text cannot be taken out again.
+
+Before the statistics there is the ordinary row filter, and that one can use
+anything the run has measured by then — a word count, a readability score —
+because by then it exists. A word count is not available before measuring, and
+guessing one is not the same question.
+
+Both use the same comparisons and the same keep-what-matches rule, so a filter
+means one thing wherever you apply it. A blank cell in a filtered column never
+survives: an unknown value is not evidence, and keeping it would mean a
+half-empty column quietly stops filtering.
+
+Whatever you choose, **the model you train does not inherit the shape**. A
+ridge fitted on conversation-level means scores any new text, at any grain,
+with no flags: models match their predictors by name, and how a corpus was
+assembled is recorded in the run's manifest rather than demanded of the next
+one. The exception is controls, which a model does need at scoring time,
+because that is what controlling for something means.
+
 ## Statistics, if your data can support them
 
 There are two extraction entries on the front page, and the difference is what
@@ -218,6 +295,19 @@ When statistics are not possible the app says so rather than staying silent:
 a folder of documents has no grouping columns to test, for instance. It says
 so in yellow, on the spot, rather than leaving you to notice a missing
 question.
+
+### Controls and the shape of a row
+
+A control is a column held constant so it cannot explain your result. Which
+columns can serve depends on what one row of results is. If you averaged to
+one row per conversation, a control has to have a single value per
+conversation — so `speaker` cannot be one, because a conversation has several.
+The question says how many columns that rules out and names a few, so a short
+list reads as a consequence rather than as a missing feature.
+
+If the list is shorter than you expect, that is the thing to check first: the
+read-back after the averaging questions tells you what a row is, and the
+control list follows from it.
 
 ## Changing options
 
@@ -372,6 +462,27 @@ wins over any folder chosen here; the Hugging Face variables `HF_HUB_CACHE`
 and `HF_HOME` are honored as they always were when neither is set. Models
 already downloaded elsewhere are not moved. "Check my setup" shows the
 folder, how it was chosen, and how much is in it.
+
+### How much of a spreadsheet to read
+
+When you point Taters at a spreadsheet it reads the file over before asking
+anything about it, and shows a count of rows as it goes. Every column question
+that follows is built on that read: which columns hold numbers, which hold
+labels that repeat, which could group rows together, which could be held
+constant within a group.
+
+It reads all of it by default, and this setting is where to say otherwise.
+Reading everything costs a pass over the file and buys two things. The
+questions are right the first time — a column with one `n/a` on row 230 is not
+offered as a number, rather than being offered, taken, and then refused a
+question later. And a file whose rows do not match its header is reported the
+moment you choose it, which is a much better time to find out than after an
+hour of extraction.
+
+Lower it only if your files are large enough that the pass is worth skipping.
+The offers then go back to being true of the first *N* rows rather than of the
+file, and the whole-column checks that catch the difference still run when a
+column is actually chosen.
 
 ### How this looks in your terminal
 

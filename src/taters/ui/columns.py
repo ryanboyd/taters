@@ -15,21 +15,159 @@ screen's business.
 from __future__ import annotations
 
 import csv
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import (Callable, Dict, List, Mapping, Optional, Sequence, Tuple,
+                    Union)
 
 PathLike = Union[str, Path]
 
-#: How much of the file to read for the sample. Big enough that a column of
-#: mostly-blank scores still shows its type, small enough that pointing the
-#: wizard at a two-gigabyte export does not stall the screen.
-_SAMPLE_BYTES = 256 * 1024
-
-#: How many rows the sample keeps. ~200 is plenty to tell a score column from
-#: a username column, and the questions built on it are offers, not contracts:
-#: the analyses themselves read every row and refuse honestly if a column
-#: turns out to hold something else.
+#: How many rows :func:`peek_csv` keeps when a caller does not say. Only the
+#: screens that want a cheap look at a header use that default now; the wizard
+#: inspects the whole file (see :func:`inspect_csv`).
 _SAMPLE_ROWS = 200
+
+#: How often the scan reports progress, in rows. Often enough that the count
+#: visibly moves on a big file, rarely enough that the reporting is not the
+#: expensive part.
+_TICK_EVERY = 2000
+
+
+class _Row(Mapping):
+    """
+    One scanned row, as a mapping, without a dict per row.
+
+    A spreadsheet with 143 columns and a million rows is 143 million key
+    references if every row is its own dict, and the wizard holds the whole
+    scan to answer questions about it. So the header's index is built once
+    and shared, and a row is the tuple of its values.
+
+    Read-only and only ever asked for ``.get``, which is all the screens do.
+    """
+
+    __slots__ = ("_index", "_values")
+
+    def __init__(self, index: Dict[str, int], values: Tuple[str, ...]):
+        self._index = index
+        self._values = values
+
+    def __getitem__(self, key: str) -> str:
+        return self._values[self._index[key]]
+
+    def __iter__(self):
+        return iter(self._index)
+
+    def __len__(self) -> int:
+        return len(self._index)
+
+    def __repr__(self) -> str:
+        return repr(dict(self))
+
+
+@dataclass
+class Inspection:
+    """
+    What one pass over a spreadsheet found.
+
+    Held rather than recomputed: the source stage, the level question and the
+    analysis stage all ask about the same file, and they used to scan it once
+    each.
+    """
+
+    columns: List[str]
+    rows: List[Mapping]
+    scanned: int = 0
+    #: A row limit stopped the scan before the end of the file.
+    truncated: bool = False
+    #: Rows with more fields than the header has columns, and fewer. Either
+    #: means a quoting or delimiter problem, and the point of saying so at
+    #: the moment the file is chosen is that the alternative is finding out
+    #: after an hour of extraction.
+    over: int = 0
+    under: int = 0
+
+    @property
+    def ragged(self) -> int:
+        return self.over + self.under
+
+    def trouble(self) -> str:
+        """One line about the file's formatting, or ''."""
+        if not self.ragged:
+            return ""
+        parts = []
+        if self.over:
+            parts.append(f"{self.over:,} with extra fields")
+        if self.under:
+            parts.append(f"{self.under:,} short of the header")
+        return (f"{self.ragged:,} of {self.scanned:,} rows do not match the "
+                f"header ({', '.join(parts)}). Usually an unescaped quote or "
+                f"the wrong separator.")
+
+
+def inspect_csv(path: PathLike, *, delimiter: Optional[str] = None,
+                limit: int = 0,
+                on_rows: Optional[Callable[[int], None]] = None
+                ) -> Inspection:
+    """
+    Read a spreadsheet and report its columns, its rows and its problems.
+
+    The whole file by default. The questions built on this are offers rather
+    than contracts -- the analyses read every row regardless and refuse
+    honestly -- but an offer made from the first two hundred rows is wrong in
+    a way nobody can see: on a real file with 143 columns, ten columns looked
+    constant within a group in the sample and were not in the other 738 rows,
+    so they were offered as controls that would have arrived empty.
+
+    Parameters
+    ----------
+    path : str or Path
+        The spreadsheet.
+    delimiter : str, optional
+        The separator already settled for this file. Sniffed when absent.
+    limit : int, default 0
+        Stop after this many rows. ``0`` reads all of them.
+    on_rows : callable, optional
+        Called with the running row count every few thousand rows, for a
+        progress line. A scan of a large file is the first slow thing the
+        wizard does and the only one that used to happen in silence.
+
+    Returns
+    -------
+    Inspection
+    """
+    path = Path(path)
+    delimiter = delimiter or sniff_delimiter(path)
+    columns: List[str] = []
+    rows: List[Mapping] = []
+    over = under = scanned = 0
+    truncated = False
+    with path.open("r", newline="", encoding="utf-8-sig") as fh:
+        reader = csv.reader(fh, delimiter=delimiter)
+        for raw in reader:
+            columns = [str(c) for c in raw]
+            break
+        index = {name: i for i, name in enumerate(columns)}
+        width = len(columns)
+        for raw in reader:
+            if not raw:
+                continue            # a blank line is not a row
+            if len(raw) > width:
+                over += 1
+            elif len(raw) < width:
+                under += 1
+            values = tuple(raw[:width]) if len(raw) >= width \
+                else tuple(raw) + ("",) * (width - len(raw))
+            rows.append(_Row(index, values))
+            scanned += 1
+            if on_rows is not None and scanned % _TICK_EVERY == 0:
+                on_rows(scanned)
+            if limit and scanned >= limit:
+                truncated = True
+                break
+    if on_rows is not None:
+        on_rows(scanned)
+    return Inspection(columns=columns, rows=rows, scanned=scanned,
+                      truncated=truncated, over=over, under=under)
 
 
 #: The separators a spreadsheet can actually have. The Sniffer, handed prose,
@@ -63,6 +201,11 @@ def peek_csv(path: PathLike, n: int = _SAMPLE_ROWS,
     """
     A spreadsheet's column names and a sample of its rows.
 
+    The cheap look, for a screen that wants a header and a few rows.
+    :func:`inspect_csv` is the one the wizard uses: it reads the whole file,
+    so what it says about a column is true of the column rather than of its
+    first two hundred values.
+
     ``delimiter`` is the answer already settled for this file (the source
     stage's); when a screen has one it must pass it, so what it offers is
     what the run will actually see. Without one the file is sniffed the way
@@ -70,22 +213,8 @@ def peek_csv(path: PathLike, n: int = _SAMPLE_ROWS,
     column under a comma reader, and every column question built on that
     would be wrong.
     """
-    path = Path(path)
-    delimiter = delimiter or sniff_delimiter(path)
-    with path.open("r", newline="", encoding="utf-8-sig") as fh:
-        sample = fh.read(_SAMPLE_BYTES)
-    # The last line of a truncated read may be half a row; drop it unless the
-    # sample held the whole file.
-    lines = sample.splitlines()
-    if len(sample) == _SAMPLE_BYTES and len(lines) > 1:
-        lines = lines[:-1]
-    reader = csv.DictReader(lines, delimiter=delimiter)
-    rows: List[dict] = []
-    for row in reader:
-        rows.append(row)
-        if len(rows) >= n:
-            break
-    return list(reader.fieldnames or []), rows
+    found = inspect_csv(path, delimiter=delimiter, limit=max(0, int(n)))
+    return found.columns, found.rows
 
 
 def looks_numeric(rows: Sequence[dict], column: str) -> bool:

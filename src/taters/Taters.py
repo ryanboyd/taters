@@ -133,6 +133,7 @@ class Taters:
     def csv_to_analysis_ready_csv(self, **kwargs):              return self.helpers.csv_to_analysis_ready_csv(**kwargs)
     def find_files(self, **kwargs):                             return self.helpers.find_files(**kwargs)
     def feature_gather(self, **kwargs):                         return self.helpers.feature_gather(**kwargs)
+    def average_feature_table(self, **kwargs):                  return self.helpers.average_feature_table(**kwargs)
     
 
 
@@ -371,4 +372,8 @@ class _HelpersAPI:
     def feature_gather(self, **kwargs):
         from .helpers.feature_gather import feature_gather
         return _forward(feature_gather, kwargs)
+
+    def average_feature_table(self, **kwargs):
+        from .helpers.feature_average import average_feature_table
+        return _forward(average_feature_table, kwargs)
     

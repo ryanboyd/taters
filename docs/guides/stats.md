@@ -182,6 +182,35 @@ becomes the participant's average, named `openness_mean` (with an
 use. The wizard handles the renaming for you; if you are writing the YAML
 by hand, that is the trap to know about.
 
+Averaging the measures instead. The combining above happens to the *text*,
+before anything is measured. The other order is to measure every row on its
+own and then average the numbers, which the wizard offers just before the
+statistics: once, or repeatedly, so turns can become speakers and speakers
+become conversations. Each averaged table is written beside the raw one, in a
+folder named for its grain (`features/by-conv/readability.csv`), and the
+columns keep their own names — nothing gains a `__mean` suffix, because a
+model is matched to its predictors by name and has to stay applicable to text
+that arrives at any grain. What went into each average is counted in
+`rows_averaged`, which is kept out of the feature sets so it can be filtered
+on but never becomes a predictor. The outcomes follow the grain the analyses
+see, so they arrive averaged and renamed exactly as described above.
+
+Controlling for how much went into each group. When rows are combined, the
+groups are usually not the same size, and the size is a confound in its own
+right: a group built from fifty responses has a longer document than one built
+from three, and every length-sensitive measure — type-token ratio, Herdan's C,
+Summer's S — moves with that rather than with whatever you are studying. So
+`group_count` is offered as a control alongside your own columns whenever the
+groups differ in size.
+
+It is worth taking. On a real run, 938 responses grouped by age gave documents
+from 75 to 11,000 words; document length tracked group size at r = .99, and a
+ridge over sixteen lexical-richness measures reached a cross-validated R² of
+0.27. Holding `group_count` constant, the group size alone scored 0.43 and the
+language *subtracted* 0.17 from it — the apparent result was sample composition
+wearing a vocabulary measure's name. That is what `delta_r2_over_controls` is
+for, and it only appears if something is being controlled for.
+
 A note on column names. Every measure Taters ships picks column names that
 no other measure uses, and there is a build test that refuses any two that
 could agree — so `flesch_reading_ease` means the same thing in every results

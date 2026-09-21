@@ -830,11 +830,11 @@ def test_a_spreadsheet_is_asked_how_its_rows_should_be_counted(tmp_path, survey_
     """
     p = ScriptedPrompter([
         "csv", *browse_to(survey_csv), ["response"], False,
-        ["readability"], "group", ["pid"], [], False, "Survey", "save",
+        ["readability"], "group", ["pid"], False, [], False, "Survey", "save",
     ])
     result = wiz.run_wizard(p, cwd=tmp_path)
 
-    assert any("what should one row of results describe" in q.lower()
+    assert any("join rows together first" in q.lower()
                for _kind, q in p.asked)
     assert result.preset["steps"][0]["with"]["group_by"] == ["pid"]
 
@@ -855,7 +855,9 @@ def test_asking_to_group_by_nothing_is_re_asked(tmp_path, survey_csv):
     """Empty is not an answer here: it would silently fall back to per-row."""
     p = ScriptedPrompter([
         "csv", *browse_to(survey_csv), ["response"], False,
-        ["readability"], "group", [], ["pid"], [], False, "Survey", "save",
+        ["readability"], "group", [], ["pid"],   # empty is re-asked
+        False,                                   # leave no short rows out
+        [], False, "Survey", "save",
     ])
     result = wiz.run_wizard(p, cwd=tmp_path)
 

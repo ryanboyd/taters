@@ -1240,3 +1240,208 @@ def test_two_models_with_one_slug_are_refused_not_clobbered():
     with pytest.raises(ComposeError, match="both called"):
         compose(["parts_of_speech", "score_with_model"], model_plans=clash,
                 **_csv_kwargs())
+
+
+# ---------------------------------------------------------------------------
+# Measure each row, then average the numbers
+# ---------------------------------------------------------------------------
+
+AVERAGE = "potato.helpers.average_feature_table"
+
+
+def _chained(levels, *, group_by=(), picks=("readability", "stats_correlations"),
+             source="csv", text_mode="concat"):
+    return compose(list(picks), source=source, text_cols=["text"],
+                   group_by=list(group_by), feature_levels=levels,
+                   text_mode=text_mode,
+                   var_values={"input_csv": "turns.csv"}, name="chain")
+
+
+def _averaging(preset) -> list:
+    return [s for s in preset["steps"] if s["call"] == AVERAGE]
+
+
+def _by_id(preset, save_as):
+    return next(s for s in preset["steps"] if s.get("save_as") == save_as)
+
+
+def test_a_run_that_averages_nothing_is_exactly_what_it_always_was():
+    """The default has to be untouched: every saved pipeline, every shipped
+    preset and every other test in this file runs through this path."""
+    plain = _chained([])
+
+    assert _averaging(plain) == []
+    assert not [s for s in plain["steps"] if s.get("save_as") == "row_group_keys"]
+
+
+def test_averaging_adds_one_step_per_table_per_level(tmp_path):
+    """
+    One step per table rather than one step over a folder, because a feature
+    table's provenance record sits beside it and the decorator writes one
+    record per file it returns. A step that wrote a folder full of tables
+    would leave every one of them unrecorded, and both the assemble step and
+    the model gate read those records.
+    """
+    preset = _chained([("conv", "speaker"), ("conv",)],
+                      picks=("readability", "dictionaries",
+                             "stats_correlations"))
+    steps = _averaging(preset)
+
+    assert len(steps) == 4, "two tables at two levels"
+    assert_valid_preset(preset)
+
+
+def test_each_level_reads_what_the_level_before_it_wrote(tmp_path):
+    """
+    Averaging turns to speakers and then speakers to conversations is not
+    the same arithmetic as averaging turns straight to conversations, so the
+    steps have to chain rather than each read the raw table.
+    """
+    preset = _chained([("conv", "speaker"), ("conv",)])
+    first, second = _averaging(preset)
+
+    assert first["with"]["in_csv"] == "{{readability_features}}"
+    assert second["with"]["in_csv"] == "{{" + first["save_as"] + "}}"
+    assert second["with"]["group_by"] == ["conv"]
+
+
+def test_only_the_first_level_is_told_which_row_belongs_to_which_group():
+    """
+    A feature table carries `text_id` and numbers, and nothing on it says
+    who said it -- so the first average needs a key map. After that the
+    grouping columns are in the table the previous level wrote.
+    """
+    preset = _chained([("conv", "speaker"), ("conv",)])
+    first, second = _averaging(preset)
+
+    assert first["with"]["keys_csv"] == "{{row_group_keys}}"
+    assert "keys_csv" not in second["with"]
+
+
+def test_the_key_map_is_keyed_the_way_the_text_was_gathered():
+    """
+    It has to compose `text_id` exactly as the run's feature tables did, or
+    it can place none of their rows. Rows measured one at a time are keyed
+    on the id columns; rows whose text was joined first are keyed on the
+    joining columns.
+    """
+    per_row = compose(["readability", "stats_correlations"], source="csv",
+                      text_cols=["text"], id_cols=["turn_id"], group_by=[],
+                      feature_levels=[("conv",)],
+                      var_values={"input_csv": "t.csv"}, name="a")
+    joined = _chained([("conv",)], group_by=["conv", "speaker"])
+
+    assert _by_id(per_row, "row_group_keys")["with"]["id_cols"] == ["turn_id"]
+    assert _by_id(joined, "row_group_keys")["with"]["group_by"] == \
+        ["conv", "speaker"]
+    assert _by_id(joined, "row_group_keys")["with"]["text_cols"] == [], \
+        "the key map is not supposed to carry any text"
+
+
+def test_the_outcomes_arrive_at_the_grain_the_statistics_will_see():
+    """
+    The text steps still gather at the joining keys, but the metadata has to
+    be one row per *analyzed* row or the join matches nothing. This is the
+    one place where the two grains in a run are genuinely different.
+    """
+    joined = _chained([("conv",)], group_by=["conv", "speaker"])
+
+    assert _by_id(joined, "stats_metadata")["with"]["group_by"] == ["conv"]
+    gather = next(s for s in joined["steps"]
+                  if s.get("save_as") == "readability_features")
+    assert gather["with"]["group_by"] == ["conv", "speaker"], \
+        "the text stopped being joined at the level the user asked for"
+
+
+def test_the_statistics_and_the_descriptives_both_read_the_averaged_tables():
+    """
+    A report whose descriptives say "4000 rows" about a model fitted on 40
+    conversations is worse than no descriptives, so both readers move to the
+    grain the analyses use -- and the averaging has to be spliced in ahead
+    of the descriptives, which sit in the extract stage.
+    """
+    preset = _chained([("conv", "speaker"), ("conv",)])
+    last = _averaging(preset)[-1]["save_as"]
+    calls = [s["call"] for s in preset["steps"]]
+
+    for reader in ("potato.stats.assemble_analysis_table",
+                   "potato.stats.describe_features"):
+        step = next(s for s in preset["steps"] if s["call"] == reader)
+        assert step["with"]["feature_csvs"] == ["{{" + last + "}}"], reader
+        assert calls.index(AVERAGE) < calls.index(reader), \
+            f"{reader} reads a table written after it"
+
+
+def test_an_averaged_table_is_named_for_its_measure_and_filed_by_its_grain():
+    """
+    `by-conv/readability.csv` rather than `readability_avg2.csv`: the folder
+    says what one row is and the stem stays the measure's own name, which is
+    what the analyses call a feature set and what a saved model compares its
+    tables by.
+    """
+    preset = _chained([("conv", "speaker"), ("conv",)])
+    outs = [s["with"]["out_csv"] for s in _averaging(preset)]
+
+    assert outs == ["{{var:features_dir}}/by-conv-speaker/readability.csv",
+                    "{{var:features_dir}}/by-conv/readability.csv"]
+
+
+def test_the_joining_levels_filename_suffix_is_not_carried_onto_the_average():
+    """
+    A non-default level suffixes the raw table's filename to say what one
+    row of *it* was. Left on the averaged copy, the analyses would name a
+    feature set `readability_by-group` inside a folder called `by-conv`,
+    which reads as two answers to one question.
+    """
+    preset = _chained([("conv",)], group_by=["conv", "speaker"])
+
+    assert _averaging(preset)[0]["with"]["out_csv"] == \
+        "{{var:features_dir}}/by-conv/readability.csv"
+
+
+def test_a_column_that_splits_a_row_on_purpose_is_kept_through_the_average():
+    """
+    Measuring each text column separately means a row per text column on
+    purpose, and the analysis table joins on `text_id` *and* that column.
+    Averaging it away would leave duplicate keys, which assemble refuses.
+    """
+    separate = compose(["readability", "stats_correlations"], source="csv",
+                       text_cols=["q1", "q2"], text_mode="separate",
+                       group_by=[], feature_levels=[("conv",)],
+                       var_values={"input_csv": "t.csv"}, name="s")
+
+    assert _averaging(separate)[0]["with"]["split_col"] == "source_col"
+    assert _averaging(_chained([("conv",)]))[0]["with"]["split_col"] == ""
+
+
+def test_averaging_is_ignored_where_there_is_no_spreadsheet_to_average_by():
+    """The grouping columns are a spreadsheet's own. A folder of documents
+    has none, and the media path already averages per speaker its own way."""
+    docs = compose(["readability"], source="txt_dir",
+                   feature_levels=[("conv",)], name="d")
+
+    assert _averaging(docs) == []
+
+
+def test_an_early_gather_carries_whatever_a_later_average_will_group_by():
+    """
+    The gather writes the analysis-ready table the analyzers read, so a
+    column a later average groups on has to survive it. Left out, the
+    averaging step would have nothing to group on and the run would die
+    after every feature had already been measured.
+
+    The wizard only offers the early gather when rows are being joined, and
+    then the averaging columns are a subset of the joining ones -- but
+    `compose` is a public entry point and this combination is legal through
+    it, so it is wired rather than assumed.
+    """
+    preset = compose(["readability", "stats_correlations"], source="csv",
+                     text_cols=["text"], group_by=[],
+                     row_filters=[["arm", "in", ["A"]]],
+                     feature_levels=[("conv", "speaker")],
+                     var_values={"input_csv": "t.csv"}, name="api")
+    gather = next(s for s in preset["steps"]
+                  if s.get("save_as") == "gathered_texts")
+
+    assert set(gather["with"]["carry_cols"]) >= {"conv", "speaker"}
+    assert_valid_preset(preset)

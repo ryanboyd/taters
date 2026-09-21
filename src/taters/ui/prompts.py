@@ -14,6 +14,7 @@ rather than the wizard's logic.
 from __future__ import annotations
 
 import shutil
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import (Any, Callable, Dict, List, Optional, Protocol, Sequence,
                     Tuple)
@@ -280,6 +281,11 @@ class Prompter(Protocol):
     # a finished-looking screen sitting there silent, which looks like a hang.
     def working(self, text: str) -> None: ...
 
+    # a running count while something is read. yields a callback the reader
+    # calls with the number done so far; renderers with nowhere to draw it
+    # ignore the count and just say the work is happening.
+    def scanning(self, label: str, *, unit: str = "rows"): ...
+
     # progress reporting. renderers with nowhere to put it (the plain
     # questionary one, the scripted one) just ignore it, so the wizard can call
     # it without checking.
@@ -428,6 +434,31 @@ class QuestionaryPrompter:
         """
         self.note(f"  {text}", style="dim")
         self.repaint()
+
+    @contextmanager
+    def scanning(self, label: str, *, unit: str = "rows"):
+        """
+        A spinner and a running count while something is read.
+
+        No total, because the point is a file whose size we do not know yet:
+        a spinner that moves and a number that climbs says "working, and
+        here is how far" without pretending to know when it ends. Transient,
+        so the question that follows is not pushed down the screen by a line
+        about work that has finished.
+
+        Yields the callback the reader calls with the count so far.
+        """
+        from rich.progress import Progress, SpinnerColumn, TextColumn
+
+        bar = Progress(SpinnerColumn(), TextColumn("{task.description}"),
+                       console=self._console, transient=True)
+        with bar:
+            task = bar.add_task(label, total=None)
+
+            def seen(count: int) -> None:
+                bar.update(task, description=f"{label} — {count:,} {unit}")
+
+            yield seen
 
     def clear(self) -> None:
         """
@@ -774,6 +805,13 @@ class ScriptedPrompter:
         # "hold on, this may take a moment" line landed *before* the slow
         # work's results.
         self.output.append(text)
+
+    @contextmanager
+    def scanning(self, label: str, *, unit: str = "rows"):
+        """Recorded, so a test can see the file was read out loud."""
+        self.output.append(label)
+        self.scanned: List[int] = getattr(self, "scanned", [])
+        yield self.scanned.append
 
     def note(self, text: str, *, style: str = "", wrap: bool = True) -> None:
         self.output.append(text)

@@ -170,6 +170,7 @@ class Harness:
             "row",
             ["stats_group_differences", "stats_correlations",
              "stats_ridge_fit", "stats_classify_fit"],
+            False,                          # don't average the measures
             "condition", ["openness"], ["condition"],
             True, ["age", "gender"],        # gender holds words, so labels already
             ["readability", "lexical_richness", "cohesion", "parts_of_speech",
@@ -182,8 +183,8 @@ class Harness:
     def flow_b(self):
         return self.flow("B grouped rows + correlations", [
             "csv", *self.browse(self.study), ["text"], False,
-            ["readability"], "group", ["condition"],
-            ["stats_correlations"], ["openness"], False, "fdr_bh", False,
+            ["readability"], "group", ["condition"], False,
+            ["stats_correlations"], False, ["openness"], False, "fdr_bh", False,
             ":done", "Flow B", "save",
         ])
 
@@ -192,7 +193,7 @@ class Harness:
             "csv", *self.browse(self.study_two), ["text", "text2"],
             "separate", True, ["pid"],
             ["readability", "lexical_richness"], "row",
-            ["stats_correlations", "stats_ridge_fit"], ["openness"], False,
+            ["stats_correlations", "stats_ridge_fit"], False, ["openness"], False,
             ["readability", "lexical_richness"], "together", "fdr_bh", False,
             ":done", "Flow C", "save",
         ])
@@ -398,7 +399,7 @@ class Harness:
             predictors,                 # the columns that ARE the measures
             True, ["text_id"],          # the identifier
             "row",                      # one row of results per spreadsheet row
-            ["stats_group_differences", "stats_correlations", "stats_ridge_fit"],
+            ["stats_group_differences", "stats_correlations", "stats_ridge_fit"], False,
             "condition",                # the groups to compare
             ["openness"],               # the outcome to predict
             False,                      # no controls
@@ -523,7 +524,7 @@ class Harness:
         r = self.flow("V3 a ridge over word vectors", [
             "csv", *self.browse(self.study), ["text"], True, ["pid"],
             ["word_vectors_train"], "row",
-            ["stats_ridge_fit"], ["openness"],
+            ["stats_ridge_fit"], False, ["openness"],
             False,                  # no controls
             False,                  # no row filter (one set, so no set question/FDR)
             ":done", "Flow V3", "save",

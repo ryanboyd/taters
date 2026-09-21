@@ -36,16 +36,20 @@ import re
 import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import (Any, Callable, Dict, List, Mapping, Optional, Sequence,
+                    Tuple)
 
 import yaml
 
 from . import glyphs
 from . import recipes as _recipes
 from . import preflight as _checks
-from .columns import (column_kind, constant_within, distinct_values,
-                      kind_options, looks_numeric, peek_csv, plausible_labels,
-                      read_columns, sniff_delimiter)
+from ..helpers.settings import inspect_row_limit
+from ..helpers.row_filter import keeps_row
+from .columns import (MAX_LABELS, Inspection, column_kind, constant_within,
+                      distinct_values, inspect_csv, kind_options,
+                      looks_numeric, peek_csv, plausible_labels, read_columns,
+                      sniff_delimiter)
 from .compose import (MODEL_WORK_DIR, ComposeError, compose,
                       feature_tables, table_names,
                       pending_choices, resolve_selection, slugify)
@@ -142,6 +146,27 @@ class SourceSpec:
     text_mode: str = "concat"        # "concat" | "separate"; only for CSV
     group_by: List[str] = field(default_factory=list)   # combine rows sharing these
     level: str = ""                  # "" -> the source's default; see ask_level
+    #: Average the measures up, once per entry, in order: every row measured
+    #: on its own, then one row per speaker per conversation, then one per
+    #: conversation. The other order from `group_by`, which joins the *texts*
+    #: and measures the result once. Both can happen in one run -- join the
+    #: texts at one grain, average up from there -- and they give different
+    #: numbers, so the wizard asks about each where it happens and this
+    #: records what was said. Filled in the statistics stage; see
+    #: `ask_analysis`.
+    feature_levels: List[List[str]] = field(default_factory=list)
+    #: Leave out rows with fewer than this many words before anything is
+    #: measured, counting by whitespace. Only asked when rows are being
+    #: joined, because that is the only time it cannot be done afterwards
+    #: instead: once a three-word answer is inside somebody else's joined
+    #: text there is no taking it out again. Judged on the spreadsheet's own
+    #: columns, since nothing has been measured yet; ``[column, operator,
+    #: value]`` triples, keep semantics, the same shape the statistics use.
+    row_filters: List[list] = field(default_factory=list)
+    #: What one pass over the spreadsheet found: its rows, and whether they
+    #: match its header. Read once when the file is chosen and carried, so
+    #: the level question and the analysis stage do not each read it again.
+    inspection: Optional[object] = None
     columns: List[str] = field(default_factory=list)    # a CSV's header row
     delimiter: str = ","             # sniffed from the file: , \t ; or |
     #: What each column is treated as -- "numbers", "labels", "text", "empty"
@@ -157,6 +182,21 @@ class SourceSpec:
     #: or a control. Spoken for either way, which is why the analysis stage
     #: subtracts them alongside `text_cols`.
     feature_cols: List[str] = field(default_factory=list)
+
+    @property
+    def analysis_grain(self) -> List[str]:
+        """
+        What one row of the analysis table will be.
+
+        The last averaging level if the measures get averaged, otherwise the
+        columns the texts were joined on, otherwise nothing -- one row per
+        row. The outcomes have to arrive at this grain or the join has
+        nothing to match, so everything in the statistics stage that used to
+        read `group_by` reads this instead.
+        """
+        if self.feature_levels:
+            return list(self.feature_levels[-1])
+        return list(self.group_by)
 
     @property
     def root_dir(self) -> Optional[Path]:
@@ -404,11 +444,27 @@ def _ask_csv_source(prompter: Prompter, *,
         # this beside the name on every picker from here on out, so that people
         # can see how a column is going to be treated (and change it) before
         # it actually matters.
+        # the whole file, unless somebody has lowered the limit in Settings.
+        # this used to be the first two hundred rows, and everything the
+        # wizard offers from here on was only as true as those: on a real
+        # file, ten columns looked constant within a group across the sample
+        # and were not across the rest, so they were offered as controls
+        # that would have arrived empty.
+        limit = inspect_row_limit()
         try:
-            _cols, sample = peek_csv(path, delimiter=_delimiter_of(path))
+            with prompter.scanning(f"Reading {path.name}") as seen:
+                found = inspect_csv(path, delimiter=_delimiter_of(path),
+                                    limit=limit, on_rows=seen)
         except Exception:
-            sample = []
+            found = Inspection(columns=list(header), rows=[])
+        sample = found.rows
+        state["inspection"] = found
         state["sample"] = sample
+        trouble = found.trouble()
+        if trouble:
+            # said now rather than an hour into an extraction, which is when
+            # a quoting problem used to surface.
+            prompter.note(f"  {trouble}", style="yellow")
         state["kinds"] = {c: column_kind([r.get(c) for r in sample])
                           for c in header}
         # the count, plus enough names to recognize the file by -- not all of
@@ -552,6 +608,7 @@ def _ask_csv_source(prompter: Prompter, *,
         id_cols=list(state["id_cols"]),
         text_mode=state["text_mode"],
         kinds=dict(state["kinds"]),
+        inspection=state.get("inspection"),
     )
 
 def _ids_repeat(path: Path, id_cols: Sequence[str]):
@@ -1082,6 +1139,134 @@ def _plural(n: int, noun: str) -> str:
     return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
 
 
+#: Above this many different values a column is a threshold rather than a tick
+#: list. `MAX_LABELS` is the same judgment the column pickers make about what
+#: can be read as labels at all, so the two screens agree about which columns
+#: are a short list of things.
+_LISTABLE_VALUES = MAX_LABELS
+
+
+def _value_counts(rows: Sequence[Mapping], column: str) -> Dict[str, int]:
+    """How many rows hold each value of a column, commonest first."""
+    tally: Dict[str, int] = {}
+    for row in rows:
+        value = str(row.get(column) or "").strip()
+        if value:
+            tally[value] = tally.get(value, 0) + 1
+    return dict(sorted(tally.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
+def _one_row_filter(prompter: Prompter, rows: Sequence[Mapping], column: str,
+                    *, numeric: bool) -> Optional[list]:
+    """
+    One "leave these out" answer, as a ``[column, operator, value]`` triple.
+
+    A column with a handful of different values is a tick list: the values
+    are shown with how many rows hold each, and what stays ticked is what
+    stays. No operator to choose, which is the difference between two
+    questions and four.
+
+    A column with too many values to list is a threshold instead. Numbers
+    get at-least and at-most; anything else gets "is not one of these", typed
+    in, because a free-text column with nine hundred values has no short list
+    worth showing.
+
+    Returns None when the answer would leave every row in, which is not a
+    filter and should not be recorded as one.
+    """
+    counts = _value_counts(rows, column)
+    if counts and len(counts) <= _LISTABLE_VALUES:
+        keep = list(prompter.checkbox(
+            f"Which values of {column} should stay?",
+            [Choice(value, value, f"{n:,} row{'' if n == 1 else 's'}",
+                    checked=True) for value, n in counts.items()]))
+        if not keep:
+            prompter.note("  Nothing ticked, so nothing would be left.",
+                          style="yellow")
+            return None
+        if len(keep) == len(counts):
+            return None             # everything stays: not a filter
+        return [column, "in", keep]
+
+    if not numeric:
+        prompter.reason(
+            f"{column} has {len(counts):,} different values, too many to "
+            f"list. Type the ones to leave out, separated by commas.")
+        raw = str(prompter.text(f"Leave out rows whose {column} is:",
+                                default="")).strip()
+        values = [v.strip() for v in raw.split(",") if v.strip()]
+        return [column, "not_in", values] if values else None
+
+    prompter.reason(
+        f"{column} has {len(counts):,} different values, so it is a "
+        f"threshold rather than a list.")
+    op = str(prompter.select(f"Keep rows whose {column} is:", [
+        Choice(">=", "at least this much"),
+        Choice("<=", "at most this much"),
+    ]))
+    while True:
+        raw = str(prompter.text(f"Keep rows whose {column} is "
+                                f"{'at least' if op == '>=' else 'at most'}:",
+                                default="")).strip()
+        if not raw:
+            return None
+        try:
+            return [column, op, float(raw)]
+        except ValueError:
+            prompter.note(f"  {raw!r} is not a number.", style="yellow")
+
+
+#: What the text gather calls the number of rows it combined into one. Not a
+#: column of anybody's spreadsheet: it only exists once rows are grouped, and
+#: it is the size of the group a row describes.
+GROUP_SIZE_COL = "group_count"
+
+
+def _group_sizes(rows: Sequence[Mapping],
+                 keys: Sequence[str]) -> Dict[tuple, int]:
+    """How many rows fall into each group."""
+    sizes: Dict[tuple, int] = {}
+    for row in rows:
+        key = tuple(str(row.get(k) or "").strip() for k in keys)
+        sizes[key] = sizes.get(key, 0) + 1
+    return sizes
+
+
+def _unique_counts(rows: Sequence[Mapping],
+                   columns: Sequence[str]) -> Dict[str, int]:
+    """How many different values each column holds. Blanks do not count."""
+    return {c: len({str(r.get(c) or "").strip() for r in rows} - {""})
+            for c in columns}
+
+
+def _combinations(rows: Sequence[Mapping], keys: Sequence[str]) -> int:
+    """How many rows grouping by ``keys`` would leave."""
+    if not keys:
+        return len(rows)
+    return len({tuple(str(r.get(k) or "").strip() for k in keys)
+                for r in rows})
+
+
+def _rows_of(src: SourceSpec) -> List[Mapping]:
+    """
+    The rows read when the file was chosen, or a fresh read if there are none.
+
+    Three screens ask about the same spreadsheet -- the source stage, the
+    level question, the analysis stage -- and each used to read it for
+    itself. That was three passes over the first two hundred rows, which was
+    cheap and wrong; it would be three passes over the whole file, which is
+    neither.
+    """
+    found = getattr(src, "inspection", None)
+    if found is not None and getattr(found, "rows", None):
+        return list(found.rows)
+    try:
+        _cols, rows = peek_csv(src.path, delimiter=src.delimiter)
+        return rows
+    except Exception:
+        return []
+
+
 def _and(items: Sequence[str]) -> str:
     """`a`, `a and b`, `a, b and c` -- a list read aloud."""
     items = list(items)
@@ -1090,8 +1275,41 @@ def _and(items: Sequence[str]) -> str:
     return ", ".join(items[:-1]) + " and " + items[-1]
 
 
+#: What to call the question, per source. Only a spreadsheet is asked about
+#: joining: a folder of documents is already one text per file, and for
+#: recordings the answer is a grain rather than an order of operations.
+_LEVEL_QUESTION = {
+    "": "What should one row of results describe?",
+    "csv": "Measure every row on its own, or join rows together first?",
+}
+
+
+def _grain_story(joined: Sequence[str], levels: Sequence[Sequence[str]], *,
+                 rows: Sequence[Mapping] = ()) -> str:
+    """
+    What one row of results will be, in one line, in order, with the count.
+
+    Read back after every answer that moves it, because the shape of the
+    thing being analyzed is the easiest part of a pipeline to lose track of
+    and the most expensive to get wrong. The count is the part that makes it
+    actionable: "then one per Education" sounds reasonable and "then one per
+    Education (7 rows)" does not, which is the difference between catching a
+    run like that before it produces numbers and after.
+    """
+    def counted(keys: Sequence[str]) -> str:
+        if not rows:
+            return ""
+        return f" ({_combinations(rows, keys):,} rows)"
+
+    steps = [("one row per spreadsheet row" if not joined
+              else f"one row per {' + '.join(joined)}") + counted(joined)]
+    steps += [f"then one per {' + '.join(lv)}" + counted(lv) for lv in levels]
+    return ", ".join(steps) + "."
+
+
 def ask_level(prompter: Prompter, src: SourceSpec,
-              steps: Sequence[_recipes.Recipe] = ()) -> Tuple[str, List[str]]:
+              steps: Sequence[_recipes.Recipe] = ()
+              ) -> Tuple[str, List[str], List[list]]:
     """
     Ask what one row of the results should describe.
 
@@ -1110,21 +1328,30 @@ def ask_level(prompter: Prompter, src: SourceSpec,
 
     Returns
     -------
-    (level_id, group_by)
-        ``group_by`` is empty unless the chosen level leaves the columns to the
-        user, which only a spreadsheet does.
+    (level_id, group_by, row_filters)
+        ``group_by`` is empty unless the chosen level leaves the columns to
+        the user, which only a spreadsheet does. ``row_filters`` is empty
+        unless rows are being joined and the person asked to leave some out,
+        and holds ``[column, operator, value]`` triples over the
+        spreadsheet's own columns -- keep semantics, as everywhere else.
     """
     # nothing to decide if nothing in this pipeline measures text. a run of
     # acoustics alone has its own grain (one row per speaker's audio) that
     # the level doesn't set, and shouldn't, so we skip the question.
     if steps and not any(_recipes.level_aware(r) for r in steps):
-        return _recipes.DEFAULT_LEVEL[src.source], []
+        return _recipes.DEFAULT_LEVEL[src.source], [], []
 
+    # a spreadsheet gets its own wording. for recordings the options are
+    # grains -- utterance, speaker, conversation -- and "what should one row
+    # describe" is the right question; for a spreadsheet the only thing being
+    # decided here is whether the text gets joined before it is measured, so
+    # we ask that instead of making people infer it from three grains.
+    question = _LEVEL_QUESTION.get(src.source, _LEVEL_QUESTION[""])
     options = _recipes.levels_for(src.source)
     if len(options) < 2:
         # a folder of .txt files is already one text per file. nothing to
         # decide here, and a question with one answer just wastes a screen.
-        return options[0].id, []
+        return options[0].id, [], []
 
     # we used to ask "what is your unit of analysis?" here, and it's the wrong
     # phrase. that one belongs to the statistics -- a researcher reads it as
@@ -1139,11 +1366,12 @@ def ask_level(prompter: Prompter, src: SourceSpec,
         # earlier answer sitting under the pointer, not the catalog default.
         "level": src.level if src.level in ids else _recipes.DEFAULT_LEVEL[src.source],
         "group_by": list(src.group_by),
+        "row_filters": [list(f) for f in src.row_filters],
     }
 
     def ask_which_level() -> bool:
         state["level"] = str(prompter.select(
-            "What should one row of results describe?",
+            question,
             [Choice(o.id, o.label, o.help) for o in options],
             default=state["level"],
         ))
@@ -1171,19 +1399,82 @@ def ask_level(prompter: Prompter, src: SourceSpec,
             state["level"], state["group_by"] = \
                 _recipes.DEFAULT_LEVEL[src.source], []
             return False
-        try:
-            _cols, sample = peek_csv(src.path, delimiter=src.delimiter)
-        except Exception:
-            sample = []
+        sample = _rows_of(src)
+        counts = _unique_counts(sample, remaining)
         state["group_by"] = ask_at_least_one(
-            prompter, "Combine rows that share which column(s)?",
-            _kind_rows(remaining, src.kinds, checked=state["group_by"]),
+            prompter, "Join the text from rows that share which column(s)?",
+            _kind_rows(remaining, src.kinds, checked=state["group_by"],
+                       counts=counts),
             thing="one column",
-            cycle=_cycler(src.kinds, sample, remaining))
+            cycle=_cycler(src.kinds, sample, remaining, counts=counts))
+        prompter.note("  " + _grain_story(state["group_by"], [],
+                                          rows=sample), style="cyan")
         return True
 
-    _ask_in_order([ask_which_level, ask_group_columns])
-    return state["level"], list(state["group_by"])
+    def ask_row_filters() -> bool:
+        """
+        Leave rows out before the texts are joined, on what the file says.
+
+        Only the spreadsheet's own columns, because nothing has been
+        measured yet -- and a word count, which is what this question used
+        to ask for, is neither available here nor the kind of thing anybody
+        knows in advance. What they do know is what they collected: a
+        screener somebody failed, a condition they are not analyzing, an age
+        below the one they meant to study.
+
+        Two questions per filter in the ordinary case -- which column, then
+        which of its values to keep -- because a column with a handful of
+        values is a tick list and needs no operator. A column with too many
+        distinct values to list falls back to a threshold.
+        """
+        if not state["group_by"]:
+            # without joining there is no hurry: the filter question in the
+            # statistics stage does the same job and can use anything the
+            # run has measured by then, not just what came in the file.
+            state["row_filters"] = []
+            return False
+        rows = _rows_of(src)
+        spoken_for = set(src.text_cols) | set(src.feature_cols)
+        usable = [c for c in src.columns if c not in spoken_for]
+        if not rows or not usable:
+            state["row_filters"] = []
+            return False
+
+        prompter.note("  " + _grain_story(state["group_by"], [], rows=rows))
+        prompter.reason(
+            "A row left out here never reaches the joined text, and cannot "
+            "be taken out once it is in there.")
+        if not prompter.confirm("Leave any rows out before joining?",
+                                default=bool(src.row_filters)):
+            state["row_filters"] = []
+            return True
+
+        kept: List[list] = []
+        while True:
+            counts = _unique_counts(rows, usable)
+            column = str(prompter.select(
+                "Leave rows out based on which column?",
+                _kind_rows(usable, src.kinds, counts=counts)))
+            spec = _one_row_filter(prompter, rows, column,
+                                   numeric=src.kinds.get(column) == "numbers")
+            if spec is not None:
+                kept.append(spec)
+                surviving = sum(1 for r in rows if keeps_row(r, kept))
+                prompter.note(f"  Keeping {surviving:,} of {len(rows):,} rows.",
+                              style="cyan")
+                if not surviving:
+                    prompter.note("  That leaves nothing to measure, so the "
+                                  "last one is dropped.", style="yellow")
+                    kept.pop()
+            if not prompter.confirm("Leave rows out based on another column?",
+                                    default=False):
+                break
+        state["row_filters"] = kept
+        return True
+
+    _ask_in_order([ask_which_level, ask_group_columns, ask_row_filters])
+    return (state["level"], list(state["group_by"]),
+            [list(f) for f in state["row_filters"]])
 
 
 @dataclass
@@ -1574,35 +1865,55 @@ def _label_choices(src: "SourceSpec", sample: Sequence[dict],
 def _kind_rows(columns: Sequence[str], kinds: Dict[str, str], *,
                checked: Sequence[str] = (),
                help_of: Optional[Callable[[str], str]] = None,
+               counts: Optional[Dict[str, int]] = None,
                disabled: Optional[Dict[str, str]] = None) -> List[Choice]:
     """
-    Column names as a two-column table: the name, then what it is treated as.
+    Column names as a table: the name, what it is treated as, and optionally
+    how many different values it holds.
 
     The kind rides in the row's annotation -- its own color, lined up by
     padding every name to the widest -- so a picker reads as a table of
     ``name | numbers`` rather than a list of words, and the treatment that
     decides what a column can be used for is visible where the choice is
     made. The arrows change it in place (see `_cycler`).
+
+    ``counts`` adds the number of different values, for the questions where
+    that number *is* the decision: grouping 938 rows by a column with seven
+    values leaves seven rows, and a run with seven rows is not a run. It was
+    possible to answer that question without ever being told the number.
     """
     ticked = set(checked)
     return [Choice(c, c.strip(),
                    help=help_of(c) if help_of else "",
                    checked=c in ticked,
-                   annotation=_aligned(c, kinds.get(c, ""), columns),
+                   annotation=_aligned(c, kinds.get(c, ""), columns,
+                                       counts=counts),
                    disabled=(disabled or {}).get(c, ""))
             for c in columns]
 
 
-def _aligned(column: str, kind: str, columns: Sequence[str]) -> str:
+#: Wide enough for the longest kind ("numbers"), so a count after it lines up
+#: and stays lined up when an arrow press changes a kind under the pointer.
+_KIND_WIDTH = 7
+
+
+def _aligned(column: str, kind: str, columns: Sequence[str], *,
+             counts: Optional[Dict[str, int]] = None) -> str:
     """The kind, padded so it lines up under one heading whatever the name's
     length -- the padding is in the annotation, not the label, so the label
     stays the tidy column name the person reads back."""
     width = max((len(c.strip()) for c in columns), default=0)
-    return " " * (width - len(column.strip())) + kind
+    pad = " " * (width - len(column.strip()))
+    if not counts:
+        return pad + kind
+    n = counts.get(column)
+    tail = "" if n is None else f"  {n:,} unique"
+    return pad + kind.ljust(_KIND_WIDTH) + tail
 
 
 def _cycler(kinds: Dict[str, str], sample: Sequence[dict],
-            columns: Sequence[str] = ()):
+            columns: Sequence[str] = (),
+            counts: Optional[Dict[str, int]] = None):
     """
     The left/right arrows on a column row: change how it is treated.
 
@@ -1620,7 +1931,9 @@ def _cycler(kinds: Dict[str, str], sample: Sequence[dict],
         at = options.index(current)
         new = options[(at + direction) % len(options)]
         kinds[value] = new
-        return _aligned(value, new, columns or [value])
+        # same annotation builder as the rows, or pressing an arrow on a row
+        # would silently drop the value count off it.
+        return _aligned(value, new, columns or [value], counts=counts)
     return cycle
 
 
@@ -1661,7 +1974,9 @@ def ask_analysis(prompter: Prompter, src: SourceSpec,
     # them was ever going to get joined (yep, someone noticed).
     tables = feature_tables(steps, src.source, src.level or None,
                             src.group_by, picked=picked)
-    columns, sample = peek_csv(src.path, delimiter=src.delimiter)
+    columns, sample = list(src.columns), _rows_of(src)
+    if not columns:
+        columns, sample = peek_csv(src.path, delimiter=src.delimiter)
     # the columns we've still got to describe a row with, i.e. not the text
     # itself.
     # what we have left to describe a row with: not the text itself, and not
@@ -1730,7 +2045,16 @@ def ask_analysis(prompter: Prompter, src: SourceSpec,
                       else "") + ".")
     offered = [Choice(r.id, r.label, r.help, disabled=blocked.get(r.id, ""))
                for r in catalog]
-    grouped = bool(src.group_by)
+    def grouped() -> bool:
+        """
+        Whether a row of results will describe more than one spreadsheet row.
+
+        A function rather than a value because the question that decides it
+        -- averaging the measures up -- is one of the questions below, so an
+        answer read once here would be the answer from before it was asked.
+        """
+        return bool(src.analysis_grain)
+
     # every question below is one step of `_ask_in_order`, so Esc means the
     # previous question and not the feature checklist. a step that doesn't
     # apply to what got ticked clears the answer it owns and asks nothing --
@@ -1745,7 +2069,7 @@ def ask_analysis(prompter: Prompter, src: SourceSpec,
     full: Dict[str, List[str]] = {}
 
     def column(name: str) -> Optional[List[str]]:
-        if grouped:
+        if grouped():
             return None
         if name not in full:
             try:
@@ -1796,6 +2120,81 @@ def ask_analysis(prompter: Prompter, src: SourceSpec,
         state["stop"] = not picked
         return True
 
+    def ask_averaging() -> bool:
+        """
+        Measure each row, then average the numbers -- and again, if wanted.
+
+        The other order from joining the texts, which the source stage asked
+        about. Both can happen in one run and they give different answers:
+        averaging turns to speakers and then to conversations weights the
+        speakers equally, averaging turns straight to conversations weights
+        whoever talked most. So it is asked rather than inferred, and asked
+        *here*, next to the statistics it is for, rather than folded into the
+        one question about grain.
+        """
+        if state["stop"] or src.source != "csv":
+            src.feature_levels = []
+            return False
+        if src.group_by:
+            # the texts were joined already, so a row of results is one
+            # joining key. only a coarser cut of those keys is left to
+            # average by, and there is no coarser cut of a single column.
+            pool = [c for c in src.group_by]
+        else:
+            # a column with a different value in every row groups nothing, so
+            # offering to average by it is offering a no-op. the same narrower
+            # question the group-comparison picker asks before offering a
+            # column: are there repeats?
+            spoken_for = set(src.text_cols) | set(src.feature_cols)
+            pool = [c for c in src.columns
+                    if c not in spoken_for
+                    and plausible_labels([r.get(c) for r in sample])]
+        if len(pool) < (2 if src.group_by else 1):
+            src.feature_levels = []
+            return False
+
+        # "the measures are averaged" read as *collapsed* -- one number out of
+        # all of them -- which is not what happens and would be a strange
+        # thing to want. every measure keeps its own column; what changes is
+        # what a row is.
+        prompter.reason(
+            "Every measure keeps its own column and is averaged within a "
+            "group you pick, so one row becomes one person, not one response.")
+        if not prompter.confirm("Average each measure within a group before "
+                                "the statistics?",
+                                default=bool(src.feature_levels)):
+            src.feature_levels = []
+            return True
+
+        levels: List[List[str]] = []
+        previous = list(src.feature_levels)
+        while True:
+            was = previous[len(levels)] if len(levels) < len(previous) else []
+            counts = _unique_counts(sample, pool)
+            picked = ask_at_least_one(
+                prompter,
+                "Average by which column(s)?" if not levels
+                else "Average again, by which column(s)?",
+                _kind_rows(pool, kinds, checked=was, counts=counts),
+                thing="one column",
+                cycle=_cycler(kinds, sample, pool, counts=counts))
+            levels.append(list(picked))
+            # each round may only offer a subset of the last: the other
+            # columns are gone once the rows are averaged together. one
+            # column has no coarser cut, so that is where it stops.
+            pool = [c for c in picked]
+            if len(pool) < 2:
+                break
+            prompter.note("  " + _grain_story(src.group_by, levels,
+                                              rows=sample))
+            if not prompter.confirm("Average again, by something coarser?",
+                                    default=len(previous) > len(levels)):
+                break
+        src.feature_levels = levels
+        prompter.note("  " + _grain_story(src.group_by, levels, rows=sample),
+                      style="cyan")
+        return True
+
     def picked_labels(kind: Optional[str] = None,
                       only: Optional[str] = None) -> List[str]:
         """The analyses ticked that this question serves, by name."""
@@ -1816,7 +2215,7 @@ def ask_analysis(prompter: Prompter, src: SourceSpec,
             "labels."
             + (f" Rows are being combined on "
                f"{', '.join(src.group_by)}, so a column can only be used "
-               f"here if it has one value per combined row." if grouped
+               f"here if it has one value per combined row." if grouped()
                else ""))
         while True:
             rows = _label_choices(src, sample, spare, kinds, label_cols)
@@ -1857,7 +2256,7 @@ def ask_analysis(prompter: Prompter, src: SourceSpec,
                "question, asked next."
                if "stats_classify_fit" in spec.analyses else "")
             + (" Rows are being combined, so each outcome becomes the "
-               "average for its group." if grouped else ""))
+               "average for its group." if grouped() else ""))
         while True:
             # only what holds numbers, or could be read as numbers. a column
             # of words has nothing to correlate, and the reason line above
@@ -1892,7 +2291,7 @@ def ask_analysis(prompter: Prompter, src: SourceSpec,
             + ". Only columns whose labels repeat are offered, because a "
             "column of one-off values would be one class per row."
             + (" Rows are being combined, so the category has to describe "
-               "the whole combined row." if grouped else ""))
+               "the whole combined row." if grouped() else ""))
         while True:
             rows = _label_choices(src, sample, spare, kinds, label_cols)
             for row in rows:
@@ -1909,11 +2308,19 @@ def ask_analysis(prompter: Prompter, src: SourceSpec,
                 return True
 
     def eligible_controls() -> List[str]:
+        """
+        Everything that could be held constant: the file's own columns, and
+        the group size when combining rows made one.
+        """
+        return _spreadsheet_controls() + _group_size_control()
+
+    def _spreadsheet_controls() -> List[str]:
+        """Columns of the user's own file that can be held constant."""
         # not the identifier columns. `pid` is unique per row, so holding it
         # constant would either explain the outcome away entirely or mean
         # nothing, and offering it just invites that mistake. not the group
-        # or the outcomes either -- controlling for the thing you're comparing
-        # removes the comparison.
+        # or the outcomes either -- controlling for the thing you're
+        # comparing removes the comparison.
         used = (set(spec.outcome_cols) | set(spec.class_cols)
                 | {spec.group_col} | set(src.id_cols))
         # a measurement can be a control, and so can a label that repeats.
@@ -1922,13 +2329,79 @@ def ask_analysis(prompter: Prompter, src: SourceSpec,
         # the same reason. `id_cols` on its own isn't enough here because a
         # run that declined to name its identifier columns still has one
         # sitting in the spreadsheet.
+        measurable = [c for c in spare
+                      if c not in used
+                      and kinds.get(c) in ("numbers", "labels")
+                      # a column with one value cannot be held constant: it
+                      # is already constant, and a model fitted on it learns
+                      # nothing while spending a degree of freedom. twelve of
+                      # the fourteen columns a real run offered here were
+                      # like this -- a survey's `Finished` column reading 1
+                      # for every row, and ten items answered by half the
+                      # sample and blank for the rest.
+                      and len({str(r.get(c) or "").strip() for r in sample}
+                              - {""}) > 1]
+        if not grouped():
+            return measurable
+        # on a combined run a control has to speak for the whole combined
+        # row, same as a grouping column does: there is no one age for
+        # "everybody with a bachelor's degree".
+        return [c for c in measurable
+                if c in src.analysis_grain
+                or constant_within(sample, src.analysis_grain, c)]
+
+    def _group_size_control() -> List[str]:
+        """
+        How many rows went into each group, when that is a thing.
+
+        Not a column of the spreadsheet -- the gather manufactures it -- so
+        it was unreachable from this question, and it is the first confound
+        of any combined run. On a real run, joining 938 responses by age gave
+        documents from 75 to 11,000 words, document length correlated with
+        group size at .99, and the three largest coefficients in the
+        "winning" model were its three most length-sensitive measures. The
+        confound was sitting in the analysis table and there was no way to
+        ask about it.
+
+        Offered only when the groups actually differ in size, since holding
+        constant something that never varies is a wasted degree of freedom.
+        That rule is the whole rule: an uncombined run puts every row in one
+        group, so the sizes never differ and this declines on its own. The
+        `grouped()` test below only saves a pass over the file.
+        """
+        if not grouped() or GROUP_SIZE_COL in spare:
+            return []
+        sizes = _group_sizes(sample, src.analysis_grain)
+        return [GROUP_SIZE_COL] if len(set(sizes.values())) > 1 else []
+
+    def withheld_controls() -> List[str]:
+        """
+        The columns a control question will not offer because of the grain.
+
+        Withheld silently, this reads as a bug -- a real report, on a file
+        with 143 columns where 14 were offered and age and gender were not.
+        Both control questions say the number and the reason, because "the
+        list is short" and "the list is wrong" look identical otherwise.
+        """
+        if not grouped():
+            return []
+        eligible = set(eligible_controls())
         return [c for c in spare
-                if c not in used
-                and kinds.get(c) in ("numbers", "labels")
-                # on a combined run a control has to speak for the whole
-                # combined row, same as a grouping column does.
-                and (not grouped or c in src.group_by
-                     or constant_within(sample, src.group_by, c))]
+                if c not in eligible
+                and c not in (set(spec.outcome_cols) | set(spec.class_cols)
+                              | {spec.group_col} | set(src.id_cols))
+                and kinds.get(c) in ("numbers", "labels")]
+
+    def grain_caveat() -> str:
+        """Why the control list is shorter than the spreadsheet."""
+        missing = withheld_controls()
+        if not missing:
+            return ""
+        grain = " + ".join(src.analysis_grain)
+        return (f" One row of results is one {grain}, so a control has to "
+                f"have a single value per {grain}. That rules out "
+                f"{len(missing)} of your columns, {_and(missing[:3])} among "
+                f"them.")
 
     def ask_controls_gate() -> bool:
         if state["stop"] or not eligible_controls():
@@ -1937,8 +2410,8 @@ def ask_analysis(prompter: Prompter, src: SourceSpec,
             return False
         prompter.reason(
             "A control is something held constant so it cannot explain your "
-            "result: age, gender, text length. Comparisons become ANCOVA, "
-            "correlations become partial.")
+            "result. Comparisons become ANCOVA, correlations become partial."
+            + grain_caveat())
         state["controls"] = bool(prompter.confirm(
             "Control for any of your other columns?",
             default=bool(spec.control_cols)))
@@ -1951,15 +2424,25 @@ def ask_analysis(prompter: Prompter, src: SourceSpec,
             return False
         prompter.reason(
             "Each column shows how it will be held constant: as numbers, or as "
-            "labels -- one coefficient per level. A numbered category reads as "
-            "numbers; press → on its row to make it labels.")
+            "labels -- one coefficient per level. Press → on a row to swap."
+            + grain_caveat())
         eligible = eligible_controls()
+        own = [c for c in eligible if c != GROUP_SIZE_COL]
+        rows = _kind_rows(own, kinds, checked=spec.control_cols,
+                          help_of=lambda c: ", ".join(
+                              distinct_values(sample, c, limit=6))
+                          or "no values sampled")
+        if GROUP_SIZE_COL in eligible:
+            sizes = _group_sizes(sample, src.analysis_grain).values()
+            rows.append(Choice(
+                GROUP_SIZE_COL, GROUP_SIZE_COL,
+                f"how many rows each group was built from "
+                f"({min(sizes):,} to {max(sizes):,})",
+                checked=GROUP_SIZE_COL in spec.control_cols,
+                annotation="numbers"))
         spec.control_cols = ask_at_least_one(
-            prompter, "Which column(s) should be held constant?",
-            _kind_rows(eligible, kinds, checked=spec.control_cols,
-                       help_of=lambda c: ", ".join(distinct_values(sample, c, limit=6))
-                       or "no values sampled"),
-            thing="one column", cycle=_cycler(kinds, sample, eligible))
+            prompter, "Which column(s) should be held constant?", rows,
+            thing="one column", cycle=_cycler(kinds, sample, own))
         spec.categorical_controls = [c for c in spec.control_cols
                                      if kinds.get(c) == "labels"]
         return True
@@ -2042,9 +2525,12 @@ def ask_analysis(prompter: Prompter, src: SourceSpec,
             values_of=column, kinds=kinds)
         return True
 
-    _ask_in_order([ask_which, ask_group, ask_outcomes, ask_classes,
-                   ask_controls_gate, ask_which_controls, vet_controls,
-                   ask_tables, ask_together, ask_adjust, ask_row_filters])
+    # averaging comes before the outcome and control questions because it
+    # decides what a row *is*, and those questions read that.
+    _ask_in_order([ask_which, ask_averaging, ask_group, ask_outcomes,
+                   ask_classes, ask_controls_gate, ask_which_controls,
+                   vet_controls, ask_tables, ask_together, ask_adjust,
+                   ask_row_filters])
     return spec
 
 
@@ -2066,7 +2552,9 @@ def apply_analysis(spec: AnalysisSpec, src: SourceSpec,
     if not spec.wanted:
         return
 
-    grouped = bool(src.group_by)
+    # the grain a row of the analysis table will have, which averaging
+    # moves away from the columns the texts were joined on
+    grouped = bool(src.analysis_grain)
     for analysis in spec.analyses:
         if analysis not in selected:
             selected.append(analysis)
@@ -2139,7 +2627,11 @@ def apply_analysis(spec: AnalysisSpec, src: SourceSpec,
         # metadata column, otherwise the step gets handed a column name that
         # isn't there. grouped runs keep the raw column rather than averaging
         # it -- the mean of a gender code is not a gender.
-        carry += [c for c in spec.control_cols if c not in carry]
+        # everything but the group size, which the gather writes itself --
+        # asking it to carry a column the spreadsheet does not have would
+        # earn a warning and change nothing.
+        carry += [c for c in spec.control_cols
+                  if c not in carry and c != GROUP_SIZE_COL]
 
     if carry:
         var_values["stats_meta_carry"] = carry
@@ -3784,6 +4276,8 @@ def _derive(prompter: Prompter, src: SourceSpec, selected: List[str],
         id_cols=src.id_cols,
         text_mode=src.text_mode,
         group_by=src.group_by,
+        feature_levels=[list(lv) for lv in src.feature_levels],
+        row_filters=[list(f) for f in src.row_filters],
         delimiter=src.delimiter,
         level=src.level or None,
     )
@@ -4208,7 +4702,7 @@ def run_wizard(prompter: Prompter, *, cwd: Optional[Path] = None,
                         break
                 skip_checklist = False
                 try:
-                    src.level, src.group_by = ask_level(
+                    src.level, src.group_by, src.row_filters = ask_level(
                         prompter, src,
                         resolve_selection(selected, providers=providers,
                                           source=src.source))

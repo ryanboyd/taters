@@ -46,7 +46,7 @@ def test_a_thin_class_is_offered_for_dropping_and_becomes_a_filter(tmp_path):
     p = ScriptedPrompter([
         "csv", *browse_to(sheet), ["text"], False,
         ["readability"], "row",
-        ["stats_classify_fit"],
+        ["stats_classify_fit"], False,
         ["condition"],                  # the class column, thin classes and all
         ["Female", "Male"],             # ...and we keep just these two
         False,                          # no controls
@@ -70,7 +70,7 @@ def test_a_class_column_nothing_can_rescue_is_asked_again(tmp_path):
     p = ScriptedPrompter([
         "csv", *browse_to(sheet), ["text"], False,
         ["readability"], "row",
-        ["stats_classify_fit"],
+        ["stats_classify_fit"], False,
         ["condition"],                  # A, B, C have 3 rows, D 21: only one usable
         ["gender"],                     # so we're asked again, and pick one that works
         False, False,
@@ -118,7 +118,7 @@ def test_a_group_of_one_is_offered_for_dropping(tmp_path):
     p = ScriptedPrompter([
         "csv", *browse_to(sheet), ["text"], False,
         ["readability"], "row",
-        ["stats_group_differences"],
+        ["stats_group_differences"], False,
         "condition",                    # A 15, B 15, Z 1
         ["A", "B"],                     # keep the two we can actually compare
         False, "fdr_bh", False,
@@ -129,31 +129,68 @@ def test_a_group_of_one_is_offered_for_dropping(tmp_path):
     assert result.preset["vars"]["stats_filters"] == [["condition", "in", ["A", "B"]]]
 
 
-def test_an_outcome_that_says_na_past_the_sample_is_asked_again(tmp_path):
-    """The sample of 200 rows said "numbers"; row 230 says "n/a". The
-    ridge would have refused at the last step; the wizard reads the whole
-    column and asks again, naming the cell."""
+def _sheet_with_a_bad_cell_far_down(tmp_path):
+    """240 rows where row 230 of `openness` says "n/a", plus a clean `age`."""
     rows = _rows(240, condition=lambda i: "AB"[i % 2])
     rows[230][2] = "n/a"
     header = ("pid", "condition", "openness", "gender", "text")
     sheet = _sheet(tmp_path, rows, header=header)
-    # let's add a second numeric column so there's something to fall back to
     table = list(csv.reader(sheet.open(encoding="utf-8")))
     table[0].append("age")
     for i, r in enumerate(table[1:]):
         r.append(str(20 + i % 40))
     with sheet.open("w", newline="", encoding="utf-8") as fh:
         csv.writer(fh).writerows(table)
+    return sheet
+
+
+def test_a_column_with_a_bad_cell_far_down_is_never_offered_at_all(tmp_path):
+    """
+    Reading the whole file means the offer is right the first time. This
+    used to be a sample of 200 rows, so `openness` was offered as a number,
+    taken, and then rejected by a whole-column check one question later --
+    correct in the end, and a question nobody should have had to answer.
+    """
+    sheet = _sheet_with_a_bad_cell_far_down(tmp_path)
     p = ScriptedPrompter([
         "csv", *browse_to(sheet), ["text"], False,
         ["readability"], "row",
-        ["stats_correlations"],
-        ["openness"],                   # has an n/a on row 230
+        ["stats_correlations"], False,
+        ["age"],
+        False, "fdr_bh", False,
+        ":done", "Study", "save",
+    ])
+    result = wiz.run_wizard(p, cwd=tmp_path)
+    offered = next(cs for q, cs in p.offered
+                   if q == "Which column(s) hold the outcomes?")
+
+    assert [q for _k, q in p.asked].count(
+        "Which column(s) hold the outcomes?") == 1, "it had to ask twice"
+    assert "openness" not in {c.value for c in offered}
+    assert result.preset["vars"]["stats_outcome_cols"] == ["age"]
+
+
+def test_the_whole_column_check_still_catches_it_when_the_scan_is_capped(
+        tmp_path, monkeypatch):
+    """
+    Someone with files big enough to lower the limit in Settings gets the
+    old behavior, and the old safety net has to still be there for them: the
+    column is offered, the whole column is then read, and the question comes
+    back naming the cell that spoiled it.
+    """
+    monkeypatch.setenv("TATERS_INSPECT_ROWS", "200")
+    sheet = _sheet_with_a_bad_cell_far_down(tmp_path)
+    p = ScriptedPrompter([
+        "csv", *browse_to(sheet), ["text"], False,
+        ["readability"], "row",
+        ["stats_correlations"], False,
+        ["openness"],                   # the sample said this was numbers
         ["age"],                        # so we get asked again
         False, "fdr_bh", False,
         ":done", "Study", "save",
     ])
     result = wiz.run_wizard(p, cwd=tmp_path)
+
     assert [q for _k, q in p.asked].count("Which column(s) hold the outcomes?") == 2
     assert any("'n/a' (1 row)" in line for line in p.output)
     assert result.preset["vars"]["stats_outcome_cols"] == ["age"]
@@ -166,7 +203,7 @@ def test_a_rare_control_level_is_offered_for_dropping(tmp_path):
     p = ScriptedPrompter([
         "csv", *browse_to(sheet), ["text"], False,
         ["readability"], "row",
-        ["stats_correlations"], ["openness"],
+        ["stats_correlations"], False, ["openness"],
         True, ["gender"],               # control for gender
         ["Female", "Male"],             # ...but only the levels with enough rows
         "fdr_bh", False,
@@ -184,7 +221,7 @@ def test_keeping_every_value_adds_no_filter(tmp_path):
     p = ScriptedPrompter([
         "csv", *browse_to(sheet), ["text"], False,
         ["readability"], "row",
-        ["stats_group_differences"], "condition",
+        ["stats_group_differences"], False, "condition",
         ["A", "B", "Z"],                # never mind, keep them all
         False, "fdr_bh", False,
         ":done", "Study", "save",
@@ -204,7 +241,7 @@ def test_a_label_column_is_filtered_by_ticking_the_values_to_keep(tmp_path):
     p = ScriptedPrompter([
         "csv", *browse_to(sheet), ["text"], False,
         ["readability"], "row",
-        ["stats_correlations"], ["openness"], False, "fdr_bh",
+        ["stats_correlations"], False, ["openness"], False, "fdr_bh",
         True, ["original"], ["gender"],
         ["Female", "Male"],
         ":done", "Study", "save",
@@ -222,7 +259,7 @@ def test_nothing_is_vetted_when_rows_are_combined(tmp_path, combined):
         12, condition=lambda i: "ABC"[i % 3], pid=lambda i: f"p{i // 2}"))
     p = ScriptedPrompter([
         "csv", *browse_to(sheet), ["text"], False,
-        ["readability"], "group", ["pid"],
+        ["readability"], "group", ["pid"], False,
         ["stats_classify_fit"], ["condition"],
         False, False,
         ":done", "Study", "save",

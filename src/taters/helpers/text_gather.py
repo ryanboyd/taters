@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Dict, List, Mapping, Sequence, Tuple, Union, Optional
 from .atomic import SCRATCH_SUFFIX
 from .provenance import TEXT_GRAIN, records_settings
+from .row_filter import keeps_row
 from .cliargs import CliSpec
 from .csvio import widen_csv_field_limit
 from .feature_columns import ColumnSpec
@@ -330,6 +331,7 @@ def csv_to_analysis_ready_csv(
     include_id_cols: bool = True,
     carry_cols: Sequence[str] | None = None,
     agg_cols: Mapping[str, str] | Sequence[str] | None = None,
+    row_filters: Sequence[Sequence[object]] | None = None,
     verbose: bool = True,
     on_progress=None,   # on_progress(done, total, message) per row / bucket
 ) -> Path:
@@ -411,6 +413,24 @@ def csv_to_analysis_ready_csv(
         than treated as zero -- a missing score is missing, not 0 -- and a
         group with no numeric values at all gets a blank cell, for the same
         NA-is-not-zero reason a disagreeing carried column does.
+    row_filters
+        Which rows to keep, as ``[[column, operator, value], ...]`` over the
+        source spreadsheet's own columns -- ``[["age", ">=", 18]]``,
+        ``[["condition", "in", ["A", "B"]]]``. A row has to clear all of
+        them. The operators and the comparison are
+        :mod:`taters.helpers.row_filter`'s, the same ones the statistics use,
+        so a filter means one thing wherever it is applied.
+
+        Only the spreadsheet's own columns, because nothing has been measured
+        yet: a word count is not available here and does not belong here
+        either. What somebody knows at this point is what they collected --
+        a screener somebody failed, a condition they are not analyzing, an
+        age below the one they meant to study.
+
+        It matters most when rows are being combined, since a row inside
+        somebody else's joined text cannot be taken out again afterwards;
+        that is why it is applied before the rows are bucketed rather than
+        filtered later.
 
         Summaries run over **every** row of the group, including rows whose
         text cells are empty -- `group_count` counts only the rows whose
@@ -468,6 +488,7 @@ def csv_to_analysis_ready_csv(
     ... )
     """
     in_path = _ensure_path(csv_path)
+    keep = [list(f) for f in (row_filters or [])]
 
     # sniff out the delimiter if we weren't given one
     if delimiter is None:
@@ -548,6 +569,13 @@ def csv_to_analysis_ready_csv(
 
                 for idx, row in enumerate(rdr, start=1):
                     ticker.tick(message="copying rows")
+                    # before `text_id` is used but after it is numbered, so a
+                    # row left out here does not renumber the rows after it
+                    # -- every other table in the run is keyed on that
+                    # number, and shifting it would join the wrong rows to
+                    # the wrong groups while looking perfectly reasonable.
+                    if keep and not keeps_row(row, keep):
+                        continue
                     text_id = _compose_id([row.get(c, "") for c in (id_cols or [])]) if id_cols else f"row_{idx}"
                     if mode == "concat":
                         parts = [row.get(c, "") for c in text_cols if row.get(c, "")]
@@ -618,6 +646,11 @@ def csv_to_analysis_ready_csv(
 
             for row in rdr:
                 ticker.tick(message="sorting rows into groups (pass 1 of 2)")
+                if keep and not keeps_row(row, keep):
+                    # dropped before it is bucketed, on purpose: once a row
+                    # is inside somebody else's joined text there is no way
+                    # to take it back out again.
+                    continue
                 key_tuple = tuple(row[g] for g in group_by)
                 bucket = _bucket_of_key(key_tuple, num_buckets)
                 bpath = part_dir / f"bucket_{bucket:05d}.csv"

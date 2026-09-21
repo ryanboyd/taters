@@ -905,3 +905,104 @@ def test_summaries_run_over_textless_rows_too(tmp_path):
     assert rows["alice"]["text"] == "meow one meow two"
     assert rows["alice"]["score_mean"] == "4", "the mean of 3, 4 and 5"
     assert rows["alice"]["score_n"] == "3", "all three scores counted"
+
+
+# ---------------------------------------------------------------------------
+# Leaving rows out
+# ---------------------------------------------------------------------------
+
+def _gathered(path):
+    import csv
+
+    with Path(path).open("r", newline="", encoding="utf-8-sig") as fh:
+        return list(csv.DictReader(fh))
+
+
+def test_a_row_is_left_out_before_it_joins_anybody_elses_text(tmp_path):
+    """
+    The reason this lives in the gather rather than in a filter afterwards:
+    once a row is inside a joined text there is no way to take it back out,
+    so the only time it can be dropped is before.
+    """
+    src = tmp_path / "turns.csv"
+    src.write_text("who,arm,text\n"
+                   "a,keep,one two three\n"
+                   "a,drop,rubbish\n"
+                   "b,keep,four five six\n", encoding="utf-8")
+    out = csv_to_analysis_ready_csv(
+        csv_path=src, out_csv=tmp_path / "g.csv", text_cols=["text"],
+        group_by=["who"], row_filters=[["arm", "in", ["keep"]]],
+        verbose=False)
+    rows = {r["who"]: r for r in _gathered(out)}
+
+    assert "rubbish" not in rows["a"]["text"]
+    assert int(rows["a"]["group_count"]) == 1, "the dropped row was counted"
+
+
+def test_the_filter_judges_the_spreadsheets_own_columns(tmp_path):
+    """Nothing has been measured yet, so what it can read is what came in
+    the file."""
+    src = tmp_path / "t.csv"
+    src.write_text("age,text\n17,too young\n40,about right\n",
+                   encoding="utf-8")
+    out = csv_to_analysis_ready_csv(
+        csv_path=src, out_csv=tmp_path / "g.csv", text_cols=["text"],
+        row_filters=[["age", ">=", 18]], verbose=False)
+
+    assert [r["text"] for r in _gathered(out)] == ["about right"]
+
+
+def test_every_filter_has_to_be_cleared_not_just_one(tmp_path):
+    src = tmp_path / "t.csv"
+    src.write_text("age,arm,text\n40,A,yes\n40,B,no\n17,A,no\n",
+                   encoding="utf-8")
+    out = csv_to_analysis_ready_csv(
+        csv_path=src, out_csv=tmp_path / "g.csv", text_cols=["text"],
+        row_filters=[["age", ">=", 18], ["arm", "in", ["A"]]], verbose=False)
+
+    assert [r["text"] for r in _gathered(out)] == ["yes"]
+
+
+def test_a_row_dropped_by_a_filter_does_not_shift_the_others_ids(tmp_path):
+    """
+    `text_id` is `row_<n>` over the *source* rows, and a key map gathered
+    without any text keeps every row. If dropping a row renumbered the rest,
+    every feature would join the wrong group and the numbers would all be
+    wrong while looking perfectly reasonable.
+    """
+    src = tmp_path / "t.csv"
+    src.write_text("arm,text\nkeep,one two\ndrop,no\nkeep,three four\n",
+                   encoding="utf-8")
+    measured = csv_to_analysis_ready_csv(
+        csv_path=src, out_csv=tmp_path / "m.csv", text_cols=["text"],
+        row_filters=[["arm", "in", ["keep"]]], verbose=False)
+    keys = csv_to_analysis_ready_csv(
+        csv_path=src, out_csv=tmp_path / "k.csv", text_cols=[],
+        carry_cols=["arm"], verbose=False)
+
+    assert [r["text_id"] for r in _gathered(measured)] == ["row_1", "row_3"]
+    assert set(r["text_id"] for r in _gathered(measured)) <= \
+        set(r["text_id"] for r in _gathered(keys))
+
+
+def test_no_filter_leaves_every_row_alone(tmp_path):
+    src = tmp_path / "t.csv"
+    src.write_text("arm,text\ndrop,x\nkeep,one two three\n",
+                   encoding="utf-8")
+    out = csv_to_analysis_ready_csv(
+        csv_path=src, out_csv=tmp_path / "g.csv", text_cols=["text"],
+        verbose=False)
+
+    assert len(_gathered(out)) == 2
+
+
+def test_a_blank_cell_in_the_filtered_column_does_not_survive(tmp_path):
+    """An unknown value is not evidence of anything, and keeping it means a
+    half-empty column quietly stops filtering."""
+    src = tmp_path / "t.csv"
+    src.write_text("age,text\n,unknown age\n40,known\n", encoding="utf-8")
+    out = csv_to_analysis_ready_csv(
+        csv_path=src, out_csv=tmp_path / "g.csv", text_cols=["text"],
+        row_filters=[["age", ">=", 18]], verbose=False)
+
+    assert [r["text"] for r in _gathered(out)] == ["known"]

@@ -27,6 +27,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, List, Literal, Mapping, Optional, Sequence, Union
 
+from ..helpers import row_filter as _row_filter
 from ..helpers.atomic import atomic_write
 from ..helpers.feature_columns import SEPARATOR
 from ..helpers.progress import announce
@@ -40,7 +41,10 @@ PathLike = Union[str, Path]
 #: The comparison operators a filter may use. Ordering operators demand
 #: numbers on both sides; the rest compare numerically when both sides parse
 #: and as stripped strings otherwise.
-FILTER_OPS = ("==", "!=", "<", "<=", ">", ">=", "in", "not_in")
+#: Re-exported: the comparison now lives beside the text gather's copy of the
+#: same question, because a filter has to mean the same thing before the text
+#: is joined and after it has been measured. See `helpers.row_filter`.
+FILTER_OPS = _row_filter.FILTER_OPS
 
 
 def _refuse_duplicate_keys(df, key_cols: Sequence[str], label: str) -> None:
@@ -56,46 +60,7 @@ def _refuse_duplicate_keys(df, key_cols: Sequence[str], label: str) -> None:
         )
 
 
-def _matches(cell: str, op: str, value) -> bool:
-    """One filter comparison. Blank cells fail every operator."""
-    text = (cell or "").strip()
-    if not text:
-        return False
-    if op in ("<", "<=", ">", ">="):
-        left = float(text)
-        right = float(value)
-        return {"<": left < right, "<=": left <= right,
-                ">": left > right, ">=": left >= right}[op]
-    if op in ("in", "not_in"):
-        wanted = {str(v).strip() for v in value}
-        hit = text in wanted or _numeric_member(text, value)
-        return hit if op == "in" else not hit
-    same = _same_value(text, value)
-    return same if op == "==" else not same
-
-
-def _numeric_member(text: str, values) -> bool:
-    try:
-        number = float(text)
-    except ValueError:
-        return False
-    for v in values:
-        try:
-            if float(str(v).strip()) == number:
-                return True
-        except ValueError:
-            continue
-    return False
-
-
-def _same_value(text: str, value) -> bool:
-    """Numeric equality when both sides are numbers ("25" == "25.0"),
-    stripped-string equality otherwise."""
-    other = str(value).strip()
-    try:
-        return float(text) == float(other)
-    except ValueError:
-        return text == other
+_matches = _row_filter.matches
 
 
 def _validate_filters(filters, columns: Sequence[str], sample) -> List[list]:

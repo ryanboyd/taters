@@ -58,6 +58,7 @@ WRITERS = [
     ("helpers", "txt_folder_to_analysis_ready_csv"),
     ("helpers", "csv_to_analysis_ready_csv"),
     ("helpers", "feature_gather"),
+    ("helpers", "average_feature_table"),
 ]
 
 # `extract_wavs_from_video` still takes the old `overwrite` spelling, but only

@@ -59,7 +59,7 @@ def test_picking_group_differences_wires_the_whole_stats_tail(tmp_path, study_cs
     p = ScriptedPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
         ["readability"], "row",
-        ["stats_group_differences"],
+        ["stats_group_differences"], False,
         "condition",
         False,  # no control variables
         # the grouping column
@@ -102,7 +102,7 @@ def test_controls_can_be_chosen_and_reach_every_analysis(tmp_path):
     p = ScriptedPrompter([
         "csv", *browse_to(path), ["text"], False,
         ["readability"], "row",
-        ["stats_group_differences"], "condition",
+        ["stats_group_differences"], False, "condition",
         True,                       # yes, control for something
         "\x00right:gender",         # gender is coded 1/2: → makes it labels
         ["age", "gender"],          # which columns
@@ -138,7 +138,7 @@ def test_a_numeric_control_is_not_assumed_to_be_a_measurement(tmp_path):
     p = ScriptedPrompter([
         "csv", *browse_to(path), ["text"], False,
         ["readability"], "row",
-        ["stats_group_differences"], "condition",
+        ["stats_group_differences"], False, "condition",
         True,
         ["site"],                   # a column of words: no follow-up asked
         "fdr_bh", False,
@@ -167,7 +167,7 @@ def test_an_identifier_column_is_never_offered_as_a_control(tmp_path):
     p = ScriptedPrompter([
         "csv", *browse_to(path), ["text"], False,
         ["readability"], "row",
-        ["stats_group_differences"], "condition",
+        ["stats_group_differences"], False, "condition",
         True, ["age"],              # age is a measurement, shown as numbers
         "fdr_bh", False,
         ":done", "No ids", "save",
@@ -186,7 +186,7 @@ def test_only_numeric_columns_are_offered_as_outcomes(tmp_path, study_csv):
     p = ScriptedPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
         ["readability"], "row",
-        ["stats_correlations"],
+        ["stats_correlations"], False,
         ["openness"],
         False,  # no control variables
         "fdr_bh",                 # correction
@@ -208,7 +208,7 @@ def test_a_grouped_run_renames_outcomes_to_their_group_averages(tmp_path,
     told the new name, or it correlates nothing."""
     p = ScriptedPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
-        ["readability"], "group", ["condition"],
+        ["readability"], "group", ["condition"], False,
         ["stats_correlations"],
         ["openness"],
         False,  # no control variables
@@ -230,7 +230,7 @@ def test_a_grouped_run_grays_out_columns_that_vary_inside_a_group(
     cannot find on this screen reads as a bug in the screen."""
     p = ScriptedPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
-        ["readability"], "group", ["condition"],
+        ["readability"], "group", ["condition"], False,
         ["stats_group_differences"],
         "condition",
         "fdr_bh", False, ":done", "Study", "save"
@@ -269,8 +269,8 @@ def test_a_column_constant_within_each_group_can_still_be_compared(tmp_path):
 
     p = ScriptedPrompter([
         "csv", *browse_to(path), ["text"], False,
-        ["readability"], "group", ["subreddit", "author"],
-        ["stats_group_differences"],
+        ["readability"], "group", ["subreddit", "author"], False,
+        ["stats_group_differences"], False,
         "is_moderator",             # not a combining column, and valid
         False,                      # no controls
         "fdr_bh", False,
@@ -298,7 +298,7 @@ def test_row_filters_are_collected_into_the_preset(tmp_path, study_csv):
     p = ScriptedPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
         ["readability"], "row",
-        ["stats_group_differences"], "condition",
+        ["stats_group_differences"], False, "condition",
         False,  # no control variables
         "fdr_bh",
         True,                       # yes, filter rows
@@ -319,7 +319,7 @@ def test_several_filters_are_ticked_at_once_then_set_one_by_one(tmp_path,
     p = ScriptedPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
         ["readability"], "row",
-        ["stats_group_differences"], "condition",
+        ["stats_group_differences"], False, "condition",
         False,  # no control variables
         "fdr_bh",
         True, ["original"],
@@ -343,7 +343,7 @@ def test_word_count_is_the_first_thing_offered_and_brings_its_own_step(
     p = ScriptedPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
         ["lexical_richness"], "row",       # nothing here counts words
-        ["stats_group_differences"], "condition",
+        ["stats_group_differences"], False, "condition",
         False,  # no control variables
         "fdr_bh",
         True, ["generated"],
@@ -380,7 +380,7 @@ def test_the_filter_places_narrow_the_variable_list(tmp_path, study_csv):
     p = ScriptedPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
         ["readability"], "row",
-        ["stats_group_differences"], "condition",
+        ["stats_group_differences"], False, "condition",
         False,  # no control variables
         "fdr_bh",
         True, ["generated"],           # only the run's own measures
@@ -397,7 +397,7 @@ def test_a_filter_value_that_is_not_a_number_is_re_asked(tmp_path, study_csv):
     p = ScriptedPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
         ["readability"], "row",
-        ["stats_group_differences"], "condition",
+        ["stats_group_differences"], False, "condition",
         False,  # no control variables
         "fdr_bh",
         True, ["original"], ["openness"], ">=", "loads", "3.2",
@@ -413,7 +413,7 @@ def test_choosing_a_subset_of_feature_tables_narrows_the_assemble(tmp_path,
     p = ScriptedPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
         ["readability", "lexical_richness"], "row",
-        ["stats_group_differences"], "condition",
+        ["stats_group_differences"], False, "condition",
         False,  # no control variables
         ["readability"],          # only this table feeds the statistics
         "fdr_bh",                 # correction
@@ -431,7 +431,7 @@ def test_separate_feature_sets_are_recorded_as_such(tmp_path, study_csv):
     p = ScriptedPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
         ["readability", "lexical_richness"], "row",
-        ["stats_group_differences"], "condition",
+        ["stats_group_differences"], False, "condition",
         False,  # no control variables
         ["readability", "lexical_richness"],
         "separate",               # one analysis per table
@@ -449,7 +449,7 @@ def test_backing_out_of_the_options_screen_re_asks_the_analysis(tmp_path,
     p = EscapingPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
         ["readability"], "row",
-        ["stats_group_differences"], "condition",
+        ["stats_group_differences"], False, "condition",
         False,  # no control variables
         "fdr_bh", False,
         "__esc__",                # Esc at the options gate -> analysis
@@ -474,7 +474,7 @@ def test_a_prediction_model_asks_for_outcomes_too(tmp_path, study_csv):
     p = ScriptedPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
         ["readability"], "row",
-        ["stats_ridge_fit"],
+        ["stats_ridge_fit"], False,
         ["openness"],
         False,  # no control variables
         # what to predict
@@ -496,7 +496,7 @@ def test_the_correction_is_asked_and_recorded(tmp_path, study_csv):
     p = ScriptedPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
         ["readability"], "row",
-        ["stats_group_differences"], "condition",
+        ["stats_group_differences"], False, "condition",
         False,  # no control variables
         "bonferroni",             # the strictest
         False, ":done", "Study", "save"
@@ -517,7 +517,7 @@ def test_the_correction_is_shared_by_every_analysis(tmp_path, study_csv):
     p = ScriptedPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
         ["readability"], "row",
-        ["stats_group_differences", "stats_correlations"],
+        ["stats_group_differences", "stats_correlations"], False,
         "condition", ["openness"], "holm",
         False, ":done", "Study", "save",
     ])
@@ -535,7 +535,7 @@ def test_a_prediction_only_run_is_not_asked_about_corrections(tmp_path,
     p = ScriptedPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
         ["readability"], "row",
-        ["stats_ridge_fit"], ["openness"],
+        ["stats_ridge_fit"], False, ["openness"],
         False,  # no control variables
         False, ":done", "Study", "save"
     ])
@@ -577,7 +577,7 @@ def test_the_measure_filter_names_the_tables_it_will_search(tmp_path,
     p = ScriptedPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
         ["lexical_richness"], "row",
-        ["stats_group_differences"], "condition",
+        ["stats_group_differences"], False, "condition",
         False,  # no control variables
         "fdr_bh",
         True, ["generated"], [wiz._MEASURED_COLUMN], "ttr", ">=", "0.4",
@@ -678,7 +678,7 @@ def test_a_measure_and_its_merge_are_one_row_on_the_table_picker(tmp_path,
     ever joined -- so the picker shows one row, named for the measure."""
     p = ScriptedPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
-        ["readability", "sentence_embeddings"], "group", ["condition"],
+        ["readability", "sentence_embeddings"], "group", ["condition"], False,
         "sentence-transformers/all-roberta-large-v1",   # the model question
         ["stats_correlations"], ["openness"],
         False,  # no control variables
@@ -758,7 +758,7 @@ def test_the_analysis_flow_insists_on_an_answer(tmp_path, study_csv):
         "csv", *browse_to(study_csv), ["text"], False,
         ["readability"], "row",
         [],                          # nothing ticked -- not allowed here
-        ["stats_correlations"], ["openness"],
+        ["stats_correlations"], False, ["openness"],
         False,  # no control variables
         "fdr_bh", False,
         ":done", "With stats", "save",
@@ -825,7 +825,7 @@ def test_an_analysis_this_data_cannot_run_is_grayed_out_not_accepted(tmp_path):
     p = ScriptedPrompter([
         "csv", *browse_to(path), ["answer"], False,
         ["readability"], "row",
-        ["stats_group_differences"], "condition",
+        ["stats_group_differences"], False, "condition",
         "fdr_bh", False,
         ":done", "Labels", "save"
     ])
@@ -918,7 +918,7 @@ def test_a_pick_the_statistics_cannot_use_is_turned_back_at_the_checklist(
         ["ngram_frequencies"],                  # corpus-level: nothing joinable
         ["ngram_frequencies", "readability"],   # fixed, keeping the list
         "row",
-        ["stats_correlations"], ["openness"],
+        ["stats_correlations"], False, ["openness"],
         False,  # no control variables
         "fdr_bh", False,
         ":done", "Fixed", "save",
@@ -928,7 +928,7 @@ def test_a_pick_the_statistics_cannot_use_is_turned_back_at_the_checklist(
     asked = [q for _k, q in p.asked]
     features = [i for i, q in enumerate(asked)
                 if q == "Which features do you want to extract?"]
-    level = asked.index("What should one row of results describe?")
+    level = asked.index("Measure every row on its own, or join rows together first?")
     assert len(features) == 2 and features[1] < level, \
         "the level was asked before the pick could be used"
     assert p.text_output.count("None of those produces") == 1
@@ -946,7 +946,7 @@ def test_rows_the_statistics_cannot_use_are_marked_only_in_that_flow(
     p = ScriptedPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
         ["readability"], "row",
-        ["stats_correlations"], ["openness"], False, "fdr_bh", False,
+        ["stats_correlations"], False, ["openness"], False, "fdr_bh", False,
         ":done", "Study", "save",
     ])
     wiz.run_wizard(p, cwd=tmp_path, analyses=True)
@@ -975,7 +975,7 @@ def test_a_document_term_matrix_can_carry_the_statistics(tmp_path, study_csv):
     p = ScriptedPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
         ["doc_term_matrix"], "row",
-        ["stats_ridge_fit"], ["openness"],
+        ["stats_ridge_fit"], False, ["openness"],
         False,  # no control variables
         False,  # no filters
         ":done", "Study", "save",
@@ -1008,7 +1008,7 @@ def test_the_topic_models_matrix_never_becomes_a_step_of_its_own(tmp_path, study
     p = ScriptedPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
         ["topic_model_mem"], "row",
-        ["stats_correlations"], ["openness"],
+        ["stats_correlations"], False, ["openness"],
         False, "fdr_bh", False,
         ":done", "Study", "save",
     ])
@@ -1042,7 +1042,7 @@ def test_a_matrix_and_the_topics_built_from_it_are_two_tables(tmp_path,
     p = ScriptedPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
         ["doc_term_matrix", "topic_model_mem"], "row",
-        ["stats_correlations"], ["openness"],
+        ["stats_correlations"], False, ["openness"],
         False,  # no control variables
         ["doc_term_matrix", "topic_model_mem"], "together",
         "fdr_bh", False,
@@ -1158,7 +1158,7 @@ def test_scoring_with_a_saved_model_is_grayed_out_until_there_is_one(
     p = ScriptedPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
         ["readability"], "row",
-        ["stats_group_differences"], "condition",
+        ["stats_group_differences"], False, "condition",
         False,  # no control variables
         "fdr_bh", False,
         ":done", "No model yet", "save"
@@ -1211,10 +1211,10 @@ def test_dropping_the_only_feature_at_the_preflight_returns_to_the_checklist(
     p = ScriptedPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
         ["word_vectors_train"], "row",
-        ["stats_group_differences"], "condition", False, "fdr_bh", False,
+        ["stats_group_differences"], False, "condition", False, "fdr_bh", False,
         "drop",                     # leave word vectors out -> nothing to extract
         ["readability"], "row",     # back at the checklist: pick something else
-        ["stats_group_differences"], "condition", False, "fdr_bh", False,
+        ["stats_group_differences"], False, "condition", False, "fdr_bh", False,
         ":done", "Second try", "save",
     ])
     result = wiz.run_wizard(p, cwd=tmp_path, analyses=True)
@@ -1266,7 +1266,7 @@ def test_an_empty_library_never_grays_out_the_rows_you_supply_files_for(
     p = ScriptedPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
         ["readability"], "row",
-        ["stats_group_differences"], "condition",
+        ["stats_group_differences"], False, "condition",
         False,  # no control variables
         "fdr_bh", False,
         ":done", "Empty library", "save"
@@ -1307,7 +1307,7 @@ def test_an_imported_model_makes_that_row_available(tmp_path, study_csv,
     p = ScriptedPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
         ["readability"], "row",
-        ["stats_group_differences"], "condition",
+        ["stats_group_differences"], False, "condition",
         False,  # no control variables
         "fdr_bh", False,
         ":done", "Has a model", "save"
@@ -1330,7 +1330,7 @@ def test_a_classification_model_asks_for_the_category_not_a_number(tmp_path,
     p = ScriptedPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
         ["readability"], "row",
-        ["stats_classify_fit"],
+        ["stats_classify_fit"], False,
         ["condition"],            # the category to predict
         False,                    # no control variables
         False,                    # no filters
@@ -1359,7 +1359,7 @@ def test_predicting_a_number_and_a_category_are_kept_apart(tmp_path,
     p = ScriptedPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
         ["readability"], "row",
-        ["stats_ridge_fit", "stats_classify_fit"],
+        ["stats_ridge_fit", "stats_classify_fit"], False,
         ["openness"],             # the number
         ["condition"],            # the category
         # no controls question: every other column is now the outcome, the
@@ -1467,9 +1467,10 @@ def test_escape_at_the_outcomes_returns_to_the_statistics_checklist(tmp_path,
     p = EscapingPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
         ["readability"], "row",
-        ["stats_correlations"],
+        ["stats_correlations"], False,
         "__esc__",                # at "Which column(s) hold the outcomes?"
-        ["stats_correlations"],   # the checklist again, previous pick ticked
+        "__esc__",                # at "Average the measures...?" -- one back each time
+        ["stats_correlations"], False,   # the checklist again, previous pick ticked
         ["openness"],
         False, "fdr_bh", False,
         ":done", "Study", "save",
@@ -1477,7 +1478,7 @@ def test_escape_at_the_outcomes_returns_to_the_statistics_checklist(tmp_path,
     result = wiz.run_wizard(p, cwd=tmp_path)
 
     assert len(_asked(p, "Which features do you want to extract?")) == 1
-    assert len(_asked(p, "What should one row of results describe?")) == 1
+    assert len(_asked(p, "Measure every row on its own, or join rows together first?")) == 1
     checklists = [choices for q, choices in p.offered
                   if q == "Run any statistics on the results? (optional)"]
     assert len(checklists) == 2
@@ -1500,9 +1501,9 @@ def test_escape_at_the_statistics_checklist_returns_to_the_level(tmp_path,
     ])
     wiz.run_wizard(p, cwd=tmp_path)
     assert len(_asked(p, "Which features do you want to extract?")) == 1
-    assert len(_asked(p, "What should one row of results describe?")) == 2
+    assert len(_asked(p, "Measure every row on its own, or join rows together first?")) == 2
     levels = [d for (_k, q), d in zip(p.asked, p.presented)
-              if q == "What should one row of results describe?"]
+              if q == "Measure every row on its own, or join rows together first?"]
     assert levels[1] == "row", "the earlier level was not under the pointer"
 
 
@@ -1511,13 +1512,13 @@ def test_escape_at_the_grouping_columns_returns_to_the_level(tmp_path,
     p = EscapingPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
         ["readability"], "group",
-        "__esc__",                # at "Combine rows that share which column(s)?"
+        "__esc__",                # at "Join the text from rows that share which column(s)?"
         "row",
         [], False, "Study", "save",
     ])
     wiz.run_wizard(p, cwd=tmp_path)
     assert len(_asked(p, "Which features do you want to extract?")) == 1
-    assert len(_asked(p, "What should one row of results describe?")) == 2
+    assert len(_asked(p, "Measure every row on its own, or join rows together first?")) == 2
 
 
 def test_going_back_and_changing_the_picks_leaves_no_stale_answer(tmp_path,
@@ -1527,10 +1528,11 @@ def test_going_back_and_changing_the_picks_leaves_no_stale_answer(tmp_path,
     p = EscapingPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
         ["readability"], "row",
-        ["stats_correlations"], ["openness"],
+        ["stats_correlations"], False, ["openness"],
         "__esc__",                # at the controls question: back to outcomes
-        "__esc__",                # at outcomes: back to the checklist
-        ["stats_group_differences"], "condition",
+        "__esc__",                # at outcomes: back to averaging
+        "__esc__",                # at averaging: back to the checklist
+        ["stats_group_differences"], False, "condition",
         False, "fdr_bh", False,
         ":done", "Study", "save",
     ])
@@ -1552,7 +1554,7 @@ def test_each_column_question_says_which_analysis_it_is_for(tmp_path, study_csv)
     p = ScriptedPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
         ["readability"], "row",
-        ["stats_correlations", "stats_classify_fit"],
+        ["stats_correlations", "stats_classify_fit"], False,
         ["openness"],             # outcomes, for the correlations
         ["condition"],            # the category, for the classifier
         # (no control question: pid is an id, the other two are spoken for)
@@ -1576,7 +1578,7 @@ def test_the_outcome_question_does_not_promise_a_next_question_that_will_not_com
     p = ScriptedPrompter([
         "csv", *browse_to(study_csv), ["text"], False,
         ["readability"], "row",
-        ["stats_correlations"],
+        ["stats_correlations"], False,
         ["openness"],
         False, "fdr_bh", False,
         ":done", "Study", "save",
@@ -1585,3 +1587,850 @@ def test_the_outcome_question_does_not_promise_a_next_question_that_will_not_com
     outcomes = next(r for r in p.reasons if "*numbers*" in r)
     assert "asked next" not in outcomes
     assert not any("*category*" in r for r in p.reasons)
+
+
+# ---------------------------------------------------------------------------
+# Measure each row, then average the numbers
+# ---------------------------------------------------------------------------
+
+AVERAGE_Q = "Average each measure within a group before the statistics?"
+AGAIN_Q = "Average again, by something coarser?"
+
+
+@pytest.fixture
+def turns_csv(tmp_path):
+    """Conversation turns: the shape the two orders actually differ on."""
+    path = tmp_path / "turns.csv"
+    rows = ["conv,speaker,text,satisfaction"]
+    for c in range(12):
+        for speaker in ("alice", "bob", "cara"):
+            for t in range(3):
+                rows.append(f"c{c:02d},{speaker},"
+                            f"\"words about potatoes number {c}{t}\","
+                            f"{3 + (c % 5) * 0.5:.1f}")
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    return path
+
+
+def _averaging_steps(preset) -> list:
+    return [s for s in preset["steps"]
+            if s["call"] == "potato.helpers.average_feature_table"]
+
+
+def test_declining_to_average_leaves_the_run_exactly_as_it_was(tmp_path, turns_csv):
+    """The default has to be the old behavior, answer for answer."""
+    p = ScriptedPrompter([
+        "csv", *browse_to(turns_csv), ["text"], False,
+        ["readability"], "row",
+        ["stats_correlations"], False,
+        ["satisfaction"], False, "fdr_bh", False,
+        ":done", "Study", "save",
+    ])
+    result = wiz.run_wizard(p, cwd=tmp_path)
+
+    assert _averaging_steps(result.preset) == []
+    assert result.preset["vars"]["stats_outcome_cols"] == ["satisfaction"], \
+        "an un-averaged run should read the outcome column as it stands"
+
+
+def test_averaging_once_measures_every_row_and_then_collapses(tmp_path, turns_csv):
+    """
+    The plain case: measure each turn, average per conversation, correlate at
+    conversation level. The text steps still see one row per turn.
+    """
+    p = ScriptedPrompter([
+        "csv", *browse_to(turns_csv), ["text"], False,
+        ["readability"], "row",
+        ["stats_correlations"], True, ["conv"],
+        ["satisfaction"], False, "fdr_bh", False,
+        ":done", "Study", "save",
+    ])
+    result = wiz.run_wizard(p, cwd=tmp_path)
+    steps = _averaging_steps(result.preset)
+
+    assert len(steps) == 1
+    assert steps[0]["with"]["group_by"] == ["conv"]
+    reader = next(s for s in result.preset["steps"]
+                  if s["call"] == "potato.text.analyze_readability")
+    assert not reader["with"].get("group_by"), \
+        "the text was joined after all, which is the other order"
+
+
+def test_averaging_can_be_repeated_to_weight_the_middle_level_equally(
+        tmp_path, turns_csv):
+    """
+    Turns to speakers to conversations is not the same arithmetic as turns
+    straight to conversations: the first weights the three speakers equally,
+    the second weights whoever talked most. The loop is what lets somebody
+    say which they meant.
+    """
+    p = ScriptedPrompter([
+        "csv", *browse_to(turns_csv), ["text"], False,
+        ["readability"], "row",
+        ["stats_correlations"],
+        True, ["conv", "speaker"],      # first: one row per speaker per conv
+        True, ["conv"],                 # then: one row per conv
+        ["satisfaction"], False, "fdr_bh", False,
+        ":done", "Study", "save",
+    ])
+    result = wiz.run_wizard(p, cwd=tmp_path)
+    steps = _averaging_steps(result.preset)
+
+    assert [s["with"]["group_by"] for s in steps] == [["conv", "speaker"],
+                                                      ["conv"]]
+    assert steps[1]["with"]["in_csv"] == "{{" + steps[0]["save_as"] + "}}", \
+        "the second average read the raw table instead of the first average"
+
+
+def test_averaging_again_can_only_go_coarser(tmp_path, turns_csv):
+    """
+    Once the rows are averaged together, every column but the ones they were
+    grouped on is gone -- so a later round can only offer a subset. Offering
+    the rest would be offering a grouping the table cannot do.
+    """
+    p = ScriptedPrompter([
+        "csv", *browse_to(turns_csv), ["text"], False,
+        ["readability"], "row",
+        ["stats_correlations"],
+        True, ["conv", "speaker"], True, ["conv"],
+        ["satisfaction"], False, "fdr_bh", False,
+        ":done", "Study", "save",
+    ])
+    wiz.run_wizard(p, cwd=tmp_path)
+    rounds = [cs for q, cs in p.offered if q.startswith("Average by")
+              or q.startswith("Average again, by which")]
+
+    assert len(rounds) == 2
+    assert {c.value for c in rounds[1]} == {"conv", "speaker"}, \
+        [c.value for c in rounds[1]]
+
+
+def test_one_column_is_as_coarse_as_it_gets_so_it_stops_asking(tmp_path,
+                                                                turns_csv):
+    """A subset of one column is either itself or nothing, so there is no
+    coarser grouping to offer and the loop ends without a question."""
+    p = ScriptedPrompter([
+        "csv", *browse_to(turns_csv), ["text"], False,
+        ["readability"], "row",
+        ["stats_correlations"], True, ["conv"],
+        ["satisfaction"], False, "fdr_bh", False,
+        ":done", "Study", "save",
+    ])
+    wiz.run_wizard(p, cwd=tmp_path)
+
+    assert not _asked(p, AGAIN_Q), "it offered a coarser cut of one column"
+
+
+def test_the_outcome_is_averaged_to_match_even_with_no_text_joining(
+        tmp_path, turns_csv):
+    """
+    The join and the averaging are different questions, and the outcome
+    follows the *analyzed* grain rather than the joining one. Twelve
+    conversations have thirty-six satisfaction scores between them; the
+    analysis sees one per conversation, so the column arrives averaged and
+    the analyses are pointed at the averaged name.
+    """
+    p = ScriptedPrompter([
+        "csv", *browse_to(turns_csv), ["text"], False,
+        ["readability"], "row",
+        ["stats_correlations"], True, ["conv"],
+        ["satisfaction"], False, "fdr_bh", False,
+        ":done", "Study", "save",
+    ])
+    result = wiz.run_wizard(p, cwd=tmp_path)
+    v = result.preset["vars"]
+
+    assert v["stats_outcome_cols"] == ["satisfaction_mean"]
+    assert v["stats_meta_agg"] == {"satisfaction": "mean"}
+    meta = next(s for s in result.preset["steps"]
+                if s.get("save_as") == "stats_metadata")
+    assert meta["with"]["group_by"] == ["conv"]
+
+
+def test_joining_the_text_and_averaging_the_measures_can_both_happen(
+        tmp_path, turns_csv):
+    """
+    The user's own example: join each speaker's turns within a conversation,
+    measure that once, then average the speakers to conversation level. Two
+    different operations at two different grains, in one run.
+    """
+    p = ScriptedPrompter([
+        "csv", *browse_to(turns_csv), ["text"], False,
+        ["readability"], "group", ["conv", "speaker"], False,
+        ["stats_correlations"], True, ["conv"],
+        ["satisfaction"], False, "fdr_bh", False,
+        ":done", "Study", "save",
+    ])
+    result = wiz.run_wizard(p, cwd=tmp_path)
+    reader = next(s for s in result.preset["steps"]
+                  if s["call"] == "potato.text.analyze_readability")
+
+    assert reader["with"]["group_by"] == ["conv", "speaker"], "text not joined"
+    assert [s["with"]["group_by"] for s in _averaging_steps(result.preset)] \
+        == [["conv"]]
+
+
+def test_after_joining_there_is_nothing_to_average_by_but_the_joining_columns(
+        tmp_path, turns_csv):
+    """
+    A row of results is already one joining key, so the only coarser cut
+    left is a subset of those keys. Offering the rest would be offering a
+    column the table no longer has.
+    """
+    p = ScriptedPrompter([
+        "csv", *browse_to(turns_csv), ["text"], False,
+        ["readability"], "group", ["conv", "speaker"], False,
+        ["stats_correlations"], True, ["conv"],
+        ["satisfaction"], False, "fdr_bh", False,
+        ":done", "Study", "save",
+    ])
+    wiz.run_wizard(p, cwd=tmp_path)
+    offered = next(cs for q, cs in p.offered if q.startswith("Average by"))
+
+    assert {c.value for c in offered} == {"conv", "speaker"}
+
+
+def test_joining_on_one_column_leaves_nothing_to_average_so_it_is_not_asked(
+        tmp_path, turns_csv):
+    """One joining column has no coarser subset, so the question would have
+    no answer worth giving."""
+    p = ScriptedPrompter([
+        "csv", *browse_to(turns_csv), ["text"], False,
+        ["readability"], "group", ["conv"], False,
+        ["stats_correlations"],
+        ["satisfaction"], False, "fdr_bh", False,
+        ":done", "Study", "save",
+    ])
+    wiz.run_wizard(p, cwd=tmp_path)
+
+    assert not _asked(p, AVERAGE_Q)
+
+
+def test_a_column_with_a_different_value_in_every_row_is_not_offered(
+        tmp_path, study_csv):
+    """
+    Averaging by a column that groups nothing is a no-op wearing an
+    average's name -- the same narrower question the group-comparison picker
+    asks before offering a column.
+    """
+    p = ScriptedPrompter([
+        "csv", *browse_to(study_csv), ["text"], False,
+        ["readability"], "row",
+        ["stats_correlations"], True, ["condition"],
+        ["openness"], False, "fdr_bh", False,
+        ":done", "Study", "save",
+    ])
+    wiz.run_wizard(p, cwd=tmp_path)
+    offered = next(cs for q, cs in p.offered if q.startswith("Average by"))
+
+    assert "pid" not in {c.value for c in offered}, \
+        "pid is unique per row and groups nothing"
+
+
+def test_no_statistics_means_the_question_is_never_asked(tmp_path, turns_csv):
+    """Averaging exists to serve the analyses. Without them there is nothing
+    for it to serve, and the feature tables are the deliverable."""
+    p = ScriptedPrompter([
+        "csv", *browse_to(turns_csv), ["text"], False,
+        ["readability"], "row",
+        [],                       # no statistics
+        False, "Study", "save",   # no settings to change
+    ])
+    result = wiz.run_wizard(p, cwd=tmp_path)
+
+    assert not _asked(p, AVERAGE_Q)
+    assert _averaging_steps(result.preset) == []
+
+
+def test_the_shape_is_read_back_after_every_answer_that_moves_it(tmp_path,
+                                                                  turns_csv):
+    """
+    The shape of the thing being analyzed is the easiest part of a pipeline
+    to lose track of and the most expensive to get wrong, so it is said in
+    plain words rather than left to be inferred from a level name.
+    """
+    p = ScriptedPrompter([
+        "csv", *browse_to(turns_csv), ["text"], False,
+        ["readability"], "row",
+        ["stats_correlations"],
+        True, ["conv", "speaker"], True, ["conv"],
+        ["satisfaction"], False, "fdr_bh", False,
+        ":done", "Study", "save",
+    ])
+    wiz.run_wizard(p, cwd=tmp_path)
+    said = "\n".join(p.output)
+
+    # 12 conversations x 3 speakers x 3 turns. the counts are the part that
+    # makes this actionable: "then one per conv" sounds reasonable and
+    # "then one per conv (12 rows)" does not.
+    assert "one row per spreadsheet row (108 rows)" in said
+    assert "then one per conv + speaker (36 rows)" in said
+    assert "then one per conv (12 rows)." in said
+
+
+# ---------------------------------------------------------------------------
+# Leaving rows out before anything is measured
+# ---------------------------------------------------------------------------
+
+OUT_Q = "Leave any rows out before joining?"
+WHICH_COL_Q = "Leave rows out based on which column?"
+ANOTHER_Q = "Leave rows out based on another column?"
+
+
+@pytest.fixture
+def screener_csv(tmp_path):
+    """A spreadsheet with the shapes the filter question has to handle: a
+    short list of labels, a wide range of numbers, and a free-text id."""
+    path = tmp_path / "screener.csv"
+    rows = ["pid,arm,age,note,text"]
+    for i in range(60):
+        rows.append(f"p{i},{'ABC'[i % 3]},{18 + i % 45},note-{i},"
+                    f"\"words about potatoes number {i}\"")
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    return path
+
+
+def test_rows_are_left_out_on_what_the_spreadsheet_already_says(tmp_path,
+                                                                screener_csv):
+    """
+    This used to ask for a minimum word count, which is neither available
+    before anything has been measured nor a thing anybody knows in advance.
+    What somebody does know at this point is what they collected.
+    """
+    p = ScriptedPrompter([
+        "csv", *browse_to(screener_csv), ["text"], False,
+        ["readability"], "group", ["arm"],
+        True, "arm", ["A", "B"], False,     # leave arm C out
+        [], False, "Study", "save",
+    ])
+    result = wiz.run_wizard(p, cwd=tmp_path)
+    gather = next(s for s in result.preset["steps"]
+                  if s.get("save_as") == "gathered_texts")
+
+    assert gather["with"]["row_filters"] == [["arm", "in", ["A", "B"]]]
+    reader = next(s for s in result.preset["steps"]
+                  if s["call"] == "potato.text.analyze_readability")
+    assert reader["with"]["analysis_csv"] == "{{gathered_texts}}", \
+        "the analyzer would gather again, without the filter"
+
+
+def test_a_short_list_of_values_is_a_tick_list_with_its_row_counts(
+        tmp_path, screener_csv):
+    """
+    Two questions, not four: which column, then which of its values stay.
+    A column with a handful of values needs no operator, and the counts say
+    what each tick costs.
+    """
+    p = ScriptedPrompter([
+        "csv", *browse_to(screener_csv), ["text"], False,
+        ["readability"], "group", ["arm"],
+        True, "arm", ["A", "B"], False,
+        [], False, "Study", "save",
+    ])
+    wiz.run_wizard(p, cwd=tmp_path)
+    offered = next(cs for q, cs in p.offered
+                   if q == "Which values of arm should stay?")
+
+    assert {c.value for c in offered} == {"A", "B", "C"}
+    assert all(c.checked for c in offered), "they start as they are"
+    assert "20 rows" in next(c.help for c in offered if c.value == "A")
+
+
+def test_a_column_with_too_many_values_to_list_becomes_a_threshold(
+        tmp_path, screener_csv):
+    """45 different ages is not a tick list."""
+    p = ScriptedPrompter([
+        "csv", *browse_to(screener_csv), ["text"], False,
+        ["readability"], "group", ["arm"],
+        True, "age", ">=", "21", False,
+        [], False, "Study", "save",
+    ])
+    result = wiz.run_wizard(p, cwd=tmp_path)
+    gather = next(s for s in result.preset["steps"]
+                  if s.get("save_as") == "gathered_texts")
+
+    assert gather["with"]["row_filters"] == [["age", ">=", 21.0]]
+
+
+def test_a_value_that_is_not_a_number_is_asked_for_again(tmp_path,
+                                                          screener_csv):
+    p = ScriptedPrompter([
+        "csv", *browse_to(screener_csv), ["text"], False,
+        ["readability"], "group", ["arm"],
+        True, "age", ">=", "twenty-one", "21", False,
+        [], False, "Study", "save",
+    ])
+    result = wiz.run_wizard(p, cwd=tmp_path)
+    gather = next(s for s in result.preset["steps"]
+                  if s.get("save_as") == "gathered_texts")
+
+    assert gather["with"]["row_filters"] == [["age", ">=", 21.0]]
+    assert any("not a number" in line for line in p.output)
+
+
+def test_a_free_text_column_with_many_values_is_typed_rather_than_listed(
+        tmp_path, screener_csv):
+    """Sixty different notes have no short list worth showing, and no
+    threshold either, so the values to leave out are typed."""
+    p = ScriptedPrompter([
+        "csv", *browse_to(screener_csv), ["text"], False,
+        ["readability"], "group", ["arm"],
+        True, "note", "note-3, note-4", False,
+        [], False, "Study", "save",
+    ])
+    result = wiz.run_wizard(p, cwd=tmp_path)
+    gather = next(s for s in result.preset["steps"]
+                  if s.get("save_as") == "gathered_texts")
+
+    assert gather["with"]["row_filters"] == [
+        ["note", "not_in", ["note-3", "note-4"]]]
+
+
+def test_keeping_every_value_is_not_a_filter(tmp_path, screener_csv):
+    """Ticking everything is the same as not filtering, and recording it as
+    a filter would put a step in the pipeline that does nothing."""
+    p = ScriptedPrompter([
+        "csv", *browse_to(screener_csv), ["text"], False,
+        ["readability"], "group", ["arm"],
+        True, "arm", ["A", "B", "C"], False,
+        [], False, "Study", "save",
+    ])
+    result = wiz.run_wizard(p, cwd=tmp_path)
+
+    assert not [s for s in result.preset["steps"]
+                if s.get("save_as") == "gathered_texts"]
+
+
+def test_how_many_rows_survive_is_said_after_every_filter(tmp_path,
+                                                           screener_csv):
+    p = ScriptedPrompter([
+        "csv", *browse_to(screener_csv), ["text"], False,
+        ["readability"], "group", ["arm"],
+        True, "arm", ["A", "B"], False,
+        [], False, "Study", "save",
+    ])
+    wiz.run_wizard(p, cwd=tmp_path)
+
+    assert any("Keeping 40 of 60 rows" in line for line in p.output)
+
+
+def test_a_filter_that_would_leave_nothing_is_refused(tmp_path, screener_csv):
+    """Untick everything and there is no corpus. Said, and not recorded."""
+    p = ScriptedPrompter([
+        "csv", *browse_to(screener_csv), ["text"], False,
+        ["readability"], "group", ["arm"],
+        True, "arm", [], False,
+        [], False, "Study", "save",
+    ])
+    result = wiz.run_wizard(p, cwd=tmp_path)
+
+    assert any("nothing would be left" in line for line in p.output)
+    assert not [s for s in result.preset["steps"]
+                if s.get("save_as") == "gathered_texts"]
+
+
+def test_two_filters_both_have_to_be_cleared(tmp_path, screener_csv):
+    """Two filters are two things you asked to leave out, so a row has to
+    clear both."""
+    p = ScriptedPrompter([
+        "csv", *browse_to(screener_csv), ["text"], False,
+        ["readability"], "group", ["arm"],
+        True, "arm", ["A", "B"], True, "age", ">=", "21", False,
+        [], False, "Study", "save",
+    ])
+    result = wiz.run_wizard(p, cwd=tmp_path)
+    gather = next(s for s in result.preset["steps"]
+                  if s.get("save_as") == "gathered_texts")
+
+    assert gather["with"]["row_filters"] == [["arm", "in", ["A", "B"]],
+                                             ["age", ">=", 21.0]]
+
+
+def test_the_question_is_only_asked_where_it_cannot_be_done_afterwards(
+        tmp_path, screener_csv):
+    """
+    Without joining there is no hurry: the filter question in the statistics
+    stage does the same job and can use anything the run has measured by
+    then, not just what came in the file.
+    """
+    p = ScriptedPrompter([
+        "csv", *browse_to(screener_csv), ["text"], False,
+        ["readability"], "row",
+        [], False, "Study", "save",
+    ])
+    result = wiz.run_wizard(p, cwd=tmp_path)
+
+    assert not _asked(p, OUT_Q)
+    assert not [s for s in result.preset["steps"]
+                if s.get("save_as") == "gathered_texts"]
+
+
+def test_declining_leaves_the_gather_where_it_has_always_been(tmp_path,
+                                                               screener_csv):
+    """No extra step, and the analyzers gather for themselves as before."""
+    p = ScriptedPrompter([
+        "csv", *browse_to(screener_csv), ["text"], False,
+        ["readability"], "group", ["arm"], False,
+        [], False, "Study", "save",
+    ])
+    result = wiz.run_wizard(p, cwd=tmp_path)
+    reader = next(s for s in result.preset["steps"]
+                  if s["call"] == "potato.text.analyze_readability")
+
+    assert not [s for s in result.preset["steps"]
+                if s.get("save_as") == "gathered_texts"]
+    assert reader["with"]["csv_path"] == "{{var:input_csv}}"
+
+
+def test_the_columns_the_averaging_needs_survive_the_early_gather(tmp_path,
+                                                                   turns_csv):
+    """
+    The gather writes the analysis-ready table the analyzers read, so any
+    column a later average groups by has to be carried through it. Left out,
+    the averaging step would have nothing to group on and the run would die
+    after every feature had been measured.
+    """
+    p = ScriptedPrompter([
+        "csv", *browse_to(turns_csv), ["text"], False,
+        ["readability"], "group", ["conv", "speaker"],
+        True, "speaker", ["alice", "bob"], False,
+        ["stats_correlations"], True, ["conv"],
+        ["satisfaction"], False, "fdr_bh", False,
+        ":done", "Study", "save",
+    ])
+    result = wiz.run_wizard(p, cwd=tmp_path)
+    gather = next(s for s in result.preset["steps"]
+                  if s.get("save_as") == "gathered_texts")
+
+    assert set(gather["with"]["carry_cols"]) >= {"conv", "speaker"}
+
+
+
+# ---------------------------------------------------------------------------
+# Saying why a control list is short
+# ---------------------------------------------------------------------------
+
+def test_the_controls_question_says_why_it_is_not_offering_your_columns(
+        tmp_path, turns_csv):
+    """
+    The report this came from: a file of 143 columns, averaged to one row per
+    education level, offered 14 columns as controls and withheld age and
+    gender. Withholding them is right -- there is no one age for everybody
+    with a bachelor's degree -- but saying nothing made it read as a bug, and
+    the help text named age and gender as its two examples while refusing
+    them.
+    """
+    p = ScriptedPrompter([
+        "csv", *browse_to(turns_csv), ["text"], False,
+        ["readability"], "row",
+        ["stats_correlations"], True, ["conv"],
+        ["satisfaction"],
+        True, ["conv"],           # controls: only conv survives the grain
+        "fdr_bh", False,
+        ":done", "Study", "save",
+    ])
+    wiz.run_wizard(p, cwd=tmp_path)
+    said = "\n".join(p.reasons)
+
+    assert "One row of results is one conv" in said
+    assert "single value per conv" in said
+    assert "speaker" in said, "the withheld column is not named"
+    assert "age, gender" not in said, \
+        "the help still offers as examples the columns it withholds"
+    # both questions carry it: on the gate, so the answer is informed, and on
+    # the picker, so a short list is explained where the short list is
+    gate = next(r for r in p.reasons if r.startswith("A control is"))
+    picker = next(r for r in p.reasons if r.startswith("Each column shows"))
+    assert "single value per conv" in gate
+    assert "single value per conv" in picker
+
+
+def test_nothing_is_said_about_the_grain_when_nothing_is_withheld(tmp_path,
+                                                                   study_csv):
+    """An un-averaged run withholds nothing, so the caveat would be noise."""
+    p = ScriptedPrompter([
+        "csv", *browse_to(study_csv), ["text"], False,
+        ["readability"], "row",
+        ["stats_correlations"], False,
+        ["openness"],
+        True, ["condition"],
+        "fdr_bh", False,
+        ":done", "Study", "save",
+    ])
+    wiz.run_wizard(p, cwd=tmp_path)
+
+    assert not any("single value per" in r for r in p.reasons)
+
+
+# ---------------------------------------------------------------------------
+# Reading the file
+# ---------------------------------------------------------------------------
+
+def test_the_spreadsheet_is_read_once_and_the_answer_carried(tmp_path,
+                                                              turns_csv,
+                                                              monkeypatch):
+    """
+    Three screens ask about the same file -- the source stage, the level
+    question, the analysis stage -- and each used to read it for itself.
+    Three passes over two hundred rows was cheap and wrong; three passes over
+    a whole file is neither.
+    """
+    real = wiz.inspect_csv
+    calls = []
+
+    def counted(*a, **kw):
+        calls.append(a[0] if a else kw.get("path"))
+        return real(*a, **kw)
+
+    monkeypatch.setattr(wiz, "inspect_csv", counted)
+    p = ScriptedPrompter([
+        "csv", *browse_to(turns_csv), ["text"], False,
+        ["readability"], "row",
+        ["stats_correlations"], True, ["conv"],
+        ["satisfaction"], True, ["conv"], "fdr_bh", False,
+        ":done", "Study", "save",
+    ])
+    wiz.run_wizard(p, cwd=tmp_path)
+
+    assert len(calls) == 1, f"the file was read {len(calls)} times"
+
+
+def test_choosing_a_file_says_it_is_being_read(tmp_path, turns_csv):
+    """An infinite bar with a climbing count, because the size is not known
+    until it has been read."""
+    p = ScriptedPrompter([
+        "csv", *browse_to(turns_csv), ["text"], False,
+        ["readability"], "row", [], False, "Study", "save",
+    ])
+    wiz.run_wizard(p, cwd=tmp_path)
+
+    assert any("Reading turns.csv" in line for line in p.output)
+    assert getattr(p, "scanned", []), "no row count was ever reported"
+
+
+def test_a_file_whose_rows_do_not_match_its_header_says_so_at_the_start(
+        tmp_path):
+    """
+    Worth saying when the file is chosen. Said any later and it is said
+    after an hour of extraction, which is when a quoting problem used to
+    surface.
+    """
+    broken = tmp_path / "broken.csv"
+    broken.write_text('g,n,text\na,1,"hi"\nb,2,"oops",extra\nc,3,"ok"\n',
+                      encoding="utf-8")
+    p = ScriptedPrompter([
+        "csv", *browse_to(broken), ["text"], False,
+        ["readability"], "row", [], False, "Study", "save",
+    ])
+    wiz.run_wizard(p, cwd=tmp_path)
+
+    assert any("do not match the header" in line for line in p.output)
+
+
+def test_a_column_that_never_varies_is_not_offered_as_a_control(tmp_path):
+    """
+    You cannot hold constant something that is already constant, and a model
+    fitted on it spends a degree of freedom to learn nothing. Twelve of the
+    fourteen columns a real run offered here were like this: a survey's
+    `Finished` column reading 1 for every row, and ten items answered by
+    half the sample and blank for the rest.
+    """
+    sheet = tmp_path / "survey.csv"
+    rows = ["pid,condition,openness,Finished,Item_01,text"]
+    for i in range(30):
+        rows.append(f"p{i},{'ABC'[i % 3]},{3 + (i % 10) * 0.1:.1f},1,"
+                    f"{'30' if i % 2 else ''},"
+                    f"\"some words about potatoes number {i}\"")
+    sheet.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    p = ScriptedPrompter([
+        "csv", *browse_to(sheet), ["text"], False,
+        ["readability"], "row",
+        ["stats_correlations"], False,
+        ["openness"],
+        True, ["condition"],
+        "fdr_bh", False,
+        ":done", "Study", "save",
+    ])
+    wiz.run_wizard(p, cwd=tmp_path)
+    offered = {c.value for c in next(
+        cs for q, cs in p.offered if q == "Which column(s) should be held constant?")}
+
+    assert "Finished" not in offered, "one value for every row"
+    assert "Item_01" not in offered, "one value where answered, blank elsewhere"
+    assert "condition" in offered, "a column that does vary is still offered"
+
+
+# ---------------------------------------------------------------------------
+# How many of each -- shown where the grouping is chosen
+# ---------------------------------------------------------------------------
+
+def test_a_grouping_picker_says_how_many_values_each_column_has(tmp_path,
+                                                                 turns_csv):
+    """
+    The number *is* the decision. Grouping 938 rows by a column with seven
+    values leaves seven rows, and a run with seven rows is not a run -- and
+    it was possible to answer this question without ever being told.
+    """
+    p = ScriptedPrompter([
+        "csv", *browse_to(turns_csv), ["text"], False,
+        ["readability"], "row",
+        ["stats_correlations"], True, ["conv"],
+        ["satisfaction"], True, ["conv"], "fdr_bh", False,
+        ":done", "Study", "save",
+    ])
+    wiz.run_wizard(p, cwd=tmp_path)
+    offered = {c.value: c.annotation for c in next(
+        cs for q, cs in p.offered if q.startswith("Average by"))}
+
+    assert "12 unique" in offered["conv"], offered["conv"]
+    assert "3 unique" in offered["speaker"], offered["speaker"]
+
+
+def test_the_join_picker_says_it_too(tmp_path, turns_csv):
+    """Both moments where rows get combined, since the question is the same
+    one: how many rows will this leave?"""
+    p = ScriptedPrompter([
+        "csv", *browse_to(turns_csv), ["text"], False,
+        ["readability"], "group", ["conv"], False,
+        [], False, "Study", "save",
+    ])
+    wiz.run_wizard(p, cwd=tmp_path)
+    offered = {c.value: c.annotation for c in next(
+        cs for q, cs in p.offered
+        if q == "Join the text from rows that share which column(s)?")}
+
+    assert "12 unique" in offered["conv"]
+
+
+def test_the_count_survives_pressing_an_arrow_on_the_row():
+    """
+    The arrows change how a column is read, and the renderer rewrites that
+    row's annotation from the cycler's return value -- so a cycler that did
+    not know about the counts would quietly wipe one off the row somebody
+    was pointing at.
+    """
+    from taters.ui.wizard import _cycler, _kind_rows
+
+    rows = [{"g": "a", "n": str(i % 4)} for i in range(20)]
+    kinds = {"g": "labels", "n": "numbers"}
+    counts = {"g": 1, "n": 4}
+    before = {c.value: c.annotation
+              for c in _kind_rows(["g", "n"], kinds, counts=counts)}
+    after = _cycler(kinds, rows, ["g", "n"], counts=counts)("n", 1)
+
+    assert "4 unique" in before["n"]
+    assert after is not None and "4 unique" in after
+    assert kinds["n"] == "labels", "the arrow did not change the kind"
+
+
+# ---------------------------------------------------------------------------
+# Controlling for how much went into each group
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def uneven_csv(tmp_path):
+    """Conversations of different lengths -- the shape that makes the group
+    size worth holding constant."""
+    path = tmp_path / "uneven.csv"
+    rows = ["conv,speaker,text,satisfaction"]
+    for c in range(14):
+        for t in range(2 + c):          # 2 turns in the first, 15 in the last
+            rows.append(f"c{c:02d},{'abc'[t % 3]},"
+                        f"\"words about potatoes number {c}{t}\","
+                        f"{3 + (c % 5) * 0.5:.1f}")
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    return path
+
+
+def test_the_group_size_can_be_held_constant_on_a_combined_run(tmp_path,
+                                                                uneven_csv):
+    """
+    The confound a real run walked into and could not ask about. Joining 938
+    responses by age gave documents from 75 to 11,000 words; document length
+    correlated with group size at .99, and the three largest coefficients in
+    the winning model were its three most length-sensitive measures. The
+    number was sitting in the analysis table and this question -- built from
+    the spreadsheet's own columns -- could not see it, because the gather
+    manufactures it rather than reading it.
+    """
+    p = ScriptedPrompter([
+        "csv", *browse_to(uneven_csv), ["text"], False,
+        ["readability"], "row",
+        ["stats_correlations"], True, ["conv"],
+        ["satisfaction"],
+        True, ["group_count"],
+        "fdr_bh", False,
+        ":done", "Study", "save",
+    ])
+    result = wiz.run_wizard(p, cwd=tmp_path)
+    offered = next(cs for q, cs in p.offered
+                   if q == "Which column(s) should be held constant?")
+    row = next(c for c in offered if c.value == "group_count")
+
+    assert "how many rows each group was built from" in row.help
+    assert result.preset["vars"]["stats_control_cols"] == ["group_count"]
+
+
+def test_the_group_size_is_not_asked_of_the_spreadsheet_it_never_came_from(
+        tmp_path, uneven_csv):
+    """
+    The gather writes it, so asking the metadata step to *carry* it would
+    name a column the file does not have -- a warning, and no column.
+    """
+    p = ScriptedPrompter([
+        "csv", *browse_to(uneven_csv), ["text"], False,
+        ["readability"], "row",
+        ["stats_correlations"], True, ["conv"],
+        ["satisfaction"],
+        True, ["group_count"],
+        "fdr_bh", False,
+        ":done", "Study", "save",
+    ])
+    result = wiz.run_wizard(p, cwd=tmp_path)
+
+    assert "group_count" not in result.preset["vars"].get("stats_meta_carry", [])
+    assert "group_count" not in result.preset["vars"].get("stats_categorical_controls", [])
+
+
+def test_an_uncombined_run_has_no_group_size_to_offer(tmp_path, study_csv):
+    """There are no groups, so there is no group size -- and `group_count`
+    is not a column of the file."""
+    p = ScriptedPrompter([
+        "csv", *browse_to(study_csv), ["text"], False,
+        ["readability"], "row",
+        ["stats_correlations"], False,
+        ["openness"],
+        True, ["condition"],
+        "fdr_bh", False,
+        ":done", "Study", "save",
+    ])
+    wiz.run_wizard(p, cwd=tmp_path)
+    offered = next(cs for q, cs in p.offered
+                   if q == "Which column(s) should be held constant?")
+
+    assert "group_count" not in {c.value for c in offered}
+
+
+def test_groups_that_are_all_the_same_size_are_nothing_to_hold_constant(
+        tmp_path, turns_csv):
+    """
+    Every conversation has exactly nine turns in this fixture, so the group
+    size never varies and offering it would spend a degree of freedom to
+    learn nothing -- the same rule the other columns get.
+    """
+    p = ScriptedPrompter([
+        "csv", *browse_to(turns_csv), ["text"], False,
+        ["readability"], "row",
+        ["stats_correlations"],
+        True, ["conv", "speaker"], False,   # three turns each, every group
+        ["satisfaction"],
+        True, ["conv"],
+        "fdr_bh", False,
+        ":done", "Study", "save",
+    ])
+    wiz.run_wizard(p, cwd=tmp_path)
+    offered = next(cs for q, cs in p.offered
+                   if q == "Which column(s) should be held constant?")
+
+    assert {c.value for c in offered} == {"conv", "speaker"}
+    assert "group_count" not in {c.value for c in offered}

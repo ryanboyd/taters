@@ -398,6 +398,8 @@ def _bind_source(
     text_mode: str = "concat",
     group_by: Sequence[str] = (),
     level: Optional[str] = None,
+    metadata_group_by: Optional[Sequence[str]] = None,
+    gathered_artifact: str = "",
 ) -> dict:
     """
     Render a step, rewiring its input for a non-media source.
@@ -408,6 +410,12 @@ def _bind_source(
     ``csv_path: "{{transcripts_all}}"`` next to a new ``txt_dir`` would not
     error -- it would quietly read a transcript file that this run never
     produced.
+
+    ``metadata_group_by`` is for a run that joins the texts at one grain and
+    then averages the measures up to a coarser one: the text steps still
+    gather at the joining keys, while the metadata has to arrive at the grain
+    the statistics actually see. Left unset both use ``group_by``, which is
+    every run that does not average.
     """
     step = recipe.to_step()
 
@@ -425,8 +433,10 @@ def _bind_source(
         # rather than us guessing from what they produce, because the
         # spreadsheet feature table needs the same treatment and produces
         # something else entirely.
-        if keys:
-            step["with"]["group_by"] = keys
+        meta_keys = list(metadata_group_by) \
+            if metadata_group_by is not None else keys
+        if meta_keys:
+            step["with"]["group_by"] = meta_keys
         elif id_cols:
             step["with"]["id_cols"] = list(id_cols)
 
@@ -439,6 +449,7 @@ def _bind_source(
             pass_through="pass_through_cols" in recipe.with_,
             text_mode=text_mode,
             group_by=keys,
+            gathered_artifact=gathered_artifact,
         ))
         step["with"] = kept
 
@@ -650,6 +661,8 @@ def compose(
     group_by: Sequence[str] = (),
     delimiter: str = ",",
     level: Optional[str] = None,
+    feature_levels: Sequence[Sequence[str]] = (),
+    row_filters: Sequence[Sequence[Any]] = (),
     model_plans: Sequence[Any] = (),
 ) -> dict:
     """
@@ -696,6 +709,20 @@ def compose(
     text_mode : {"concat", "separate"}
         For ``source="csv"`` with more than one text column: measure them
         joined together, or one at a time.
+    row_filters : sequence of [column, operator, value], optional
+        Which spreadsheet rows to keep, judged on the spreadsheet's own
+        columns, before anything is measured: ``[["age", ">=", 18]]``. Any
+        makes the text gather an explicit first step and points every text
+        analyzer at the table it writes, because an analyzer gathers for
+        itself and has no argument for this.
+    feature_levels : sequence of sequences of str, optional
+        Average the measures up, once per entry, in order: ``[("conv",
+        "speaker"), ("conv",)]`` measures every row, averages to one row per
+        speaker per conversation, then averages those to one row per
+        conversation. Each entry may only name columns the entry before it
+        grouped on, because the rest are gone by then. Empty means the rows
+        are analyzed as extraction produced them, which is what every run did
+        before this existed.
 
     Returns
     -------
@@ -809,20 +836,49 @@ def compose(
         "cli_example": _cli_example(preset_id, source, file_type, root_dir),
     }
 
+    # what one row of the analysis table will be. averaging moves it: the
+    # text steps still gather at the joining keys, but the outcomes have to
+    # arrive at the grain the statistics see or the join has nothing to match.
+    averaging = [list(lv) for lv in (feature_levels or ()) if lv]
+    final_grain = averaging[-1] if averaging else None
+
+    # leaving rows out before anything is measured turns the gather into a
+    # step of its own; every text analyzer then reads what it wrote.
+    pre_gather = None
+    keep = [list(f) for f in (row_filters or ())]
+    if source == "csv" and keep:
+        pre_gather = _pre_gather_step(
+            text_cols=text_cols, id_cols=id_cols, text_mode=text_mode,
+            group_by=group_by, row_filters=keep,
+            # whatever the analyzers pass through, plus whatever the
+            # averaging will need to group by, has to survive the gather
+            carry=sorted({*group_by, *id_cols,
+                          *(c for lv in averaging for c in lv)}))
+
     built = [
         _apply_overrides(
             _bind_source(r, source, text_cols=text_cols, id_cols=id_cols,
                          text_mode=text_mode, group_by=group_by,
-                         level=level),
+                         level=level, metadata_group_by=final_grain,
+                         gathered_artifact=_GATHERED if pre_gather else ""),
             overrides.get(r.id, {}),
         )
         for r in steps
         if not _is_pointless_merge(r, source, level, group_by)
     ]
+    built = _splice_averaging(
+        built, steps, averaging, source=source, text_cols=text_cols,
+        id_cols=id_cols, text_mode=text_mode, group_by=group_by, level=level,
+        picked=selected, overrides=overrides, var_specs=var_specs)
     built = _splice_model_extractions(
         built, steps, model_plans, source=source, text_cols=text_cols,
         id_cols=id_cols, text_mode=text_mode, group_by=group_by, level=level,
         overrides=overrides, var_specs=var_specs)
+    if pre_gather:
+        # last, and at the front: the splices above walk `built` alongside the
+        # resolved recipe list, and a step with no recipe behind it would put
+        # the two out of step with each other.
+        built = [pre_gather] + built
 
     return {
         "meta": meta,
@@ -878,6 +934,181 @@ def _wire_controls(steps, model_plans, *, source, overrides, var_values):
     var_values["stats_meta_carry"] = carry + [c for c in needed
                                               if c not in carry]
     return steps
+
+
+#: The folder an averaged table lands in. `by-conv-speaker` says what one row
+#: of it is; a level number or an `_avg2` suffix says only how many steps ago
+#: it happened, which is not a thing anyone wants to know from a filename.
+def _by_dir(keys: Sequence[str]) -> str:
+    safe = ["".join(c if (c.isalnum() or c in "-_") else "_" for c in str(k))
+            for k in keys]
+    return "by-" + "-".join(safe)
+
+
+#: The artifact a pre-measure gather writes, when there is one.
+_GATHERED = "gathered_texts"
+
+
+def _pre_gather_step(*, text_cols, id_cols, text_mode, group_by, row_filters,
+                     carry) -> dict:
+    """
+    The text gather, as its own visible step, so rows can be left out first.
+
+    Normally every text analyzer gathers for itself and the first one to run
+    writes the table the rest reuse. That is fine until somebody wants to
+    leave rows out before anything is measured: the analyzers take no
+    argument for it, and adding one to all twenty of them to carry a setting
+    none of them uses is the wrong shape. So the gather comes out in front,
+    where the setting belongs and where the manifest shows it happened.
+
+    It matters most when rows are being joined. A row inside somebody else's
+    joined text cannot be removed afterwards, so "before" is the only time
+    this can be asked at all.
+    """
+    step = {
+        "scope": "global",
+        "call": "potato.helpers.csv_to_analysis_ready_csv",
+        "save_as": _GATHERED,
+        "with": {
+            "csv_path": "{{var:input_csv}}",
+            "out_csv": "gathered/texts.csv",
+            "text_cols": list(text_cols),
+            "mode": text_mode,
+            "delimiter": "{{var:csv_delimiter}}",
+            "row_filters": [list(f) for f in row_filters],
+            "overwrite_existing": "{{var:overwrite_existing}}",
+        },
+    }
+    if carry:
+        step["with"]["carry_cols"] = list(carry)
+    if group_by:
+        step["with"]["group_by"] = list(group_by)
+    elif id_cols:
+        step["with"]["id_cols"] = list(id_cols)
+    return step
+
+
+def _splice_averaging(built, steps, feature_levels, *, source, text_cols,
+                      id_cols, text_mode, group_by, level, picked,
+                      overrides, var_specs):
+    """
+    Measure every row, then average the numbers -- one step per table, per level.
+
+    The other order from the text gather, which joins the texts that belong
+    together and measures the result once. Both are defensible and they give
+    different numbers, so this is a thing the user says rather than something
+    inferred, and it lands in the preset where anyone can read it back.
+
+    Three things about the shape, each of which was the alternative design:
+
+    * **One step per table per level, not one step over a folder.** A feature
+      table's provenance record sits beside it, and `assemble_analysis_table`
+      reads every joined table's record to find its bookkeeping columns while
+      `score_model` reads it to check a saved model. A single step writing a
+      folder full of tables would leave all of them unrecorded, and the
+      decorator writes one record per returned file by design.
+    * **Plain step dicts, never Recipes.** Registered in the catalog they
+      would appear as editable rows on the options screen, be counted by
+      `feature_tables()`, and need a `save_as` known before the tables are.
+      Splicing after resolution makes them invisible by arithmetic, the same
+      trick `_splice_model_extractions` uses and for the same reasons.
+    * **A key map, because a feature table cannot say who said it.** All it
+      carries is `text_id` and numbers. So the first average reads a table of
+      the spreadsheet's own grouping columns, keyed the way the text gather
+      keys one; later averages group on columns their own input already
+      carries.
+
+    The averaged file keeps its table's stem and changes folder, so a model
+    fitted on `by-conv/readability.csv` and one fitted on `readability.csv`
+    agree about what the table is called -- which is what `score_model`
+    compares records by.
+    """
+    levels = [tuple(str(c) for c in lv) for lv in (feature_levels or ()) if lv]
+    if not levels or source != "csv":
+        return built
+    tables = feature_tables(steps, source, level, group_by, picked=picked)
+    if not tables:
+        return built
+    # the measure's own name, with the joining level's filename suffix taken
+    # off: `_suffixed` put it there to say what one row of the *raw* table
+    # was, and the folder this one lands in says what one row of it is. left
+    # on, the analyses would name a feature set `readability_by-group` inside
+    # a folder called `by-conv`, which reads as two answers to one question.
+    joined_at = level_by_id(source, _level_for(source, level, group_by)).id
+    suffix = f"_by-{joined_at}"
+    stems = {}
+    for save_as, name in zip(
+            [r.save_as for r, _ in tables],
+            [n for n, _ in table_names(steps, source, level, group_by,
+                                       picked=picked, overrides=overrides,
+                                       var_specs=var_specs)], strict=True):
+        stems[save_as] = name[:-len(suffix)] \
+            if suffix != "_by-" and name.endswith(suffix) else name
+
+    kept = [r for r in steps
+            if not _is_pointless_merge(r, source, level, group_by)]
+    # ahead of everything that reads a feature table, which is the statistics
+    # and the descriptives both -- the descriptives sit in the extract stage
+    # and would otherwise be asked to read a table written after them.
+    reading = {"stats_assemble", "describe_features"}
+    at = min([i for i, r in enumerate(kept)
+              if r.stage == "analyze" or r.id in reading] or [len(kept)])
+    split_col = "source_col" if text_mode == "separate" else ""
+
+    keys_art = "row_group_keys"
+    placing = ({"group_by": list(group_by)} if group_by
+               else {"id_cols": list(id_cols)} if id_cols else {})
+    spliced = [{
+        "scope": "global",
+        "call": "potato.helpers.csv_to_analysis_ready_csv",
+        "save_as": keys_art,
+        "with": {
+            "csv_path": "{{var:input_csv}}",
+            "out_csv": "gathered/row_group_keys.csv",
+            "text_cols": [],
+            "delimiter": "{{var:csv_delimiter}}",
+            "carry_cols": sorted({c for lv in levels for c in lv}),
+            "overwrite_existing": "{{var:overwrite_existing}}",
+            **placing,
+        },
+    }]
+
+    latest = {r.save_as: "{{" + r.save_as + "}}" for r, _ in tables}
+    for depth, lv in enumerate(levels):
+        for recipe, _label in tables:
+            art = f"{recipe.save_as}_by_{depth + 1}"
+            spliced.append({
+                "scope": "global",
+                "call": "potato.helpers.average_feature_table",
+                "save_as": art,
+                "with": {
+                    "in_csv": latest[recipe.save_as],
+                    "out_csv": (f"{{{{var:features_dir}}}}/{_by_dir(lv)}/"
+                                f"{stems[recipe.save_as]}.csv"),
+                    "group_by": list(lv),
+                    "split_col": split_col,
+                    "overwrite_existing": "{{var:overwrite_existing}}",
+                    # only the first average needs telling which row belongs
+                    # to which group; after that the grouping columns are in
+                    # the table it just wrote.
+                    **({"keys_csv": "{{" + keys_art + "}}"} if depth == 0
+                       else {}),
+                },
+            })
+            latest[recipe.save_as] = "{{" + art + "}}"
+
+    # the statistics and the descriptives both read the grain the analyses
+    # actually use. a report whose descriptives say "4000 rows" about a model
+    # fitted on 40 conversations is worse than no descriptives.
+    swap = {"{{" + r.save_as + "}}": latest[r.save_as] for r, _ in tables}
+    for recipe, step in zip(kept, built, strict=True):
+        if recipe.id not in reading:
+            continue
+        current = step.get("with", {}).get("feature_csvs")
+        if isinstance(current, list):
+            step["with"]["feature_csvs"] = [swap.get(t, t) for t in current]
+
+    return built[:at] + spliced + built[at:]
 
 
 def _splice_model_extractions(built, steps, model_plans, *, source, text_cols,

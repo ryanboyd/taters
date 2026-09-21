@@ -87,7 +87,7 @@ def test_every_column_picker_shows_what_each_column_is_treated_as(tmp_path):
     p = ScriptedPrompter([
         "csv", *browse_to(sheet), ["text"], True, ["pid"],
         ["readability"], "row",
-        ["stats_correlations"], ["openness"],
+        ["stats_correlations"], False, ["openness"],
         True, ["age"],
         "fdr_bh", False,
         ":done", "Kinds", "save",
@@ -115,7 +115,7 @@ def test_the_right_arrow_turns_a_coded_column_into_labels_and_it_stays_so(tmp_pa
     p = ScriptedPrompter([
         "csv", *browse_to(sheet), ["text"], True, ["pid"],
         ["readability"], "row",
-        ["stats_correlations"], ["openness"],
+        ["stats_correlations"], False, ["openness"],
         True,
         "\x00right:gender",             # → on gender: numbers -> labels
         ["age", "gender"],
@@ -135,7 +135,7 @@ def test_the_arrows_cycle_a_column_of_many_numbers_both_ways(tmp_path):
     p = ScriptedPrompter([
         "csv", *browse_to(sheet), ["text"], True, ["pid"],
         ["readability"], "row",
-        ["stats_correlations"], ["openness"],
+        ["stats_correlations"], False, ["openness"],
         True,
         "\x00right:age",                # thirty distinct ages: not labels
         "\x00left:age",
@@ -159,7 +159,7 @@ def test_a_coded_column_picked_as_the_category_is_treated_as_labels(tmp_path):
     p = ScriptedPrompter([
         "csv", *browse_to(sheet), ["text"], True, ["pid"],
         ["readability"], "row",
-        ["stats_classify_fit"], ["cond"],
+        ["stats_classify_fit"], False, ["cond"],
         False, False,
         ":done", "Kinds", "save",
     ])
@@ -173,7 +173,7 @@ def test_a_measurement_is_grayed_out_as_a_group_and_text_is_not_offered_as_an_ou
     p = ScriptedPrompter([
         "csv", *browse_to(sheet), ["text"], True, ["pid"],
         ["readability"], "row",
-        ["stats_group_differences", "stats_correlations"],
+        ["stats_group_differences", "stats_correlations"], False,
         "cond", ["openness"],
         False, "fdr_bh", False,
         ":done", "Kinds", "save",
@@ -201,7 +201,7 @@ def test_a_treatment_changed_on_one_screen_holds_on_the_next(tmp_path):
     p = ScriptedPrompter([
         "csv", *browse_to(sheet), ["text"], True, ["pid"],
         ["readability"], "row",
-        ["stats_group_differences"],
+        ["stats_group_differences"], False,
         "\x00right:gender", "cond",
         True, ["gender"],
         "fdr_bh", False,
@@ -246,7 +246,7 @@ def test_the_arrows_work_on_the_text_and_id_pickers_too(tmp_path):
         "\x00right:gender", ["text"],       # on the text picker: gender -> labels
         True, ["pid"],
         ["readability"], "row",
-        ["stats_correlations"], ["openness"],
+        ["stats_correlations"], False, ["openness"],
         True, ["gender"],
         "fdr_bh", False,
         ":done", "Kinds", "save",

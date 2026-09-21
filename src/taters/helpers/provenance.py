@@ -408,7 +408,8 @@ def records_settings(*, binding: Sequence[str] = (), grain: Sequence[str] = (),
                      replay: Optional[Tuple[str, Mapping[str, str]]] = None,
                      absent_means_zero: bool = False,
                      redo_without_record: bool = False,
-                     bookkeeping: Sequence[str] = ()):
+                     bookkeeping: Sequence[str] = (),
+                     reshapes: str = ""):
     """
     Record how this function measured, beside whatever it wrote.
 
@@ -465,6 +466,25 @@ def records_settings(*, binding: Sequence[str] = (), grain: Sequence[str] = (),
         run and the analyses then could not find their outcome columns.
         Left False for anything expensive: a transcript from before records
         existed may have taken hours, and unknown is not grounds to redo it.
+    reshapes
+        The parameter naming a feature table this step *reshapes* rather than
+        measures -- averaging one up to a coarser row, say. The output's
+        record then inherits that table's measuring identity: its ``call``,
+        ``instrument``, ``assets`` and bookkeeping columns, and its place in
+        the chain. Only the grain differs, and the grain is never compared.
+
+        Without this the record would describe the reshaping, and two things
+        would go wrong at once. A model fitted on averaged readability could
+        never be scored on un-averaged readability, because the gate would
+        compare an averaging step's settings against an analyzer's and find
+        every one of them different -- the opposite of the portability
+        ``defines_text`` exists to protect. And the measure's own bookkeeping
+        columns would be forgotten, so a word count that has always been kept
+        out of the feature sets would quietly arrive in one as a predictor.
+
+        The reshaping step is still in the pipeline and its manifest; what
+        this says is that reshaping is not measuring. ``reshaped_by`` on the
+        record names the step that did it.
     absent_means_zero
         True when the table's *columns* depend on the corpus and a missing
         column means "this never occurred", not "this was not measured": a
@@ -540,7 +560,7 @@ def records_settings(*, binding: Sequence[str] = (), grain: Sequence[str] = (),
                               advisory=advisory, defines_text=defines_text,
                               replay=replay,
                               absent_means_zero=absent_means_zero,
-                              bookkeeping=bookkeeping)
+                              bookkeeping=bookkeeping, reshapes=reshapes)
             except Exception:
                 # rule 4. a record is a nicety; the measurement isn't, so a
                 # bug in here must never show up to a researcher as
@@ -564,6 +584,7 @@ def records_settings(*, binding: Sequence[str] = (), grain: Sequence[str] = (),
             "replay": (str(replay[0]), dict(replay[1])) if replay else None,
             "absent_means_zero": bool(absent_means_zero),
             "bookkeeping": tuple(bookkeeping),
+            "reshapes": str(reshapes),
         }
         return wrapper
 
@@ -610,7 +631,8 @@ def _write_record(fn, signature, args, kwargs, result, *, before, skip,
                   binding, grain, asset_keys, advisory,
                   defines_text: bool = False, replay=None,
                   absent_means_zero: bool = False,
-                  bookkeeping: Sequence[str] = ()) -> None:
+                  bookkeeping: Sequence[str] = (),
+                  reshapes: str = "") -> None:
     from .. import __version__ as taters_version
 
     out = Path(result) if isinstance(result, (str, Path)) else None
@@ -671,15 +693,61 @@ def _write_record(fn, signature, args, kwargs, result, *, before, skip,
     replayed = _replay_record(replay, every)
     if replayed:
         record["replay"] = replayed
+    if reshapes:
+        _inherit_measurement(record, every.get(reshapes))
+    # read the instrument back off the record rather than from the local: a
+    # reshaping step amends the record just above, and digesting the local
+    # meant the digests described settings the record no longer claimed.
     record["digests"] = {
-        "instrument": digest([record["call"], instrument, record["assets"]]),
-        "chain": digest([record["call"], instrument, record["assets"],
-                         record["upstream"]]),
+        "instrument": digest([record["call"], record["instrument"],
+                              record["assets"]]),
+        "chain": digest([record["call"], record["instrument"],
+                         record["assets"], record["upstream"]]),
     }
     from .atomic import atomic_write
 
     with atomic_write(sidecar_path(out), mode="w", encoding="utf-8") as fh:
         json.dump(record, fh, indent=1, sort_keys=True)
+
+
+def _inherit_measurement(record: dict, source: Any) -> None:
+    """
+    Take the measuring identity of the table this step reshaped.
+
+    Reshaping is not measuring. A table of readability averaged per speaker
+    holds readability's numbers at a coarser grain, so what a later check
+    wants to know about it is how readability was measured -- and the grain,
+    which is recorded and never compared. Written into the record before the
+    digests are taken, so the chain digest comes out equal to the measured
+    table's and the two are comparable rather than merely similar.
+
+    Silent when the source table has no readable record: unknown provenance
+    stays unknown, and the gate has a separate, waivable answer for that.
+    """
+    parent = read(source) if source else None
+    if not parent:
+        return
+    record["reshaped_by"] = record["call"]
+    record["call"] = parent.get("call") or record["call"]
+    record["instrument"] = parent.get("instrument") or {}
+    record["assets"] = parent.get("assets") or {}
+    record["advisory"] = {**(parent.get("advisory") or {}),
+                          **(record.get("advisory") or {})}
+    record["absent_means_zero"] = bool(parent.get("absent_means_zero"))
+    # `or` is wrong here and cost an afternoon: a measure whose only upstream
+    # step is a gather has an EMPTY upstream, because a gather is
+    # `defines_text` and stays out of the chain. falling back on empty put
+    # the reshaping step's own upstream in instead, and the chain digest then
+    # differed from the measured table's by exactly the thing we were trying
+    # to make equal.
+    if "upstream" in parent:
+        record["upstream"] = parent["upstream"]
+    if parent.get("replay"):
+        record["replay"] = parent["replay"]
+    # both: the measure's own (a word count nobody wants as a predictor) and
+    # this step's (how many rows went into each average).
+    record["bookkeeping"] = sorted(set(record.get("bookkeeping") or [])
+                                   | set(parent.get("bookkeeping") or []))
 
 
 def _effective_arguments(signature, args, kwargs) -> dict:

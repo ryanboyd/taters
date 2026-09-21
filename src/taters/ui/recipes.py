@@ -149,11 +149,10 @@ LEVELS: Dict[str, Tuple[Level, ...]] = {
               ("source",)),
     ),
     "csv": (
-        Level("row", "Each spreadsheet row",
-              "Every row measured on its own.", ()),
-        Level("group", "Each group",
-              "Combine rows that share a column -- all of one participant's "
-              "answers measured together as a single text.",
+        Level("row", "Measure every row on its own",
+              "One row of results per row of your spreadsheet.", ()),
+        Level("group", "Join rows together, then measure",
+              "One person's rows become a single text, measured once.",
               None),
     ),
     "txt_dir": (
@@ -963,6 +962,7 @@ def text_binding(
     pass_through: bool = False,
     text_mode: str = "concat",
     group_by: Sequence[str] = (),
+    gathered_artifact: str = "",
 ) -> dict:
     """
     Build the input arguments a text analyzer needs for a given source.
@@ -1018,6 +1018,20 @@ def text_binding(
         }
         if pass_through:
             binding["pass_through_cols"] = []
+        return binding
+
+    if source == "csv" and gathered_artifact:
+        # somebody has already gathered the text as its own step -- which is
+        # what leaving rows out before measuring needs, since the analyzers
+        # gather for themselves and take no argument for it. handed the
+        # finished table they read it as it stands and gather nothing, so
+        # every one of them measures the same rows.
+        binding = {"analysis_csv": "{{" + gathered_artifact + "}}"}
+        if pass_through:
+            carried = list(group_by) if group_by else list(id_cols)
+            binding["pass_through_cols"] = (
+                carried + ["source_col"] if text_mode == "separate" else carried
+            )
         return binding
 
     if source == "csv":

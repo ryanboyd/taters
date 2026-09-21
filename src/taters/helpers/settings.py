@@ -38,12 +38,45 @@ from typing import Any, Dict, Optional, Tuple, Union
 
 __all__ = ["settings_path", "load_settings", "save_setting", "clear_setting",
            "model_cache_dir", "model_cache_source", "apply_model_cache",
-           "MODEL_CACHE_ENV", "MODEL_CACHE_KEY"]
+           "MODEL_CACHE_ENV", "MODEL_CACHE_KEY",
+           "inspect_row_limit", "INSPECT_ROWS_ENV", "INSPECT_ROWS_KEY"]
 
 PathLike = Union[str, Path]
 
 MODEL_CACHE_ENV = "TATERS_MODEL_CACHE"
 MODEL_CACHE_KEY = "model_cache"
+
+INSPECT_ROWS_ENV = "TATERS_INSPECT_ROWS"
+INSPECT_ROWS_KEY = "inspect_rows"
+
+
+def inspect_row_limit() -> int:
+    """
+    How many rows to read when looking a spreadsheet over. ``0`` means all.
+
+    All of them by default, because the questions the wizard builds from a
+    spreadsheet are only as true as what it read: on a real file, ten
+    columns looked constant within a group across the first two hundred rows
+    and were not across the other seven hundred, so they were offered as
+    controls that would have come out empty. Reading everything also says at
+    the moment the file is chosen whether its rows match its header, which
+    is much cheaper to learn then than after an hour of extraction.
+
+    Lowered by somebody whose files are big enough that a full pass is worth
+    skipping, in Settings. The environment variable wins, for scripts and
+    tests.
+    """
+    raw = os.environ.get(INSPECT_ROWS_ENV)
+    if raw is None:
+        raw = load_settings().get(INSPECT_ROWS_KEY)
+    if raw is None or str(raw).strip() == "":
+        return 0
+    try:
+        return max(0, int(float(str(raw).strip())))
+    except ValueError:
+        # a hand-edited settings file with "lots" in it is not a reason to
+        # refuse to start, and reading everything is the safe answer.
+        return 0
 
 
 def _home() -> Path:
