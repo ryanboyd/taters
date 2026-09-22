@@ -534,3 +534,75 @@ def test_output_goes_through_a_live_display_rather_than_across_it(tmp_path):
         log.close_run()
 
     assert "a library said something" in path.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Putting the terminal back afterwards
+# ---------------------------------------------------------------------------
+
+def test_the_next_question_measures_the_terminal_again_after_a_run():
+    """
+    A real run died at the finish screen on Windows, with every step
+    succeeded and every file written, on
+    ``NoConsoleScreenBufferError: No Windows console found``.
+
+    The chain: the log redirects file descriptor 1 into a pipe so a child
+    process's output reaches it, ``dup2`` closes whatever that descriptor
+    pointed at, and on Windows that is the console handle ``prompt_toolkit``
+    read once at start-up and cached. Printing survives, because the
+    descriptor is put back. The next *prompt* does not, because it asks the
+    closed handle how big the screen is.
+
+    So the cached measurement is dropped after every run. Asserted through
+    the session prompt_toolkit really uses rather than through a stub, since
+    a stub would not have caught the original bug either.
+    """
+    from prompt_toolkit.application.current import get_app_session
+
+    from taters.ui.prompts import QuestionaryPrompter
+
+    session = get_app_session()
+    before = session._output
+    try:
+        session._output = object()
+        QuestionaryPrompter().forget_console()
+        assert session._output is None, \
+            "prompt_toolkit is still holding the terminal it measured"
+    finally:
+        session._output = before
+
+
+def test_forgetting_the_console_never_takes_a_finished_run_down_with_it():
+    """
+    It runs after the results are on disk, so anything it raises would lose a
+    run that had already succeeded. A terminal that cannot be reset is worth
+    less than that.
+    """
+    import sys
+
+    from taters.ui.prompts import QuestionaryPrompter
+
+    saved = sys.modules.get("prompt_toolkit.application.current")
+    sys.modules["prompt_toolkit.application.current"] = None
+    try:
+        QuestionaryPrompter().forget_console()      # must not raise
+    finally:
+        if saved is None:
+            sys.modules.pop("prompt_toolkit.application.current", None)
+        else:
+            sys.modules["prompt_toolkit.application.current"] = saved
+
+
+def test_a_run_from_the_wizard_always_resets_the_terminal_before_asking(tmp_path):
+    """
+    Wired at the one place a run hands control back to the interface, so it
+    cannot be forgotten by a caller that runs a pipeline some other way.
+    """
+    import inspect
+
+    from taters.ui import wizard
+
+    source = inspect.getsource(wizard.execute_preset)
+    assert "forget_console()" in source
+    assert source.index("forget_console()") < source.index("finish_screen("), \
+        "the terminal has to be re-measured before the next question, not after"

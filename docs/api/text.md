@@ -12,6 +12,12 @@
       show_source: true
       show_root_heading: true
 
+::: taters.text.analyze_entropy
+    options:
+      members_order: alphabetical
+      show_source: true
+      show_root_heading: true
+
 ::: taters.text.analyze_lexical_richness
     options:
       members_order: alphabetical

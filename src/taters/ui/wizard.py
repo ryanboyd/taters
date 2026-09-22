@@ -4041,6 +4041,10 @@ def execute_preset(prompter: Prompter, preset: dict, *, root_dir, file_type,
         failures = []
 
     ok = bool(summarize_manifest(manifest, verbose=False))
+    # the run log redirected the terminal out from under prompt_toolkit, so
+    # the next question has to measure it again rather than ask a handle that
+    # was closed while the run was going. see `Prompter.forget_console`.
+    prompter.forget_console()
     prompter.stage("run", "Run", status="done",
                    detail="ok" if ok else "with problems")
     finish_screen(prompter, ok=ok, manifest=manifest, folder=work_dir,

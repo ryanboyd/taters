@@ -1805,6 +1805,27 @@ RECIPES: List[Recipe] = [
         },
     ),
     Recipe(
+        id="entropy",
+        feature_table=True,
+        vars={**_FEATURES_DIR_VAR},
+        gpu_use="cpu",
+        label="Entropy & information measures",
+        help="Shannon and Renyi entropy over words and characters, with "
+             "bias corrections, per speaker per file.",
+        text_help="Shannon and Renyi entropy over words and characters, "
+                  "with bias corrections, one row per text.",
+        call="potato.text.analyze_entropy",
+        target="taters.text.analyze_entropy:analyze_entropy",
+        scope="global",
+        save_as="entropy_features",
+        requires=frozenset({"unified_transcripts_csv"}),
+        **_TEXT_STEP,
+        with_={
+            **_TEXT_INPUT_WITH,
+            "out_features_csv": "{{var:features_dir}}/entropy.csv",
+        },
+    ),
+    Recipe(
         id="ngram_frequencies",
         vars={
             **_FEATURES_DIR_VAR,
@@ -3688,7 +3709,8 @@ FEATURE_CATEGORIES: Tuple[FeatureCategory, ...] = (
         "style", "Style & readability",
         "How the language is put together -- how hard it is to read, how "
         "varied the vocabulary, which parts of speech, how it hangs together.",
-        ("readability", "lexical_richness", "parts_of_speech", "cohesion")),
+        ("readability", "lexical_richness", "entropy", "parts_of_speech",
+         "cohesion")),
     FeatureCategory(
         "content", "Content categories & sentiment",
         "Score the text against categories somebody defined in advance: a "

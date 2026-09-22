@@ -69,6 +69,7 @@ class Taters:
     def analyze_readability(self, **kwargs):                    return self.text.analyze_readability(**kwargs)
     def analyze_word_count(self, **kwargs):                     return self.text.analyze_word_count(**kwargs)
     def analyze_lexical_richness(self, **kwargs):               return self.text.analyze_lexical_richness(**kwargs)
+    def analyze_entropy(self, **kwargs):                        return self.text.analyze_entropy(**kwargs)
     def analyze_sentiment_vader(self, **kwargs):                return self.text.analyze_sentiment_vader(**kwargs)
     def analyze_ngram_frequencies(self, **kwargs):              return self.text.analyze_ngram_frequencies(**kwargs)
     def analyze_parts_of_speech(self, **kwargs):                return self.text.analyze_parts_of_speech(**kwargs)
@@ -193,6 +194,10 @@ class _TextAPI:
     def analyze_lexical_richness(self, **kwargs):
         from .text.analyze_lexical_richness import analyze_lexical_richness
         return _forward(analyze_lexical_richness, kwargs)
+
+    def analyze_entropy(self, **kwargs):
+        from .text.analyze_entropy import analyze_entropy
+        return _forward(analyze_entropy, kwargs)
 
     def analyze_ngram_frequencies(self, **kwargs):
         from .text.analyze_ngram_frequencies import analyze_ngram_frequencies

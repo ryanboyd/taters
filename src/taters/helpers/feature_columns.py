@@ -212,6 +212,7 @@ def by_module(specs: Sequence[ColumnSpec]) -> Dict[str, ColumnSpec]:
 DECLARING_MODULES: Tuple[str, ...] = (
     "taters.helpers.feature_gather",
     "taters.helpers.text_gather",
+    "taters.text.analyze_entropy",
     "taters.score_model",
     "taters.text.analyze_cohesion",
     "taters.text.analyze_lexical_richness",

@@ -39,6 +39,7 @@ WRITERS = [
     ("text", "analyze_with_archetypes"),
     ("text", "analyze_readability"),
     ("text", "analyze_lexical_richness"),
+    ("text", "analyze_entropy"),
     ("text", "extract_sentence_embeddings"),
     ("text", "train_word_vectors"),
     ("text", "apply_word_vectors"),

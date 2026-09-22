@@ -281,6 +281,9 @@ class Prompter(Protocol):
     # a finished-looking screen sitting there silent, which looks like a hang.
     def working(self, text: str) -> None: ...
 
+    # "the terminal you measured has been replaced" -- see the real one.
+    def forget_console(self) -> None: ...
+
     # a running count while something is read. yields a callback the reader
     # calls with the number done so far; renderers with nowhere to draw it
     # ignore the count and just say the work is happening.
@@ -434,6 +437,34 @@ class QuestionaryPrompter:
         """
         self.note(f"  {text}", style="dim")
         self.repaint()
+
+    def forget_console(self) -> None:
+        """
+        Make the next question measure the terminal again from scratch.
+
+        Windows only in effect, and not optional there. A run writes its log
+        by redirecting file descriptor 1 into a pipe, so that output from a
+        child process reaches the log too -- and ``dup2`` closes whatever
+        that descriptor pointed at, which is the console handle
+        ``prompt_toolkit`` read once at start-up and kept ever since.
+
+        Printing still works afterwards, because the descriptor is put back.
+        The next *prompt* does not: it asks that dead handle how big the
+        screen is, gets nothing, and raises ``NoConsoleScreenBufferError``.
+        A real run died exactly there -- at the screen that says where the
+        results are, with every step finished and every file already written.
+
+        Dropping the cached handle costs one re-measure and is harmless on
+        every other platform, so it is not conditional on anything.
+        """
+        try:
+            from prompt_toolkit.application.current import get_app_session
+
+            get_app_session()._output = None
+        except Exception:
+            # a terminal we cannot reset is not a reason to lose a run whose
+            # results are already on disk by the time this is called.
+            pass
 
     @contextmanager
     def scanning(self, label: str, *, unit: str = "rows"):
@@ -805,6 +836,10 @@ class ScriptedPrompter:
         # "hold on, this may take a moment" line landed *before* the slow
         # work's results.
         self.output.append(text)
+
+    def forget_console(self) -> None:
+        """Recorded, so a test can check it happens after a run."""
+        self.output.append("<forget console>")
 
     @contextmanager
     def scanning(self, label: str, *, unit: str = "rows"):

@@ -159,6 +159,10 @@ def test_a_declared_pattern_matches_the_names_it_claims_to_describe():
         "mtld_{*}": "mtld_0_72",
         "hdd_{n}": "hdd_42",
         "vocd_{n}": "vocd_50",
+        "ent_word_block{n}_bits": "ent_word_block2_bits",
+        "ent_word_conditional{n}_bits": "ent_word_conditional3_bits",
+        "ent_char_block{n}_bits": "ent_char_block2_bits",
+        "ent_char_conditional{n}_bits": "ent_char_conditional3_bits",
     }
     for module, spec in registry().items():
         for pattern in spec.patterns:

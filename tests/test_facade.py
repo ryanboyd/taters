@@ -64,6 +64,7 @@ FACADE_METHODS = [
     ("text", "analyze_sentiment_vader"),
     ("text", "analyze_word_count"),
     ("text", "analyze_lexical_richness"),
+    ("text", "analyze_entropy"),
     ("text", "extract_sentence_embeddings"),
     ("text", "convert_subtitles"),
     ("text", "analyze_cohesion"),

@@ -19,6 +19,7 @@ MODULES = [
     "taters.stats.pca", "taters.stats.report", "taters.stats.describe",
     "taters.figures.wordclouds",
     "taters.text.analyze_readability", "taters.text.analyze_lexical_richness",
+    "taters.text.analyze_entropy",
     "taters.text.analyze_word_count", "taters.text.analyze_parts_of_speech",
     "taters.text.analyze_cohesion", "taters.text.analyze_with_dictionaries",
     "taters.text.analyze_with_archetypes", "taters.text.extract_sentence_embeddings",

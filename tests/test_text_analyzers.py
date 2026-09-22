@@ -343,7 +343,8 @@ def test_the_three_input_modes_are_resolved_in_one_place():
     # 19 with NMF topics
     # 20 with the topic-count sweep
     # 21 with pretraining an encoder from scratch
-    assert len(callers) == 21, sorted(f.name for f in callers)
+    # 22 with entropy
+    assert len(callers) == 22, sorted(f.name for f in callers)
 
 
 def test_every_readability_metric_still_exists_on_textstat():
