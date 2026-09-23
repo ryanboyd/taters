@@ -1,10 +1,13 @@
 # Statistics
 
-The stats stage: assembling the analysis table, testing group differences,
-correlating features with outcomes, and writing the plain-English report.
-Principal component analysis (with varimax rotation) lives here too, as does
-the scorer that applies one or more saved models to a new dataset, and the
-figures the reports draw (word clouds, and the charts training reports use).
+Everything on the stats side lives here: putting the analysis table together,
+testing group differences, correlating features with an outcome, fitting ridge
+and classifier models, and writing the plain-English report. Principal component
+analysis (with varimax rotation) is here too, along with the scorer that applies
+saved models to a new dataset and the figures the reports draw.
+
+For the "what is this for, and when would I want it" version instead, read
+[Running analyses](../guides/running-analyses.md).
 
 ::: taters.stats.assemble
     options:

@@ -37,8 +37,8 @@ living, it can be frustrating at times.
 So, I spent years (and years, and years) building lots of little "point, click,
 voila!" applications to do different tasks, trying to lower the barrier to
 entry for colleagues and newcomers. But, even for me, it was exhausting to
-run my data through not one, not two, but many different applications to do
-more advanced analyses. I tried o solve *that* problem with a program called
+run my data through not one, not two, but a billion different applications to do
+more advanced analyses. I tried to solve *that* problem with a program called
 [BUTTER](https://www.butter.tools) — a more comprehensive application where you 
 could build your own pipelines without writing a single line of code. 
 The idea was simple: there are a lot of methods that social scientists commonly
@@ -88,3 +88,29 @@ and nuances of different methods. There are a lot of great ideas out there, and 
 a fast-moving field right now, so it's important to plug into the wider world of
 scientific discovery if you want to truly get a sense of what you're measuring, why
 you're measuring things a certain way, and how it all fits together.
+
+## Further Inspiration
+
+I mentioned [BUTTER](https://www.butter.tools) above, but the longer story (since you asked)
+is really that BUTTER itself took heavy inspiration from the [Weka](https://www.youtube.com/@WekaMOOC)
+KnowledgeFlow interface. I picked up machine learning indirectly through [Ray Mooney](https://www.cs.utexas.edu/~mooney/)
+steering me toward [this book](https://ml.cms.waikato.ac.nz/weka/book.html), using Weka as a companion
+for everything covered in the text. The KnowledgeFlow feature was an interface that essentially
+let you "bolt together" a pipeline from individual pieces, generating a reproducible pipeline
+that could do whatever you needed from it.  Those folks are absolutely, jaw-droppingly brilliant.
+
+Years later, I was introduced to [DLATK](https://dlatk.github.io/dlatk/), which is a much more
+tailored package that does just about everything that anyone working in my area could ever want.
+Those folks are also absolutely, jaw-droppingly brilliant. If you're a hardcore NLP + social sciences
+person (or, a "language-based assessment" person, or anything in that domain), you probably
+already know all of those people's work.
+
+The truth is that, for a long time, the labs and communities doing work at the intersection of
+language and human thought, feeling, and behavior have been populated by an endless pantheon of
+of extremely kind, generous, creative, and curious people. Too many to name, to be honest. I've
+been endlessly inspired by their work, ideas, and generosity, and my modest goal is to pass
+along to others the many benefits that I've gained over the years from their shining examples.
+
+And, hey, it's free! If you get some good use out of Taters, go donate some money to a noble
+cause, or take some extra time to help someone who needs it. Put some good out into the world.
+The world needs it.
