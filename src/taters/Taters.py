@@ -65,6 +65,7 @@ class Taters:
     
     #text
     def analyze_with_dictionaries(self, **kwargs):              return self.text.analyze_with_dictionaries(**kwargs)
+    def analyze_with_norms(self, **kwargs):                     return self.text.analyze_with_norms(**kwargs)
     def analyze_with_archetypes(self, **kwargs):                return self.text.analyze_with_archetypes(**kwargs)
     def analyze_readability(self, **kwargs):                    return self.text.analyze_readability(**kwargs)
     def analyze_word_count(self, **kwargs):                     return self.text.analyze_word_count(**kwargs)
@@ -174,6 +175,10 @@ class _TextAPI:
     def analyze_with_dictionaries(self, **kwargs):
         from .text.analyze_with_dictionaries import analyze_with_dictionaries
         return _forward(analyze_with_dictionaries, kwargs)
+
+    def analyze_with_norms(self, **kwargs):
+        from .text.analyze_with_norms import analyze_with_norms
+        return _forward(analyze_with_norms, kwargs)
 
     def analyze_with_archetypes(self, **kwargs):
         from .text.analyze_with_archetypes import analyze_with_archetypes

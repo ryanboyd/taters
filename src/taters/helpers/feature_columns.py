@@ -221,6 +221,7 @@ DECLARING_MODULES: Tuple[str, ...] = (
     "taters.text.analyze_sentiment_vader",
     "taters.text.analyze_with_archetypes",
     "taters.text.analyze_with_dictionaries",
+    "taters.text.analyze_with_norms",
     "taters.text.analyze_word_count",
     "taters.text.build_doc_term_matrix",
     "taters.text.extract_sentence_embeddings",

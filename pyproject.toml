@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "taters"
-version = "1.0.1"
+version = "1.1.0"
 authors = [{ name = "Ryan L. Boyd", email = "ryan@ryanboyd.io" }]
 description = "Analyze, process, and extract from many types of input data. Highly modular/customizable."
 
@@ -28,7 +28,15 @@ dependencies = [
   # itself `requires-python >=3.13`, hence the marker. Found by CI on the 3.13
   # leg, which is the only Python here old enough to have lost it.
   "audioop-lts; python_version >= '3.13'",
-  "contentcoder",
+  # >=1.3.0 for three things the word-norms step cannot work without:
+  # decimal weights in a .dicx actually being read as weights (before
+  # that every one of them silently became 1); `keepZeroWeights`,
+  # without which a rating of 0 is discarded as "not in this category"
+  # and a third of the Lancaster norms vanish from their own means; and
+  # matched phrases actually being skipped past, without which the words
+  # inside "ice cream" get counted again on their own and a coverage
+  # share can come out above 1.
+  "contentcoder>=1.3.0",
   "archetyper",
   "nltk",
   # Document readers for the folder source: Word and PDF text extraction

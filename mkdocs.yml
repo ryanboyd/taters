@@ -65,7 +65,7 @@ nav:
   - Guides & Overviews:
       - Overview: guides/guides-overview.md
       - Analyzing Text: guides/analyzing-text.md
-      - Built-in Dictionaries & Archetypes: guides/bundled-dictionaries.md
+      - Built-in Dictionaries, Norms & Archetypes: guides/bundled-dictionaries.md
       - Analyzing Audio: guides/analyzing-audio.md
       - Running Analyses: guides/running-analyses.md
       - Statistics: guides/stats.md

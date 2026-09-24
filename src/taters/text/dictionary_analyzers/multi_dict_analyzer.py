@@ -15,6 +15,10 @@ PathLike = Union[str, Path]
 widen_csv_field_limit()
 
 
+#: What a coverage column's name ends with, in weighted-mean mode. A mean with
+#: no denominator beside it is not interpretable, so every category gets one.
+COVERAGE_SUFFIX = "_Coverage"
+
 # ---- globals: we write these once, from the FIRST dictionary only -----------
 GLOBAL_ONLY_FIELDS = {
     "WC",
@@ -34,7 +38,9 @@ def _prefix_from_path(p: PathLike) -> str:
     stem = Path(p).stem
     return re.sub(r"[^0-9A-Za-z]+", "_", stem).strip("_") or "dict"
 
-def _load_coders(dict_files: Sequence[PathLike]) -> List[Tuple[str, ContentCoder]]:
+def _load_coders(dict_files: Sequence[PathLike], *,
+                 keep_zero_weights: bool = False,
+                 ) -> List[Tuple[str, ContentCoder]]:
     """
     Load every readable dictionary; skip the broken ones out loud.
 
@@ -52,7 +58,8 @@ def _load_coders(dict_files: Sequence[PathLike]) -> List[Tuple[str, ContentCoder
         d = Path(d)
         try:
             _check_dictionary_shape(d)
-            cc = ContentCoder(dicFilename=str(d), fileEncoding="utf-8-sig")
+            cc = ContentCoder(dicFilename=str(d), fileEncoding="utf-8-sig",
+                              keepZeroWeights=keep_zero_weights)
         except ValueError as e:
             problems.append(str(e))
             continue
@@ -115,6 +122,23 @@ def _partition_indices(header: Sequence[str], *, keep_globals: bool) -> Tuple[Li
 # ---- public API ------------------------------------------------------------
 
 
+def _coverage_cells(res, cc, rounding) -> List:
+    """
+    What share of the text each category actually had a rating for.
+
+    A mean rating is only worth as much as the number of words it was taken
+    over, and that number is not knowable from the mean. Two texts can both
+    come back at 3.2 concreteness with one of them having had forty rated words
+    and the other three. So the share rides along beside every mean.
+    """
+    from contentcoder.ContentCoder import normal_round
+
+    wc = res.get("WC") or 0
+    matched = res.get("_MatchedWC") or {}
+    return [normal_round(matched.get(cat, 0) / wc, rounding) if wc else None
+            for cat in cc.dict.catNames]
+
+
 def _score_cells(text: str, first_cc, g0, p0, plans, opts) -> List:
     """
     The feature cells for one text -- globals, then per-dictionary blocks.
@@ -122,23 +146,28 @@ def _score_cells(text: str, first_cc, g0, p0, plans, opts) -> List:
     The one scoring implementation, shared by the serial path and the worker
     processes: identical output whatever the worker count, by construction.
     """
-    relative_freq, drop_punct, rounding, retain_captures, wildcard_mem = opts
-    res0 = first_cc.Analyze(
-        text, relativeFreq=relative_freq, dropPunct=drop_punct,
-        retainCaptures=retain_captures, returnTokens=False,
-        wildcardMem=wildcard_mem,
-    )
+    (relative_freq, drop_punct, rounding, retain_captures, wildcard_mem,
+     weighted_mean) = opts
+
+    def analyze(cc):
+        return cc.Analyze(
+            text, relativeFreq=relative_freq, dropPunct=drop_punct,
+            retainCaptures=retain_captures, returnTokens=False,
+            wildcardMem=wildcard_mem, weightedMean=weighted_mean,
+        )
+
+    res0 = analyze(first_cc)
     v0 = list(first_cc.GetResultsArray(res0, rounding=rounding))
     cells: List = [v0[i] for i in g0]
     cells.extend(v0[i] for i in p0)
+    if weighted_mean:
+        cells.extend(_coverage_cells(res0, first_cc, rounding))
     for _pref, per_idxs, _h, cc in plans:
-        res = cc.Analyze(
-            text, relativeFreq=relative_freq, dropPunct=drop_punct,
-            retainCaptures=retain_captures, returnTokens=False,
-            wildcardMem=wildcard_mem,
-        )
+        res = analyze(cc)
         v = list(cc.GetResultsArray(res, rounding=rounding))
         cells.extend(v[i] for i in per_idxs)
+        if weighted_mean:
+            cells.extend(_coverage_cells(res, cc, rounding))
     return cells
 
 
@@ -173,7 +202,9 @@ def _init_score_worker(dict_files: List[str], opts: tuple) -> None:
 
     with warnings.catch_warnings(), contextlib.redirect_stdout(io.StringIO()):
         warnings.simplefilter("ignore")
-        coders = _load_coders(dict_files)
+        # opts[-1] is weighted_mean, and a norm set is exactly the case where
+        # a rating of zero is a rating rather than an absence
+        coders = _load_coders(dict_files, keep_zero_weights=bool(opts[-1]))
     _first_pref, first_cc, _h0, g0, p0, plans = _plans_for(coders)
     _WORKER_STATE.update(first_cc=first_cc, g0=g0, p0=p0, plans=plans,
                          opts=opts)
@@ -196,6 +227,8 @@ def analyze_texts_to_csv(
     rounding: int = 4,
     retain_captures: bool = False,
     wildcard_mem: bool = True,
+    weighted_mean: bool = False,
+    label: str = "dictionaries",
     id_col_name: str = "text_id",
     pass_through_cols: Sequence[str] = (),
     newline: str = "",
@@ -248,7 +281,7 @@ def analyze_texts_to_csv(
     out_csv.parent.mkdir(parents=True, exist_ok=True)
 
     if verbose:
-        coders = _load_coders(dict_files)
+        coders = _load_coders(dict_files, keep_zero_weights=weighted_mean)
     else:
         # under a live display, contentcoder's "Dictionary loaded." lines would
         # land right in the middle of the bars, so we swallow stdout here. its
@@ -257,7 +290,7 @@ def analyze_texts_to_csv(
         import io
 
         with contextlib.redirect_stdout(io.StringIO()):
-            coders = _load_coders(dict_files)
+            coders = _load_coders(dict_files, keep_zero_weights=weighted_mean)
     if not coders:
         raise ValueError("No dictionaries provided.")
 
@@ -269,11 +302,18 @@ def analyze_texts_to_csv(
     header.extend(list(pass_through_cols))  # up front, in the order we were asked
     header.extend([h0[i] for i in g0])
     header.extend([f"{first_pref}__{h0[i]}" for i in p0])
-    for pref, _per_idxs, h, _cc in plans:
+    if weighted_mean:
+        header.extend([f"{first_pref}__{c}{COVERAGE_SUFFIX}"
+                       for c in first_cc.dict.catNames])
+    for pref, _per_idxs, h, cc in plans:
         _, p = _partition_indices(h, keep_globals=False)
         header.extend([f"{pref}__{h[i]}" for i in p])
+        if weighted_mean:
+            header.extend([f"{pref}__{c}{COVERAGE_SUFFIX}"
+                           for c in cc.dict.catNames])
 
-    opts = (relative_freq, drop_punct, rounding, retain_captures, wildcard_mem)
+    opts = (relative_freq, drop_punct, rounding, retain_captures, wildcard_mem,
+            weighted_mean)
 
     # the metas stay here in the parent; only (text_id, text) crosses over to
     # a worker. the id rides along so that the display can name the document
@@ -322,7 +362,7 @@ def analyze_texts_to_csv(
                 reporter.consumed()
             if verbose:
                 print(
-                    f"Analyzing with dictionaries: {text_id}\n\t" + "\n\t".join(dict_names),
+                    f"Analyzing with {label}: {text_id}\n\t" + "\n\t".join(dict_names),
                     flush=True,
                 )
             row_out: List[Union[str, float]] = [text_id]

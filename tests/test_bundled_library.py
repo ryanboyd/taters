@@ -135,9 +135,13 @@ def _headings() -> list[str]:
             if line.startswith("### ")]
 
 
+#: Every shelf whose files are somebody else's research and therefore have to
+#: be cited. Adding a kind here is what keeps its citations honest.
+CITED_KINDS = ("dictionaries", "norms", "archetypes")
+
+
 def _stems() -> set[str]:
-    return {f.stem for kind in ("dictionaries", "archetypes")
-            for f in _shipped(kind)}
+    return {f.stem for kind in CITED_KINDS for f in _shipped(kind)}
 
 
 def _section_for(stem: str, headings: list[str]) -> list[str]:
@@ -164,7 +168,7 @@ def test_every_shipped_asset_is_cited_in_the_docs():
     part of shipping the file, not an optional follow-up.
     """
     headings = _headings()
-    for kind_id in ("dictionaries", "archetypes"):
+    for kind_id in CITED_KINDS:
         for f in _shipped(kind_id):
             found = _section_for(f.stem, headings)
             assert len(found) == 1, \
@@ -184,20 +188,44 @@ def test_each_cited_dictionary_still_ships():
         f"cited but not shipped: {sorted(set(headings) - claimed)}"
 
 
-def test_archetypes_are_managed_through_the_dictionaries_row_not_a_second_one():
+@pytest.mark.skipif(not CITATIONS.exists(),
+                    reason="docs are not present in this checkout")
+def test_no_asset_is_cited_twice():
     """
-    Both shelves are reachable from Settings, and they share one row: the
-    dictionaries entry asks which library first. A second row for archetypes
-    would say the same thing twice and grow a menu that has to stay short --
-    which is what happened, briefly, when these first shipped.
+    A file that moves between shelves leaves its old section behind, and
+    neither citation test notices: `_section_for` short-circuits on an exact
+    match, so it returns the first heading and never sees the second. That is
+    how Stereotype Content ended up cited once as a dictionary and once as a
+    norm table, with the stale entry describing scoring it no longer gets.
+    """
+    headings = _headings()
+    seen, dupes = set(), []
+    for h in headings:
+        (dupes.append(h) if h in seen else seen.add(h))
+    assert not dupes, f"cited more than once: {sorted(set(dupes))}"
+
+
+def test_the_word_shelves_share_one_settings_row_rather_than_one_each():
+    """
+    Every shelf of word lists is reachable from Settings, and they share one
+    row: the dictionaries entry asks which library first. A row per shelf
+    would say the same thing three times and grow a menu that has to stay
+    short -- which is what happened, briefly, when the archetypes first
+    shipped.
+
+    Pinned as a set rather than a tuple because adding a shelf behind the one
+    row is exactly what this is meant to allow; adding a *row* is not.
     """
     from taters.ui.tasks.library import _DICTIONARY_KINDS
     from taters.ui.tasks.manage_data import entries
 
-    assert _DICTIONARY_KINDS == ("dictionaries", "archetypes")
+    assert set(_DICTIONARY_KINDS) == {"dictionaries", "norms", "archetypes"}
     rows = [row.id for row in entries()]
     assert "library" in rows
-    assert "archetypes" not in rows, "archetypes already have a door; this is a second one"
+    for shelf in _DICTIONARY_KINDS:
+        if shelf == "dictionaries":
+            continue
+        assert shelf not in rows, f"{shelf} already has a door; this is a second one"
 
 
 # ---------------------------------------------------------------------------

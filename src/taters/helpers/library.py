@@ -110,6 +110,49 @@ def _contentcoder_problem(path: Path) -> str:
     return ""
 
 
+#: The row BUTTER's weighted-dictionary plugin put at the top of every norm
+#: file: a per-category constant it added to the score. Taters does not do
+#: that -- it reports the mean rating and nothing else -- so a file still
+#: carrying one was built for different arithmetic than the one that will be
+#: applied to it.
+INTERCEPT_TERM = "_intercept"
+
+
+def _norms_problem(path: Path) -> str:
+    """
+    A norm set has to load like a dictionary *and* carry no intercept row.
+
+    The loader check is the same one content-coding dictionaries get, because
+    the file format is the same. The extra rule is about arithmetic: an
+    ``_intercept`` row means the weights were fitted as part of a linear model
+    with a constant term, and scoring it as a plain mean silently drops that
+    term. Better to refuse the file than to publish the wrong number.
+    """
+    problem = _contentcoder_problem(path)
+    if problem:
+        return problem
+
+    import csv as _csv
+
+    try:
+        with path.open("r", newline="", encoding="utf-8-sig") as fh:
+            for row in _csv.reader(fh):
+                if row and row[0].strip().lower() == INTERCEPT_TERM:
+                    return (
+                        f"'{path.name}' still has an '{INTERCEPT_TERM}' row. "
+                        "That is a constant from a fitted linear model, and "
+                        "norm scoring reports the mean rating instead, so the "
+                        "constant would be quietly dropped. Delete the row if "
+                        "the weights stand on their own, or keep the file as a "
+                        "saved model rather than a norm set."
+                    )
+    except Exception:
+        # unreadable for some other reason is the loader check's business,
+        # and it already passed, so we do not invent a second complaint here
+        return ""
+    return ""
+
+
 #: The module whose `_load_model` vets each kind of model at import time --
 #: the only authority on what can score. A test pins this to
 #: `model_spec.MODEL_TYPES`, because an unregistered id used to pass the
@@ -238,6 +281,17 @@ KINDS: Dict[str, LibraryKind] = {
         help="LIWC-format word-counting dictionaries: .dic, .dicx, or .csv.",
         suffixes=(".dic", ".dicx", ".csv"),
         deep_check=_contentcoder_problem,
+    ),
+    "norms": LibraryKind(
+        id="norms",
+        label="Word norms",
+        help="Word rating tables -- concreteness, valence, age of acquisition "
+             "and the like (.csv, one term per row with a rating per column). "
+             "Scored as the average rating of the words that had one, which is "
+             "not the same thing a content-coding dictionary does, which is "
+             "why they live apart.",
+        suffixes=(".csv",),
+        deep_check=_norms_problem,
     ),
     "archetypes": LibraryKind(
         id="archetypes",

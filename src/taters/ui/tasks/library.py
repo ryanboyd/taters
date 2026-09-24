@@ -19,7 +19,12 @@ __all__ = ["TASK", "STOPLISTS_TASK", "MODELS_TASK", "ENCODERS_TASK"]
 #: The kinds the dictionaries entry offers. Stop lists are deliberately not
 #: here -- they have their own Settings row, so someone hunting for "where do
 #: my stopwords live" is not sent through a dictionary-shaped door.
-_DICTIONARY_KINDS = ("dictionaries", "archetypes")
+#:
+#: Word norms *are* here. They are a third shelf rather than a flavor of
+#: dictionary, because the two are scored differently and the file formats are
+#: indistinguishable -- putting them in the same drawer is how somebody ends up
+#: with a concreteness table scored as a word count.
+_DICTIONARY_KINDS = ("dictionaries", "norms", "archetypes")
 
 
 def _run_dictionaries(ctx: TaskContext) -> None:

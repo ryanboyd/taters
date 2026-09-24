@@ -59,6 +59,7 @@ FACADE_METHODS = [
     ("audio", "diarize_with_thirdparty"),
     ("audio", "analyze_vocal_acoustics"),
     ("text", "analyze_with_dictionaries"),
+    ("text", "analyze_with_norms"),
     ("text", "analyze_with_archetypes"),
     ("text", "analyze_readability"),
     ("text", "analyze_sentiment_vader"),

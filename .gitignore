@@ -198,6 +198,7 @@ reference/
 planning/
 # no direct provision of dicx files, primarily for tidiness
 src/taters/data/library/dictionaries/*.dicx
+src/taters/data/library/norms/*.csv
 
 # Output of trying the wizard from the repo root (the pipeline folder it
 # writes, and the runner manifest); neither is source.

@@ -564,6 +564,56 @@ def test_the_builtin_stoplists_ship_with_the_package(metadata):
     assert len(names) >= 24
 
 
+def test_the_builtin_norms_ship_with_the_package(metadata):
+    """
+    The norm tables are gitignored, the same way the dictionaries are, so a
+    fresh clone has an empty folder and nothing complains until somebody
+    installs the wheel and finds no norms in it. This is the check that turns
+    that into a build failure instead.
+    """
+    patterns = metadata["tool"]["setuptools"]["package-data"]["taters"]
+    assert any(p.startswith("data/library") for p in patterns), patterns
+
+    shipped = PROJECT_ROOT / "src" / "taters" / "data" / "library" / "norms"
+    names = {f.stem for f in shipped.glob("*.csv")}
+    assert {"Concreteness (Brysbaert)", "Affective Norms (Warriner)",
+            "Lancaster Sensorimotor"} <= names, sorted(names)
+    assert len(names) >= 14
+
+
+def test_no_shipped_norm_table_carries_an_intercept_row(metadata):
+    """
+    An `_intercept` row means the weights were fitted with a constant term,
+    and norm scoring reports a plain mean, so the constant would be silently
+    dropped. The converter strips them; this is what keeps them stripped.
+    """
+    import csv
+
+    from taters.helpers.library import INTERCEPT_TERM
+
+    shipped = PROJECT_ROOT / "src" / "taters" / "data" / "library" / "norms"
+    offenders = []
+    for f in sorted(shipped.glob("*.csv")):
+        with f.open("r", newline="", encoding="utf-8-sig") as fh:
+            for row in csv.reader(fh):
+                if row and row[0].strip().lower() == INTERCEPT_TERM:
+                    offenders.append(f.name)
+                    break
+    assert not offenders, offenders
+
+
+def test_stereotype_content_is_a_norm_table_not_a_dictionary(metadata):
+    """
+    Its cells are ratings, so scoring it as a word-counting dictionary gives a
+    rate where a mean belongs. A stale copy left in the dictionaries folder
+    would be scored the wrong way without anything looking wrong, which is the
+    exact failure the two separate libraries exist to prevent.
+    """
+    library = PROJECT_ROOT / "src" / "taters" / "data" / "library"
+    assert not (library / "dictionaries" / "Stereotype Content.dicx").exists()
+    assert (library / "norms" / "Stereotype Content.csv").exists()
+
+
 def test_the_wordcloud_font_ships_with_the_package(metadata):
     """
     The word clouds are drawn in one bundled font. An installed wheel without

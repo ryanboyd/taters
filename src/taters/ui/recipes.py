@@ -1666,6 +1666,34 @@ RECIPES: List[Recipe] = [
         },
     ),
     Recipe(
+        id="norms",
+        feature_table=True,
+        library={"norm_paths": "norms"},
+        gpu_use="cpu",
+        label="Word norms (concreteness, valence, etc.)",
+        help="Average word ratings per text, from rating tables like "
+             "concreteness or valence. Each rating also gets a column saying "
+             "how much of the text was rated.",
+        call="potato.text.analyze_with_norms",
+        target="taters.text.analyze_with_norms:analyze_with_norms",
+        scope="global",
+        save_as="norm_features",
+        requires=frozenset({"unified_transcripts_csv"}),
+        vars={
+            **_FEATURES_DIR_VAR,
+            "norms_path": {
+                "default": "norms",
+                "desc": "Folder of word-norm rating tables (.csv).",
+            },
+        },
+        **_TEXT_STEP,
+        with_={
+            **_TEXT_INPUT_WITH,
+            "out_features_csv": "{{var:features_dir}}/norms.csv",
+            "norm_paths": ["{{var:norms_path}}"],
+        },
+    ),
+    Recipe(
         id="cohesion",
         feature_table=True,
         library={"connective_lists": "connectives"},
@@ -3714,8 +3742,9 @@ FEATURE_CATEGORIES: Tuple[FeatureCategory, ...] = (
     FeatureCategory(
         "content", "Content categories & sentiment",
         "Score the text against categories somebody defined in advance: a "
-        "dictionary, a sentiment lexicon, a set of archetypes.",
-        ("dictionaries", "sentiment_vader", "archetypes")),
+        "dictionary, a sentiment lexicon, a set of archetypes, a table of "
+        "word ratings.",
+        ("dictionaries", "norms", "sentiment_vader", "archetypes")),
     FeatureCategory(
         "topics", "Topics & themes",
         "Let the corpus tell you what it is about, by finding the words that "

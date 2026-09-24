@@ -25,7 +25,8 @@ filter -- a row whose word count is unknown does not sneak past
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, List, Literal, Mapping, Optional, Sequence, Union
+from typing import (Callable, Iterable, List, Literal, Mapping, Optional,
+                    Sequence, Union)
 
 from ..helpers import row_filter as _row_filter
 from ..helpers.atomic import atomic_write
@@ -307,7 +308,7 @@ def assemble_analysis_table(
             manifest["filter_only"].append(stem)
         elif bookkeeping == "aside":
             declared = set(_declared_bookkeeping(path)) | named
-            found = [c for c in kept if c in declared]
+            found = [c for c in kept if _is_bookkeeping(c, declared)]
             if found:
                 aside[stem] = found
                 manifest["bookkeeping"][stem] = found
@@ -475,6 +476,28 @@ def assemble_analysis_table(
         print(f"[assemble] {manifest['rows_final']:,} rows × "
               f"{len(table.columns):,} columns -> {out_path}")
     return out_path
+
+
+def _is_bookkeeping(column: str, declared: Iterable[str]) -> bool:
+    """
+    Is this column one the analyzer set aside?
+
+    Exact names cover almost everything, but some analyzers cannot know their
+    own column names in advance: the word-norms step writes one coverage
+    column per rating in whatever file the user picked, so it declares the
+    shape (`*_Coverage`) rather than the names. A declaration containing a
+    glob character is matched as one; everything else is compared literally,
+    so a column with a `*` in its name cannot be caught out by accident.
+    """
+    from fnmatch import fnmatchcase
+
+    for name in declared:
+        if any(ch in name for ch in "*?["):
+            if fnmatchcase(column, name):
+                return True
+        elif column == name:
+            return True
+    return False
 
 
 def _declared_bookkeeping(path: Path) -> List[str]:

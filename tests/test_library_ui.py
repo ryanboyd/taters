@@ -810,13 +810,18 @@ def test_stoplists_import_and_export_through_the_same_manager(tmp_path):
 
 
 def test_the_dictionaries_entry_offers_only_dictionary_kinds(tmp_path):
-    """Stop lists have their own Settings row now, so the dictionaries
-    chooser must not offer them -- one door per thing."""
+    """Stop lists, models and encoders have their own Settings rows, so the
+    dictionaries chooser must not offer them -- one door per thing.
+
+    Checked against the shelf list rather than a frozen set: adding a shelf of
+    word lists behind this one door is allowed, and the rule being guarded is
+    that the shelves with their own door stay out."""
     p = ScriptedPrompter([":back"])
     library_task.TASK.run(TaskContext(prompter=p, cwd=tmp_path))
 
     kinds = {c.value for c in p.offered_choices("Which library?")}
-    assert kinds == {"dictionaries", "archetypes", ":back"}
+    assert kinds == set(library_task._DICTIONARY_KINDS) | {":back"}
+    assert not kinds & {"stoplists", "models", "encoders"}
 
 
 def test_the_stoplists_entry_opens_the_manager_directly(tmp_path):

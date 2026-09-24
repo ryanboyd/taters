@@ -63,6 +63,7 @@ Quite a lot. Everything you've ever wanted? Well, probably not. Maybe? It depend
 **Content and meaning**
 
 * **Dictionary counts** — LIWC-style content coding with any `.dic`/`.dicx`/`.csv` dictionary
+* **Word norms** — average concreteness, valence, age of acquisition, sensorimotor strength and friends, with coverage beside each
 * **Sentiment** — VADER
 * **Archetypes** — theory-driven similarity to curated seed phrases, in embedding space
 * **Topic models** — the Meaning Extraction Method (PCA + varimax), LDA, and NMF, each with automatic topic-count selection and word clouds
