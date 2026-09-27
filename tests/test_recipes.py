@@ -701,6 +701,7 @@ def test_the_gpu_steps_are_the_ones_we_think_they_are():
         "archetypes",            # ArchetypeQuantifier loads a sentence-transformer
         "sentence_embeddings",   # loads a sentence-transformer
         "transformer_embeddings",  # loads an encoder
+        "video_embeddings",        # loads a vision encoder per worker
         "adapt_encoder",           # trains one
         "pretrain_encoder",        # trains one from nothing
         "finetune_text_predictor", # trains one with heads

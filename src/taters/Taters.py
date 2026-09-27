@@ -48,6 +48,7 @@ class Taters:
     def __init__(self):
         self.audio = _AudioAPI()
         self.text = _TextAPI()
+        self.video = _VideoAPI()
         self.helpers = _HelpersAPI()
         self.stats = _StatsAPI()
         self.figures = _FiguresAPI()
@@ -66,6 +67,11 @@ class Taters:
     #text
     def analyze_with_dictionaries(self, **kwargs):              return self.text.analyze_with_dictionaries(**kwargs)
     def analyze_with_norms(self, **kwargs):                     return self.text.analyze_with_norms(**kwargs)
+
+    #video
+    def analyze_visual_dynamics(self, **kwargs):                return self.video.analyze_visual_dynamics(**kwargs)
+    def analyze_faces(self, **kwargs):                          return self.video.analyze_faces(**kwargs)
+    def extract_video_embeddings(self, **kwargs):               return self.video.extract_video_embeddings(**kwargs)
     def analyze_with_archetypes(self, **kwargs):                return self.text.analyze_with_archetypes(**kwargs)
     def analyze_readability(self, **kwargs):                    return self.text.analyze_readability(**kwargs)
     def analyze_word_count(self, **kwargs):                     return self.text.analyze_word_count(**kwargs)
@@ -299,6 +305,20 @@ class _TextAPI:
     def convert_subtitles(self, **kwargs):
         from .text.subtitle_parser import convert_subtitles
         return _forward(convert_subtitles, kwargs)
+
+
+class _VideoAPI:
+    def analyze_visual_dynamics(self, **kwargs):
+        from .video.analyze_visual_dynamics import analyze_visual_dynamics
+        return _forward(analyze_visual_dynamics, kwargs)
+
+    def analyze_faces(self, **kwargs):
+        from .video.analyze_faces import analyze_faces
+        return _forward(analyze_faces, kwargs)
+
+    def extract_video_embeddings(self, **kwargs):
+        from .video.extract_video_embeddings import extract_video_embeddings
+        return _forward(extract_video_embeddings, kwargs)
 
 
 class _StatsAPI:

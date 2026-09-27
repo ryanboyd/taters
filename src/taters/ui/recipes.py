@@ -53,6 +53,9 @@ CAPABILITIES: Dict[str, str] = {
     "speaker_wavs": "one WAV per speaker",
     "unified_transcripts_csv": "all transcripts merged into one table",
     "acoustics_csv": "per-file acoustic measures",
+    "visual_dynamics_csv": "per-file shot structure and pacing measures",
+    "faces_csv": "per-file face, expression and identity measures",
+    "video_embeddings_csv": "per-file video embedding vectors",
     "whisper_embeddings_csv": "per-file Whisper embeddings",
     "sentence_embeddings_csv": "row-level sentence embeddings",
     "ngram_freq_csv": "a corpus n-gram frequency list",
@@ -500,6 +503,57 @@ _FEATURES_DIR_VAR = {
         "default": "features",
         "desc": "Where feature CSVs are written.",
     }
+}
+
+#: The cut threshold is the only knob on the visual step that changes an answer
+#: rather than a runtime, so it is the only one promoted to a pipeline variable.
+#: The face step's two identity knobs. `n_faces` is the reliable one and should
+#: be preferred whenever the number of people is actually known; the threshold
+#: is the fallback for when it is not.
+_VEMB_VARS = {
+    "video_encoder": {
+        "default": "openai/clip-vit-base-patch32",
+        "desc": "Any Hugging Face vision encoder. The default is small, fast "
+                "on CPU, and the one most other work uses.",
+    },
+    "video_embed_fps": {
+        "default": 0.5,
+        "desc": "Frames sampled per second. One every two seconds is plenty "
+                "for what a video looks like overall.",
+    },
+}
+
+_FACE_VARS = {
+    "face_fps": {
+        "default": 1.0,
+        "desc": "Frames sampled per second. One a second is ample for who is "
+                "on screen; raise it for fast expression changes.",
+    },
+    "face_level": {
+        "default": "video",
+        "desc": "One row per video, per person ('face'), or 'both'.",
+    },
+    "n_faces": {
+        "default": None,
+        "desc": "How many people are in the video, if you know. More reliable "
+                "than a threshold, and refused if it is fewer than the number "
+                "actually visible together in one frame.",
+    },
+    "identity_threshold": {
+        "default": 0.45,
+        "desc": "Used only when you do not give a face count: how different "
+                "two faces must look to be different people. Lower splits one "
+                "person into several; higher merges two into one.",
+    },
+}
+
+_VISUAL_VARS = {
+    "cut_threshold": {
+        "default": 10.0,
+        "desc": "Scene-change score (0-100) above which a frame counts as a cut. "
+                "Raise it if soft transitions are counted as cuts; lower it if "
+                "real cuts are missed.",
+    },
 }
 #: One switch for every figure step, and one size. On by default: a word
 #: cloud is the quickest read of a result there is, and the steps that draw
@@ -1549,6 +1603,159 @@ RECIPES: List[Recipe] = [
     ),
 
     # -------------------------------------------------------------- gathering
+    Recipe(
+        id="visual_dynamics",
+        gpu_use="cpu",
+        label="Shot structure & pacing",
+        help="How the video is cut: shot lengths, cut rate, how much the "
+             "picture moves, black and frozen stretches.",
+        call="potato.video.analyze_visual_dynamics",
+        target="taters.video.analyze_visual_dynamics:analyze_visual_dynamics",
+        scope="item",
+        save_as="visual_dynamics",
+        produces=frozenset({"visual_dynamics_csv"}),
+        auto_with=("gather_visual_dynamics",),
+        needs_ffmpeg=True,
+        vars={**_FEATURES_DIR_VAR, **_VISUAL_VARS},
+        with_={
+            "video_path": "{{input}}",
+            "out_dir": "{{var:features_dir}}/visual_dynamics",
+            "cut_threshold": "{{var:cut_threshold}}",
+            "overwrite_existing": "{{var:overwrite_existing}}",
+        },
+    ),
+    Recipe(
+        id="faces",
+        gpu_use="cpu",
+        label="Faces (who is on screen, and their expression)",
+        help="Find faces, score expression, and work out who is who. No FACS "
+             "action units -- see the guide for why.",
+        call="potato.video.analyze_faces",
+        target="taters.video.analyze_faces:analyze_faces",
+        scope="item",
+        save_as="faces",
+        produces=frozenset({"faces_csv"}),
+        auto_with=("gather_faces",),
+        needs_ffmpeg=True,
+        vars={**_FEATURES_DIR_VAR, **_FACE_VARS},
+        with_={
+            "video_path": "{{input}}",
+            "out_dir": "{{var:features_dir}}/faces",
+            "fps": "{{var:face_fps}}",
+            "level": "{{var:face_level}}",
+            "n_faces": "{{var:n_faces}}",
+            "identity_threshold": "{{var:identity_threshold}}",
+            "overwrite_existing": "{{var:overwrite_existing}}",
+        },
+    ),
+    Recipe(
+        id="video_embeddings",
+        # each worker loads its own vision encoder, the way the sentence and
+        # transformer embedding steps do
+        gpu_use="gpu_model_each",
+        needs_torch=True,
+        label="Video embeddings (what it looks like)",
+        help="Turn each video into a vector, the way sentence embeddings do "
+             "for text. Good for similarity and prediction, not explanation.",
+        call="potato.video.extract_video_embeddings",
+        target="taters.video.extract_video_embeddings:extract_video_embeddings",
+        scope="item",
+        save_as="video_embeddings",
+        produces=frozenset({"video_embeddings_csv"}),
+        auto_with=("gather_video_embeddings",),
+        needs_ffmpeg=True,
+        vars={**_FEATURES_DIR_VAR, **_VEMB_VARS},
+        with_={
+            "video_path": "{{input}}",
+            "out_dir": "{{var:features_dir}}/video_embeddings",
+            "model_name": "{{var:video_encoder}}",
+            "fps": "{{var:video_embed_fps}}",
+            "device": "{{var:device}}",
+            "overwrite_existing": "{{var:overwrite_existing}}",
+        },
+    ),
+    Recipe(
+        id="gather_video_embeddings",
+        feature_table=True,
+        gpu_use="cpu",
+        hidden=_MERGE_SHAPE,
+        label="Merge video embeddings",
+        help="Collect the per-file video vectors into one table.",
+        call="potato.helpers.feature_gather",
+        target="taters.helpers.feature_gather:feature_gather",
+        scope="global",
+        save_as="video_embeddings_all",
+        requires=frozenset({"video_embeddings_csv"}),
+        user_facing=False,
+        vars={**_FEATURES_DIR_VAR},
+        with_={
+            "root_dir": "{{var:features_dir}}/video_embeddings",
+            "pattern": "*.csv",
+            "recursive": False,
+            "aggregate": False,
+            "add_source_path": True,
+            "exclude_cols": ["source_path", "source", "vemb_frames"],
+            "out_csv": "{{var:features_dir}}/video_embeddings_summary.csv",
+        },
+    ),
+    Recipe(
+        id="gather_faces",
+        feature_table=True,
+        gpu_use="cpu",
+        hidden=_MERGE_SHAPE,
+        label="Merge face measures",
+        help="Collect the per-file face measures into one table.",
+        call="potato.helpers.feature_gather",
+        target="taters.helpers.feature_gather:feature_gather",
+        scope="global",
+        save_as="faces_all",
+        requires=frozenset({"faces_csv"}),
+        user_facing=False,
+        vars={**_FEATURES_DIR_VAR},
+        with_={
+            "root_dir": "{{var:features_dir}}/faces",
+            "pattern": "*.csv",
+            "recursive": False,
+            "aggregate": False,
+            "add_source_path": True,
+            # how much was seen, not what was seen
+            "exclude_cols": ["source_path", "source", "face_frames_sampled",
+                             "face_frames_with_face", "face_detections",
+                             "face_per_frame_mean", "face_identities",
+                             "face_track_count", "face_frame_count",
+                             "face_quality_mean", "face_margin",
+                             "face_coverage"],
+            "out_csv": "{{var:features_dir}}/faces_summary.csv",
+        },
+    ),
+    Recipe(
+        id="gather_visual_dynamics",
+        feature_table=True,
+        gpu_use="cpu",
+        hidden=_MERGE_SHAPE,
+        label="Merge shot structure",
+        help="Collect the per-file visual measures into one table.",
+        call="potato.helpers.feature_gather",
+        target="taters.helpers.feature_gather:feature_gather",
+        scope="global",
+        save_as="visual_dynamics_all",
+        requires=frozenset({"visual_dynamics_csv"}),
+        user_facing=False,
+        vars={**_FEATURES_DIR_VAR},
+        with_={
+            "root_dir": "{{var:features_dir}}/visual_dynamics",
+            "pattern": "*.csv",
+            "recursive": False,
+            "aggregate": False,
+            "add_source_path": True,
+            # the file's own identity, and the facts about how it was filmed.
+            # width and fps describe the camera, not the content, so letting
+            # them into a model would fit the collection procedure.
+            "exclude_cols": ["source_path", "source", "vid_fps", "vid_width",
+                             "vid_height", "vid_n_frames", "vid_frames_scored"],
+            "out_csv": "{{var:features_dir}}/visual_dynamics_summary.csv",
+        },
+    ),
     Recipe(
         id="gather_acoustics",
         feature_table=True,
@@ -3733,6 +3940,10 @@ FEATURE_CATEGORIES: Tuple[FeatureCategory, ...] = (
         "voice", "Voice & audio measures",
         "Measures of how it sounded rather than what was said.",
         ("acoustics", "whisper_embeddings")),
+    FeatureCategory(
+        "picture", "Picture & motion",
+        "Measures of what was on screen rather than what was said.",
+        ("visual_dynamics", "faces", "video_embeddings")),
     FeatureCategory(
         "style", "Style & readability",
         "How the language is put together -- how hard it is to read, how "

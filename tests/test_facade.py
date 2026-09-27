@@ -110,6 +110,9 @@ FACADE_METHODS = [
     ("helpers", "find_files"),
     ("helpers", "feature_gather"),
     ("helpers", "average_feature_table"),
+    ("video", "analyze_visual_dynamics"),
+    ("video", "analyze_faces"),
+    ("video", "extract_video_embeddings"),
 ]
 
 
@@ -124,7 +127,8 @@ def test_the_contract_list_covers_every_public_facade_method():
 
     t = Taters()
     listed = set(FACADE_METHODS)
-    actual = {(ns, name) for ns in ("audio", "text", "stats", "helpers", "figures")
+    actual = {(ns, name)
+              for ns in ("audio", "text", "video", "stats", "helpers", "figures")
               for name, _m in inspect.getmembers(getattr(t, ns), inspect.ismethod)
               if not name.startswith("_")}
     assert actual - listed == set(), f"not on the contract list: {sorted(actual - listed)}"
