@@ -255,8 +255,11 @@ separate question about which controls are categories.
 **The columns you pick are checked before anything runs.** A statistics run
 fails in a handful of predictable ways, and every one of them is visible in
 the spreadsheet on the first screen — so the app reads the whole column when
-you choose it, not the two hundred rows it offered columns from, and says
-so on the spot:
+you choose it and says so on the spot. (The scan when you pick the file
+already read every row once, but it keeps a small record per column rather
+than the rows themselves, so anything that needs whole rows again — is this
+id unique, how many groups does this column make — reads the file again,
+with a running count while it does.)
 
 - An id column whose values repeat does not identify rows, and the run
   would stop when the features were joined. You are asked for the id again,

@@ -184,7 +184,9 @@ class Harness:
         return self.flow("B grouped rows + correlations", [
             "csv", *self.browse(self.study), ["text"], False,
             ["readability"], "group", ["condition"], False,
-            ["stats_correlations"], False, ["openness"], False, "fdr_bh", False,
+            # no averaging question here: the rows are already joined on one
+            # column, and one column has no coarser cut to average up to
+            ["stats_correlations"], ["openness"], False, "fdr_bh", False,
             ":done", "Flow B", "save",
         ])
 

@@ -246,6 +246,34 @@ def test_a_grouped_run_grays_out_columns_that_vary_inside_a_group(
         assert "differs within" in rows[column].disabled
 
 
+def test_every_pass_over_the_file_after_the_scan_is_announced(
+        tmp_path, study_csv):
+    """
+    The wizard used to hold every row of the file to answer its grouping
+    questions, and before that it walked them per column per screen in
+    silence -- twenty-odd seconds on a 500k-row file with nothing on screen.
+    It holds nothing now, and the few questions that need whole rows (is
+    this id unique, how many groups, does this column vary within them)
+    read the file again -- with a running count, every time, so a person
+    waiting knows what for.
+    """
+    p = ScriptedPrompter([
+        "csv", *browse_to(study_csv), ["text"], True, ["pid"],
+        ["readability"], "group", ["condition"], False,
+        ["stats_group_differences"],
+        "condition",
+        "fdr_bh", False, ":done", "Study", "save"
+    ])
+    wiz.run_wizard(p, cwd=tmp_path)
+    announced = [o for o in p.output if isinstance(o, str)]
+    assert any(o.startswith("Reading study.csv") for o in announced)
+    assert "Checking that the id is unique" in announced
+    assert "Counting rows per condition" in announced
+    assert getattr(p, "scanned", []), "and the counts were reported as it went"
+    assert announced.count("Counting rows per condition") == 1, \
+        "one grouping, one pass -- the screens share the answer"
+
+
 def test_a_column_constant_within_each_group_can_still_be_compared(tmp_path):
     """
     The two senses of "group" are independent, and conflating them made a
@@ -2309,14 +2337,16 @@ def test_the_count_survives_pressing_an_arrow_on_the_row():
     not know about the counts would quietly wipe one off the row somebody
     was pointing at.
     """
+    from taters.ui.columns import Inspection
     from taters.ui.wizard import _cycler, _kind_rows
 
     rows = [{"g": "a", "n": str(i % 4)} for i in range(20)]
+    insp = Inspection(columns=["g", "n"], rows=rows)
     kinds = {"g": "labels", "n": "numbers"}
     counts = {"g": 1, "n": 4}
     before = {c.value: c.annotation
               for c in _kind_rows(["g", "n"], kinds, counts=counts)}
-    after = _cycler(kinds, rows, ["g", "n"], counts=counts)("n", 1)
+    after = _cycler(kinds, insp, ["g", "n"], counts=counts)("n", 1)
 
     assert "4 unique" in before["n"]
     assert after is not None and "4 unique" in after
