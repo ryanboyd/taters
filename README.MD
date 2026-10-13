@@ -40,7 +40,7 @@ That's it. After that, running the command `taters` opens the app. It asks what 
 
 Every pipeline gets a folder of its own holding the pipeline file, the results, and a record of what ran — so you can re-run it, edit it, or hand the whole thing to a colleague, share it on OSF, whatever's clever.
 
-The menu is basically just a list of verbs. What would you like to do? Tidy up a spreadsheet, extract features, extract features *and* run the statistics, run statistics on numbers you already have, train a model, or re-run something you built before? Sure, we can do that.
+The menu is basically just a list of verbs. What would you like to do? Tidy up a spreadsheet (merge two by participant ID, stack a folder of them, flip wide to long), extract features, extract features *and* run the statistics, run statistics on numbers you already have, train a model, or re-run something you built before? Sure, we can do that.
 
 It works on audio and video, and on text you already have. To be fair, it's mostly for text. But hey, it does other things too. More stuff being added regularly as I have the time. Point it at a folder of `.txt` (or `.docx`, or `.pdf`) files or a spreadsheet with a column of text and start extracting features to your heart's content. No ffmpeg, no models, no GPU if you don't need them.
 
@@ -124,6 +124,9 @@ t = Taters()
 wavs = t.audio.extract_wavs_from_video(input_path="input.mp4")
 asr = t.audio.transcribe_with_whisper(audio_path=wavs[0], device="auto")
 transcript = asr.raw_files["csv"]
+
+# Match a participants file onto the trials, by ID
+merged = t.merge_spreadsheets(left_csv="trials.csv", right_csv="participants.csv", on="pid")
 
 # Measure things (defaults write under ./features/)
 t.text.analyze_with_dictionaries(csv_path=transcript, dict_paths=["dictionaries/liwc"])
@@ -214,4 +217,4 @@ I've been writing software for a long time now — long enough that much of my b
 
 What I've found is that genAI is most helpful for making this codebase readable to someone who isn't me, and for iterating and catching bugs, so those are the primary use-cases. I'm still in here manually testing and reviewing my own code and its iterations, comparing the outputs against older codebases of mine, fumbling around with writing performant-but-still-readable code, and hand-rolling stupid easter eggs that will amuse no more than about three people (myself included).
 
-If you *do* wish to contribute (see above), I have no major objections to genAI being a part of how you get there. The golden rule just still applies: if I can't figure out what your code does, I won't merge it. However clever the thing that wrote it, human or otherwise, I can only evaluate what I can understand.
+If you *do* wish to contribute (see above), I have no major objections to genAI being a part of how you get there. The golden rule still applies: if I can't figure out what your code does, I won't merge it. However clever the thing that wrote it, human or otherwise, I can only evaluate what I can understand.

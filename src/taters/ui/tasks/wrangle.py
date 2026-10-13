@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import csv
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 from ...helpers.doc_text import DOCUMENT_PATTERN
 from .. import glyphs
@@ -29,10 +29,21 @@ _NO_TEXT = "\x00no_text"
 
 
 def _peek(path: Path, n: int = 200):
-    """The spreadsheet's columns and a sample of rows. Shared with the
-    wizard's analysis stage, which asks the same kind of column questions --
-    see :mod:`taters.ui.columns`."""
-    return peek_csv(path, n)
+    """
+    The spreadsheet's columns, a sample of rows, and how it had to be read.
+
+    The encoding and separator come from the file itself (see
+    :func:`taters.helpers.reshape.detect_format`): a cp1252 export from
+    Windows used to crash this screen at the file pick, and a semicolon
+    file read as one column. What was worked out is handed to the gather,
+    so the file is read the same way twice.
+    """
+    from ...helpers.reshape import detect_format
+
+    fmt = detect_format(path)
+    columns, sample = peek_csv(path, n, delimiter=fmt.delimiter,
+                               encoding=fmt.encoding)
+    return columns, sample, fmt
 
 
 def _looks_numeric(rows, column: str) -> bool:
@@ -41,14 +52,27 @@ def _looks_numeric(rows, column: str) -> bool:
     return looks_numeric(rows, column)
 
 
-def _ask_output(prompter, default: Path) -> tuple[Path, bool]:
-    """Where the spreadsheet goes; an existing file needs an explicit yes."""
+def _ask_output(prompter, default: Path, *,
+                forbid: Sequence[Path] = ()) -> tuple[Path, bool]:
+    """
+    Where the spreadsheet goes; an existing file needs an explicit yes.
+
+    ``forbid`` is the files being read: writing the result over one of them
+    is refused outright rather than offered as an overwrite, because the
+    original is the one thing a person cannot get back.
+    """
+    taken = {Path(f).expanduser().resolve() for f in forbid}
     while True:
         raw = prompter.path("Where should the finished spreadsheet go?",
                             default=str(default))
         out = Path(raw).expanduser()
         if out.suffix.lower() != ".csv":
             out = out.with_suffix(".csv")
+        if out.resolve() in taken:
+            prompter.note("  That's one of the files we're reading. Pick "
+                          "another name so your original stays as it was.",
+                          style="yellow")
+            continue
         if not out.exists():
             return out, False
         if prompter.confirm(f"{out.name} already exists. Overwrite it?",
@@ -134,11 +158,13 @@ def _wrangle_csv(ctx: TaskContext) -> Optional[Path]:
     prompter = ctx.prompter
     src = browse_for_file(prompter, question="Where is the spreadsheet?",
                           start=ctx.cwd, suffixes=(".csv", ".tsv", ".txt"))
-    columns, sample = _peek(src)
-    if not columns:
-        prompter.note("  That file has no header row to read columns from.",
-                      style="yellow")
+    try:
+        columns, sample, fmt = _peek(src)
+    except ValueError as e:
+        prompter.note(f"  {e}", style="yellow")
         raise Cancelled()
+    for line in fmt.notes():
+        prompter.note(f"  {line}", style="dim")
 
     picks = ask_at_least_one(
         prompter, "Which column(s) hold the text?",
@@ -229,6 +255,7 @@ def _wrangle_csv(ctx: TaskContext) -> Optional[Path]:
         carry_cols=carry or None,
         agg_cols={c: "mean" for c in averages} or None,
         mode=mode, overwrite_existing=overwrite,
+        delimiter=fmt.delimiter, encoding=fmt.encoding,
         # the live display owns the screen; the gather's own prints would slice
         # right through it the way the HF download bars once did.
         verbose=False)
@@ -246,8 +273,25 @@ def _run(ctx: TaskContext) -> Optional[bool]:
              Choice("csv", "A spreadsheet (CSV)",
                     "Pick the text column(s), optionally combine rows by any "
                     "column(s) — one row per subreddit, per author, per "
-                    "author-within-subreddit…")]))
-        out = (_wrangle_folder if source == "folder" else _wrangle_csv)(ctx)
+                    "author-within-subreddit…"),
+             Choice("merge", "Two spreadsheets to match up by an ID",
+                    "Add columns from one to the other by matching rows — "
+                    "each participant's age and condition onto every one of "
+                    "their trials."),
+             Choice("stack", "Several spreadsheets to put one under another",
+                    "One file per session, per wave, per participant… into "
+                    "one file, with a column saying where each row came from."),
+             Choice("reshape", "One spreadsheet to flip between wide and long",
+                    "score_t1, score_t2, score_t3 as one score column with a "
+                    "time column — or back again.")]))
+        if source in ("merge", "stack", "reshape"):
+            from . import wrangle_tables
+            flow = {"merge": wrangle_tables.merge_flow,
+                    "stack": wrangle_tables.stack_flow,
+                    "reshape": wrangle_tables.reshape_flow}[source]
+            out = flow(ctx)
+        else:
+            out = (_wrangle_folder if source == "folder" else _wrangle_csv)(ctx)
     except (GoBack, Cancelled):
         raise Cancelled()
     if out is None:
@@ -255,9 +299,8 @@ def _run(ctx: TaskContext) -> Optional[bool]:
 
     from ...helpers.progress import count_rows
 
-    # count_rows returns 0 when there's no sink (its pass only exists to feed a
-    # progress bar), but the summary actually wants the number, so we give it
-    # one.
+    # one quiet sweep for the summary line; count_rows counts records, not
+    # lines, so a document with newlines in it is still one row
     rows = max(0, count_rows(out, on_progress=lambda *a, **k: None))
     prompter.note(f"\n  {glyphs.TICK} Wrangled {rows:,} row(s) into:\n    {out}",
                   style="green", wrap=False)

@@ -60,6 +60,10 @@ WRITERS = [
     ("helpers", "csv_to_analysis_ready_csv"),
     ("helpers", "feature_gather"),
     ("helpers", "average_feature_table"),
+    ("helpers", "merge_spreadsheets"),
+    ("helpers", "stack_spreadsheets"),
+    ("helpers", "wide_to_long"),
+    ("helpers", "long_to_wide"),
 ]
 
 # `extract_wavs_from_video` still takes the old `overwrite` spelling, but only

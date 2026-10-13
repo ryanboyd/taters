@@ -180,6 +180,132 @@ class Harness:
             ":done", "Flow A", "save",
         ], analyses=True)
 
+    def flow_w(self):
+        """
+        Wrangle: two messy files matched by ID, flipped wide and back, stacked
+        -- through the task's own questions, not a preset -- and then the
+        merged file through a real pipeline, which is the only proof that a
+        wrangled file is something the rest of Taters can read.
+        """
+        from taters.ui.prompts import ScriptedPrompter
+        from taters.ui.tasks import TaskContext
+        from taters.ui.tasks.wrangle import TASK
+
+        folder = self.proj / "wrangle"
+        folder.mkdir(exist_ok=True)
+        study = list(csv.DictReader(self.study.open(encoding="utf-8")))
+        # participants: cp1252, semicolons, an accented name, two with no trials
+        participants = folder / "participants.csv"
+        with participants.open("w", newline="", encoding="cp1252") as fh:
+            w = csv.writer(fh, delimiter=";")
+            w.writerow(["pid", "condition", "age", "gender", "name"])
+            for r in study:
+                w.writerow([r["pid"], r["condition"], r["age"], r["gender"], "Zo\u00e9"])
+            w.writerow(["p9998", "A", "40", "f", "nobody"])
+            w.writerow(["p9999", "B", "41", "m", "nobody"])
+        # trials: two per participant, the first ten pids in capitals (a loose
+        # match), two pids no participant has
+        trials = folder / "trials.csv"
+        rng = random.Random(11)
+        with trials.open("w", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh)
+            w.writerow(["pid", "trial", "openness", "text"])
+            for i, r in enumerate(study + [{"pid": "p8888", "openness": "3.0"},
+                                           {"pid": "p8889", "openness": "3.1"}]):
+                pid = r["pid"].upper() if i < 10 else r["pid"]
+                for t in (1, 2):
+                    w.writerow([pid, str(t), r["openness"], _text(rng, 30, WORDS)])
+        n_trials = 2 * (len(study) + 2)
+
+        def run(name, answers):
+            p = ScriptedPrompter(list(answers))
+            try:
+                ok = TASK.run(TaskContext(prompter=p, cwd=folder))
+            except Exception as e:
+                self.bad(name, f"{type(e).__name__}: {e}")
+                for k, q in p.asked:
+                    print("    asked:", k, q)
+                traceback.print_exc(limit=2)
+                return None
+            if ok is not True:
+                self.bad(name, f"task returned {ok!r}")
+                return None
+            return p
+
+        merged = folder / "merged.csv"
+        p = run("W merge", [
+            "merge", str(trials), str(participants), ["pid"], True,
+            True,                   # P0..P9 are p0..p9: match those too
+            "left",                 # the two unknown pids stay, with blanks
+            str(merged),
+        ])
+        if p is None:
+            return None
+        rows = list(csv.DictReader(merged.open(encoding="utf-8-sig")))
+        filled = sum(1 for r in rows if r["condition"])
+        problems = []
+        if len(rows) != n_trials:
+            problems.append(f"{len(rows)} rows, expected {n_trials}")
+        if filled != n_trials - 4:
+            problems.append(f"{filled} rows got a condition, expected {n_trials - 4}")
+        if rows[0]["name"] != "Zo\u00e9":
+            problems.append(f"cp1252 name came through as {rows[0]['name']!r}")
+        said = " ".join(p.output)
+        if "Match those too? That's 20 more rows." not in [q for _k, q in p.asked]:
+            problems.append("the loose-match offer was not made for the capitals")
+        if "match a row in participants.csv" not in said:
+            problems.append("no read-back of the match")
+        if problems:
+            self.bad("W merge", "; ".join(problems))
+        else:
+            self.ok("W merge", f"{len(rows)} rows, {filled} with a condition, "
+                               f"cp1252 and the loose offer both handled")
+
+        wide = folder / "wide.csv"
+        p = run("W long to wide", [
+            "reshape", str(trials), "wider", "trial", "text", ["pid"],
+            True, ["openness"],     # openness is one value per pid: bring it
+            str(wide),
+        ])
+        back = folder / "back.csv"
+        if p is not None:
+            p = run("W wide to long", [
+                "reshape", str(wide), "longer", ["1", "2"], ["pid", "openness"],
+                "trial", "text", str(back),
+            ])
+        if p is not None:
+            want = sorted((r["pid"], r["trial"], r["openness"], r["text"])
+                          for r in csv.DictReader(trials.open(encoding="utf-8")))
+            got = sorted((r["pid"], r["trial"], r["openness"], r["text"])
+                         for r in csv.DictReader(back.open(encoding="utf-8-sig")))
+            if got == want:
+                self.ok("W round trip", f"{len(got)} rows, wide and back is an identity")
+            else:
+                self.bad("W round trip", f"{len(got)} rows back vs {len(want)}")
+
+        stacked = folder / "stacked.csv"
+        p = run("W stack", [
+            "stack", "\x00space:" + str(trials), str(participants), True, str(stacked),
+        ])
+        if p is not None:
+            rows = list(csv.DictReader(stacked.open(encoding="utf-8-sig")))
+            sources = {r["source"] for r in rows}
+            if len(rows) == n_trials + len(study) + 2 and sources == {"trials", "participants"}:
+                self.ok("W stack", f"{len(rows)} rows from {sorted(sources)}")
+            else:
+                self.bad("W stack", f"{len(rows)} rows, sources {sources}")
+
+        return self.flow("W the merged file through a pipeline", [
+            "csv", *self.browse(merged), ["text"], True, ["pid", "trial"],
+            ["readability"], "row",
+            ["stats_group_differences"],
+            False,                  # don't average the measures
+            "condition",
+            False,                  # no controls
+            "fdr_bh", False,
+            ":done", "Flow W", "save",
+        ])
+
     def flow_b(self):
         return self.flow("B grouped rows + correlations", [
             "csv", *self.browse(self.study), ["text"], False,
@@ -719,7 +845,7 @@ def main(argv=None) -> int:
               f"Point --work at a fresh folder.")
         return 2
     h = Harness(work, keep=args.keep or args.work is not None)
-    wanted = {f.upper() for f in (args.flows or list("ABCDEFGHRVTM"))}
+    wanted = {f.upper() for f in (args.flows or list("ABCDEFGHRVWTM"))}
     print(f"scratch: {work}")
 
     runs = {}
@@ -743,6 +869,8 @@ def main(argv=None) -> int:
         h.flow_r(runs["A"])
     if "V" in wanted:
         h.flow_v()
+    if "W" in wanted:
+        h.flow_w()
     if "T" in wanted and args.slow:
         h.flow_t()
     if "M" in wanted and args.media:

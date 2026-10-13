@@ -180,6 +180,9 @@ class Inspection:
     #: Where the file is, so the grain and survivor passes can read it again.
     path: Optional[Path] = None
     delimiter: Optional[str] = None
+    #: How it was decoded. utf-8-sig unless the caller worked out otherwise
+    #: (the reshape helpers detect cp1252 exports and pass that in).
+    encoding: str = "utf-8-sig"
     _grains: Dict[Tuple[str, ...], Grain] = field(default_factory=dict,
                                                   repr=False, compare=False)
 
@@ -340,8 +343,8 @@ class Inspection:
 
 def inspect_csv(path: PathLike, *, delimiter: Optional[str] = None,
                 limit: int = 0, keep_rows: int = 0,
-                on_rows: Optional[Callable[[int], None]] = None
-                ) -> Inspection:
+                on_rows: Optional[Callable[[int], None]] = None,
+                encoding: str = "utf-8-sig") -> Inspection:
     """
     Read a spreadsheet and report its columns, its problems, and what each
     column holds.
@@ -369,6 +372,10 @@ def inspect_csv(path: PathLike, *, delimiter: Optional[str] = None,
         Called with the running row count every few thousand rows, for a
         progress line. A scan of a large file is the first slow thing the
         wizard does and the only one that used to happen in silence.
+    encoding : str, default "utf-8-sig"
+        How to decode the file. A Windows export in cp1252 used to crash the
+        wizard at the file pick; a caller that has detected the encoding
+        passes it here, and every later pass over the file uses the same one.
 
     Returns
     -------
@@ -380,7 +387,7 @@ def inspect_csv(path: PathLike, *, delimiter: Optional[str] = None,
     rows: List[Mapping] = []
     over = under = scanned = 0
     truncated = False
-    with path.open("r", newline="", encoding="utf-8-sig") as fh:
+    with path.open("r", newline="", encoding=encoding) as fh:
         reader = csv.reader(fh, delimiter=delimiter)
         for raw in reader:
             columns = [str(c) for c in raw]
@@ -474,7 +481,8 @@ def inspect_csv(path: PathLike, *, delimiter: Optional[str] = None,
             unique_over=uniq[i] is None)
     return Inspection(columns=columns, rows=rows, scanned=scanned,
                       truncated=truncated, over=over, under=under,
-                      stats=stats, path=path, delimiter=delimiter)
+                      stats=stats, path=path, delimiter=delimiter,
+                      encoding=encoding)
 
 
 def _each_row(insp: Inspection, *,
@@ -491,7 +499,7 @@ def _each_row(insp: Inspection, *,
             yield n, row
         return
     delimiter = insp.delimiter or sniff_delimiter(insp.path)
-    with Path(insp.path).open("r", newline="", encoding="utf-8-sig") as fh:
+    with Path(insp.path).open("r", newline="", encoding=insp.encoding) as fh:
         reader = csv.reader(fh, delimiter=delimiter)
         header = next(reader, None)
         if header is None:
@@ -601,7 +609,8 @@ def sniff_delimiter(path: PathLike) -> str:
 
 
 def peek_csv(path: PathLike, n: int = _SAMPLE_ROWS,
-             delimiter: Optional[str] = None) -> Tuple[List[str], List[dict]]:
+             delimiter: Optional[str] = None,
+             encoding: str = "utf-8-sig") -> Tuple[List[str], List[dict]]:
     """
     A spreadsheet's column names and a sample of its rows.
 
@@ -618,7 +627,8 @@ def peek_csv(path: PathLike, n: int = _SAMPLE_ROWS,
     would be wrong.
     """
     n = max(0, int(n))
-    found = inspect_csv(path, delimiter=delimiter, limit=n, keep_rows=n)
+    found = inspect_csv(path, delimiter=delimiter, limit=n, keep_rows=n,
+                        encoding=encoding)
     return found.columns, found.rows
 
 

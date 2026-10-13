@@ -18,6 +18,18 @@
       show_source: true
       show_root_heading: true
 
+::: taters.helpers.reshape
+    options:
+      members_order: alphabetical
+      show_source: true
+      show_root_heading: true
+
+::: taters.helpers.feature_average
+    options:
+      members_order: alphabetical
+      show_source: true
+      show_root_heading: true
+
 ::: taters.helpers.library
     options:
       members_order: alphabetical

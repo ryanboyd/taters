@@ -429,3 +429,23 @@ def test_a_hand_built_inspection_answers_from_the_rows_it_was_given():
     assert insp.grain(["g"], track=["v"]).constant("v")
     assert insp.survivors([["g", "in", ["a"]]]) == 2
     assert insp.value_counts("g") == {"a": 2, "b": 1}
+
+
+def test_the_scan_honors_an_encoding_and_every_later_pass_uses_it(tmp_path):
+    """
+    A Windows export in cp1252 crashed the wizard at the file pick, because
+    the scan only ever decoded utf-8. A caller that has worked out the
+    encoding hands it over, and the grain and survivor passes -- which open
+    the file again -- read it the same way rather than guessing afresh.
+    """
+    path = tmp_path / "windows.csv"
+    path.write_bytes("g,name\na,Jos\u00e9\na,Ren\u00e9e\nb,Jos\u00e9\n".encode("cp1252"))
+
+    with pytest.raises(UnicodeDecodeError):
+        inspect_csv(path)
+    insp = inspect_csv(path, encoding="cp1252")
+
+    assert insp.encoding == "cp1252"
+    assert insp.distinct("name") == ["Jos\u00e9", "Ren\u00e9e"]
+    assert insp.grain(["g"], track=["name"]).groups == 2
+    assert insp.survivors([["name", "==", "Jos\u00e9"]]) == 2

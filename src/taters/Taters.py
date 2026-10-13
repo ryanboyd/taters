@@ -142,6 +142,10 @@ class Taters:
     def find_files(self, **kwargs):                             return self.helpers.find_files(**kwargs)
     def feature_gather(self, **kwargs):                         return self.helpers.feature_gather(**kwargs)
     def average_feature_table(self, **kwargs):                  return self.helpers.average_feature_table(**kwargs)
+    def merge_spreadsheets(self, **kwargs):                     return self.helpers.merge_spreadsheets(**kwargs)
+    def stack_spreadsheets(self, **kwargs):                     return self.helpers.stack_spreadsheets(**kwargs)
+    def wide_to_long(self, **kwargs):                           return self.helpers.wide_to_long(**kwargs)
+    def long_to_wide(self, **kwargs):                           return self.helpers.long_to_wide(**kwargs)
     
 
 
@@ -406,4 +410,20 @@ class _HelpersAPI:
     def average_feature_table(self, **kwargs):
         from .helpers.feature_average import average_feature_table
         return _forward(average_feature_table, kwargs)
+
+    def merge_spreadsheets(self, **kwargs):
+        from .helpers.reshape import merge_spreadsheets
+        return _forward(merge_spreadsheets, kwargs)
+
+    def stack_spreadsheets(self, **kwargs):
+        from .helpers.reshape import stack_spreadsheets
+        return _forward(stack_spreadsheets, kwargs)
+
+    def wide_to_long(self, **kwargs):
+        from .helpers.reshape import wide_to_long
+        return _forward(wide_to_long, kwargs)
+
+    def long_to_wide(self, **kwargs):
+        from .helpers.reshape import long_to_wide
+        return _forward(long_to_wide, kwargs)
     
