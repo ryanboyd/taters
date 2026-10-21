@@ -554,22 +554,20 @@ def test_a_controlled_model_cannot_score_a_folder_of_documents(tmp_path):
 def test_the_wizard_refuses_a_spreadsheet_lacking_a_control_column(tmp_path):
     """The header is known before anything runs, so the refusal comes while
     another model or spreadsheet can still be chosen."""
-    from types import SimpleNamespace
-
     from taters.ui.compose import ComposeError
-    from taters.ui.wizard import _check_controls
+    from taters.ui.wizard import SourceSpec, _check_controls
 
     sheet = tmp_path / "s.csv"
     sheet.write_text("pid,age,text\np1,30,hello\n", encoding="utf-8")
-    src = SimpleNamespace(source="csv", path=sheet, delimiter=",")
+    src = SourceSpec(source="csv", path=sheet, delimiter=",")
     with pytest.raises(ComposeError, match="has no gender column"):
         _check_controls([_controlled_plan()], src)
 
     sheet.write_text("pid,age,gender,text\np1,30,f,hello\n", encoding="utf-8")
     _check_controls([_controlled_plan()], src)          # nothing to say
     _check_controls([_controlled_plan()],
-                    SimpleNamespace(source="txt_dir", path=tmp_path,
-                                    delimiter=","))    # not its call
+                    SourceSpec(source="txt_dir", path=tmp_path,
+                               delimiter=","))        # not its call
 
 
 def test_the_scorer_takes_the_controls_from_the_metadata_table(tmp_path):

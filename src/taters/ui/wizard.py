@@ -47,7 +47,7 @@ from . import recipes as _recipes
 from . import preflight as _checks
 from ..helpers.settings import inspect_row_limit
 from .columns import (MAX_LABELS, UNIQUE_CEILING, Grain, Inspection,
-                      _SAMPLE_ROWS, inspect_csv, peek_csv, read_columns,
+                      _SAMPLE_ROWS, inspect_csv, peek_csv, read_columns, tally_columns, Tally,
                       sniff_delimiter)
 from .compose import (MODEL_WORK_DIR, ComposeError, compose,
                       feature_tables, table_names,
@@ -70,6 +70,7 @@ EXTRA_PROBES: Dict[str, Tuple[str, ...]] = {
     # the `glottal` extra, which most people will never want anyway.
     "vocalacoustics": ("parselmouth", "soundfile"),
     "vectors": ("gensim",),
+    "db": ("pymysql", "psycopg"),
 }
 # and the distribution each extra hangs on -- the one whose Python-version
 # marker in our own metadata decides whether "not installed" is fixable here
@@ -78,6 +79,7 @@ EXTRA_DISTS: Dict[str, str] = {
     "diarization": "nemo-toolkit",
     "vectors": "gensim",
     "vocalacoustics": "praat-parselmouth",
+    "db": "PyMySQL",
 }
 # no `readability` probe either. textstat moved into the base install, so if
 # it's missing then the environment is busted, not just missing an extra --
@@ -97,8 +99,16 @@ SOURCE_KINDS = [
            "Essays, notes, transcripts you already have — nothing gets transcribed"),
     Choice("csv", "A spreadsheet, with text in one or more columns",
            "CSV with one row per document or response"),
+    Choice("db", "Tables in a database (MySQL, PostgreSQL, SQLite)",
+           "Text in one table; outcomes and other columns can come from tables "
+           "joined to it"),
     Choice("any", "Everything in a folder", "Media only; let ffmpeg try each file in turn"),
 ]
+
+#: The sources whose rows have columns of their own to group by, filter on
+#: and run statistics against. Everything that used to ask `== "csv"` asks
+#: this instead.
+TABULAR = ("csv", "db")
 
 SOURCE_KIND_MAP = {
     "audio": ("media", "audio"),
@@ -106,6 +116,7 @@ SOURCE_KIND_MAP = {
     "any": ("media", "any"),
     "txt_dir": ("txt_dir", "any"),
     "csv": ("csv", "any"),
+    "db": ("db", "any"),
 }
 
 # we keep this around for callers that only ever cared about the media filter.
@@ -136,8 +147,8 @@ class WizardResult:
 class SourceSpec:
     """Everything the rest of the wizard needs to know about the input."""
 
-    source: str                      # "media" | "txt_dir" | "csv"
-    path: Path                       # a folder, or the spreadsheet itself
+    source: str                      # "media" | "txt_dir" | "csv" | "db"
+    path: Path                       # a folder, or the spreadsheet itself; "." for a database
     file_type: str = "any"           # only meaningful when source == "media"
     inputs: List[Path] = field(default_factory=list)
     text_cols: List[str] = field(default_factory=lambda: ["text"])
@@ -174,6 +185,16 @@ class SourceSpec:
     #: a 1/2 gender code that reads as numbers is visibly a measurement until
     #: someone says otherwise, and the statistics stage reads the answer.
     kinds: Dict[str, str] = field(default_factory=dict)
+    #: A database source: the saved connection, and the table plus any
+    #: tables joined to it, in the shape `helpers.sources.Source` reads.
+    connection: str = ""
+    source_spec: Dict[str, Any] = field(default_factory=dict)
+    #: What a column is called on screen when it came from a joined table
+    #: ("age (users)"); the plain name everywhere else.
+    labels: Dict[str, str] = field(default_factory=dict)
+    #: Where every table this run makes goes: "" for the run folder, or a
+    #: database address with a trailing slash. Anything in, anything out.
+    results_root: str = ""
     #: Columns the user named as the measures themselves, rather than as
     #: something to measure. Only the "Run analyses" flow sets these: the
     #: numbers are already in the spreadsheet, so these columns are the
@@ -181,6 +202,19 @@ class SourceSpec:
     #: or a control. Spoken for either way, which is why the analysis stage
     #: subtracts them alongside `text_cols`.
     feature_cols: List[str] = field(default_factory=list)
+
+    @property
+    def is_table(self) -> bool:
+        """Whether the rows have columns of their own: a spreadsheet or a table."""
+        return self.source in TABULAR
+
+    @property
+    def where(self) -> str:
+        """What to call the source in a sentence: the file, or the table."""
+        if self.source == "db":
+            base = (self.source_spec.get("from") or {}).get("table") or "the table"
+            return f"{base} in {self.connection}"
+        return self.path.name
 
     @property
     def analysis_grain(self) -> List[str]:
@@ -568,8 +602,11 @@ def _ask_csv_source(prompter: Prompter, *,
             # every feature has already been measured (we had a run go 938
             # rows in, 0 joined). a whole-file read, so it says so.
             with prompter.scanning("Checking that the id is unique") as seen:
+                # the grain pass says whether anything repeats (a hash per
+                # group); the values are only read back to name examples
+                grain = state["inspection"].grain(list(state["id_cols"]), on_rows=seen)
                 finding = _ids_repeat(state["path"], state["id_cols"],
-                                      on_rows=seen)
+                                      on_rows=seen) if grain.rows > grain.groups else None
             if finding is None:
                 return True
             prompter.note(f"  {finding.message}", style="yellow")
@@ -611,6 +648,233 @@ def _ask_csv_source(prompter: Prompter, *,
         kinds=dict(state["kinds"]),
         inspection=state.get("inspection"),
     )
+
+def _ask_db_source(prompter: Prompter, *,
+                   needs_metadata: bool = False,
+                   columns_are_measures: bool = False) -> Optional[SourceSpec]:
+    """
+    Tables in a database: which connection, which columns, and from them
+    the rest -- which table the rows come from, how the others join on,
+    what identifies a row, which column is the text.
+
+    One screen names every column of every table as ``table.column``. The
+    joins are worked out from the catalog and read back with their counts
+    (see :mod:`taters.ui.db_source`); the id is the base table's own key,
+    kept whether or not it was ticked, because a table's rows cannot be
+    numbered by position. Questions are asked only where the catalog
+    cannot settle the answer.
+    """
+    from .db_source import (JoinState, ask_columns, column_rows, cycle_for,
+                            inspection_for, list_tables, pick_connection,
+                            plan_joins, _labels, _id_like)
+
+    state: Dict[str, Any] = {"picked": None, "tables": [], "chosen": None,
+                             "only_tables": None, "base": "", "join": None,
+                             "id_cols": [], "text_cols": [], "text_mode": "concat",
+                             "feature_cols": []}
+
+    def ask_connection() -> bool:
+        state["picked"] = pick_connection(prompter, need_write=False)
+        state["tables"] = list_tables(prompter, state["picked"])
+        return True
+
+    def ask_which() -> bool:
+        prompter.reason(
+            "Everything the run will use: the text, anything to group rows by, "
+            "any outcome or control the statistics need. Columns from several "
+            "tables are joined for you, on the links the database declares."
+            if not columns_are_measures else
+            "The measures the statistics will relate to your outcomes, and the "
+            "outcomes and groups themselves. Columns from several tables are "
+            "joined for you, on the links the database declares.")
+        before = state["chosen"].values if state["chosen"] else []
+        state["chosen"] = ask_columns(
+            prompter, state["picked"], state["tables"],
+            question="Which columns do you need?", checked=before,
+            only_tables=state["only_tables"])
+        state["only_tables"] = state["chosen"].tables
+        if state["chosen"].values != before:
+            # a different pick: nothing decided about the old one applies
+            state["join"] = None
+            state.update(id_cols=[], text_cols=[], feature_cols=[])
+        return True
+
+    def ask_join() -> bool:
+        if state["join"] is not None:
+            return False
+        js, asked = plan_joins(
+            prompter, state["picked"], state["tables"], state["chosen"],
+            base=state["base"], allow_fan_out=False,
+            row_question=("Which table has one row per piece of text?"
+                          if not columns_are_measures else
+                          "Which table has one row per thing being measured?"))
+        state["join"], state["base"] = js, js.base.name
+        return asked
+
+    def ask_ids() -> bool:
+        js: JoinState = state["join"]
+        insp = inspection_for(prompter, js)
+        pk = [c for c in js.base.primary_key if c in insp.columns]
+        if pk:
+            # the key is the id, ticked or not: every row's measures find
+            # their way back by it, and nobody has to be asked
+            state["id_cols"] = list(pk)
+            prompter.note(f"  Each row is identified by {js.base.name}'s key, "
+                          f"{', '.join(pk)}.", style="dim")
+            return False
+        cols = [c for c in insp.columns if js.owner(c) == js.base.name]
+        if not state["id_cols"]:
+            unique = [c for c in cols if insp.stats.get(c) and
+                      insp.stats[c].filled and not insp.stats[c].unique_over
+                      and insp.stats[c].unique == insp.stats[c].filled == insp.scanned]
+            state["id_cols"] = [next((c for c in unique if _id_like(c)),
+                                     unique[0])] if unique else []
+        prompter.reason(
+            f"{js.base.name} has no key, and a database needs one: it is how each "
+            f"row's measures find their way back to it. Rows cannot be numbered "
+            f"by position, because a row added later would move every number.")
+        kinds = {c: insp.kind(c) for c in cols}
+        while True:
+            picked = ask_at_least_one(
+                prompter, "Which column(s) identify each row?",
+                column_rows(insp, cols, checked=state["id_cols"],
+                            disabled={c: "empty" for c in cols if insp.kind(c) == "empty"}),
+                thing="one column", cycle=cycle_for(insp, kinds, cols))
+            with prompter.scanning("Checking that the id is unique", unit="checks"):
+                n, worst = insp.duplicate_keys(picked)
+            state["id_cols"] = list(picked)
+            if not n:
+                return True
+            shown = ", ".join(f"'{k}' × {v}" for k, v in worst)
+            prompter.note(
+                f"  {' + '.join(picked)} does not identify each row: {n:,} value(s) "
+                f"repeat ({shown}), so several rows would share one id. Pick "
+                f"column(s) that together are unique to each row.", style="yellow")
+
+    def ask_text() -> bool:
+        js: JoinState = state["join"]
+        insp = inspection_for(prompter, js)
+        cols = list(insp.columns)
+        labels = _labels(js)
+        kinds = {c: insp.kind(c) for c in cols}
+        if columns_are_measures:
+            numeric = [c for c in cols if kinds.get(c) == "numbers" and c not in state["id_cols"]]
+            if not numeric:
+                _try_again(prompter, "None of the columns you picked reads as numbers, "
+                                     "so there is nothing here to analyze as a predictor.")
+                raise _Restart
+            prompter.reason(
+                "The columns the statistics will relate to your outcomes. Numbers "
+                "only -- press the arrow keys on a row to change how it is read.")
+            state["feature_cols"] = ask_at_least_one(
+                prompter, "Which columns are the predictors?",
+                column_rows(insp, numeric, labels=labels,
+                            checked=state["feature_cols"] or numeric),
+                thing="one column", cycle=cycle_for(insp, kinds, numeric))
+            return True
+        # a declared long-text type is real evidence a spreadsheet never has,
+        # but sqlite declares everything TEXT, so it has to also *read* as
+        # free text: not a label, not a constant
+        declared = {c for c in cols if any(
+            c in t.text_columns or c.endswith(f"__{tc}")
+            for t in [js.base] + [js.table(j["table"]) for j in js.joins]
+            for tc in t.text_columns)}
+        long_text = [c for c in cols if c in declared and kinds.get(c) == "text"
+                     and c not in state["id_cols"] and not _id_like(c)
+                     and insp.unique_counts([c])[c] > 1]
+        if not state["text_cols"] and len(long_text) == 1:
+            state["text_cols"] = list(long_text)
+            owner = labels.get(long_text[0], "")
+            prompter.note(f"  The text is {long_text[0]}"
+                          + (f" from {owner}" if owner else "") + ", the "
+                          "one long-text column you picked.", style="dim")
+            return False
+        checked = state["text_cols"] or long_text
+        state["text_cols"] = ask_at_least_one(
+            prompter, "Which column(s) hold the text you want analyzed?",
+            column_rows(insp, cols, labels=labels, checked=checked),
+            thing="one column", cycle=cycle_for(insp, kinds, cols))
+        for c in state["text_cols"]:
+            owner = js.owner(c)
+            if owner != js.base.name:
+                prompter.note(f"  {c} comes from {owner}, where one row serves several "
+                              f"rows of {js.base.name}, so the same {c} is measured once "
+                              f"per row of {js.base.name}.", style="yellow")
+        return True
+
+    def ask_mode() -> bool:
+        if columns_are_measures or len(state["text_cols"]) <= 1:
+            state["text_mode"] = "concat"
+            return False
+        state["text_mode"] = str(prompter.select(
+            f"You picked {len(state['text_cols'])} columns. How should they be measured?",
+            [Choice("concat", "Together, as one piece of text",
+                    "Joined per row — one set of measures per row"),
+             Choice("separate", "Separately, one at a time",
+                    "One set of measures per column per row")],
+            default=state["text_mode"]))
+        return True
+
+    try:
+        _ask_in_order([ask_connection, ask_which, ask_join, ask_ids, ask_text, ask_mode])
+    except _Restart:
+        return None
+    js: JoinState = state["join"]
+    insp = inspection_for(prompter, js)
+    spec = js.source()
+    spoken_for = set(state["text_cols"]) | set(state["feature_cols"])
+    remaining = [c for c in insp.columns if c not in spoken_for]
+    if needs_metadata and not remaining:
+        return _try_again(
+            prompter,
+            "Every column you picked is being analyzed as "
+            + ("a predictor" if columns_are_measures else "text")
+            + ", so there is nothing left to group by or predict. Statistics need "
+              "at least one column that is not "
+            + ("a predictor." if columns_are_measures else "the text.")
+            + " Pick one more.")
+    return SourceSpec(
+        source="db", path=Path("."), inputs=[], columns=list(insp.columns),
+        text_cols=[str(c) for c in state["text_cols"]],
+        feature_cols=[str(c) for c in state["feature_cols"]],
+        id_cols=list(state["id_cols"]), text_mode=state["text_mode"],
+        kinds={c: insp.kind(c) for c in insp.columns}, inspection=insp,
+        connection=js.picked.name, source_spec=spec.to_dict(), labels=_labels(js),
+        results_root=(f"db://{js.picked.name}/" if js.picked.probe.can_write else ""))
+
+
+def ask_results(prompter: Prompter, src: SourceSpec, title: str = "") -> str:
+    """
+    "Where should the results go?" -- the one knob behind anything in,
+    anything out. The run folder, or a database connection that can make
+    tables; the source's own location is the default when it qualifies.
+    Returns the results root: "" for the folder, or a database address.
+    """
+    from ..helpers import db as _db
+    from .db_source import can_write_here
+
+    profiles = _db.list_profiles()
+    if not profiles and src.source != "db":
+        return ""
+    prefix = f"taters/{slugify(title) if title else 'run'}"
+    rows = [Choice("", "This folder, as spreadsheets",
+                   "features/, gathered/ and the analysis table as CSV files")]
+    for p in profiles:
+        rows.append(Choice(p.name, p.name, p.label()))
+    prompter.reason(
+        "Every table this run makes -- the gathered text, each feature table and "
+        "the analysis table -- goes there. The report, figures and any fitted "
+        "model stay in this folder either way.")
+    default = src.connection if src.results_root.startswith("db://") else ""
+    while True:
+        picked = str(prompter.select("Where should the results go?", rows, default=default))
+        if not picked:
+            return ""
+        if picked == src.connection and src.results_root.startswith("db://"):
+            return f"db://{picked}/{prefix}/"      # already known to take tables
+        if can_write_here(prompter, _db.get_profile(picked)):
+            return f"db://{picked}/{prefix}/"
+
 
 def _ids_repeat(path: Path, id_cols: Sequence[str],
                 on_rows: Optional[Callable[[int], None]] = None):
@@ -663,9 +927,10 @@ def ask_source(prompter: Prompter,
             # once its question gets answered, so a rejected file used to come
             # back to a one-option menu with nothing on screen saying why.
             prompter.reason(
-                "Statistics need a spreadsheet: the groups to compare or the "
-                "outcomes to predict have to be columns beside the text.")
-        kinds = ([c for c in SOURCE_KINDS if c.value == "csv"] if analyses
+                "Statistics need a spreadsheet or database tables: the groups "
+                "to compare or the outcomes to predict have to be columns beside "
+                "the text -- in the same table, or one joined to it.")
+        kinds = ([c for c in SOURCE_KINDS if c.value in TABULAR] if analyses
                  else [c for c in SOURCE_KINDS if c.value in ("csv", "txt_dir")]
                  if text_only else SOURCE_KINDS)
         if sources is not None:
@@ -686,6 +951,10 @@ def ask_source(prompter: Prompter,
         try:
             if source == "csv":
                 spec = _ask_csv_source(
+                    prompter, needs_metadata=bool(analyses),
+                    columns_are_measures=columns_are_measures)
+            elif source == "db":
+                spec = _ask_db_source(
                     prompter, needs_metadata=bool(analyses),
                     columns_are_measures=columns_are_measures)
             elif source == "txt_dir":
@@ -1316,6 +1585,7 @@ def _and(items: Sequence[str]) -> str:
 _LEVEL_QUESTION = {
     "": "What should one row of results describe?",
     "csv": "Measure every row on its own, or join rows together first?",
+    "db": "Measure every row on its own, or join rows together first?",
 }
 
 
@@ -1442,7 +1712,7 @@ def ask_level(prompter: Prompter, src: SourceSpec,
         state["group_by"] = ask_at_least_one(
             prompter, "Join the text from rows that share which column(s)?",
             _kind_rows(remaining, src.kinds, checked=state["group_by"],
-                       counts=counts),
+                       counts=counts, owner_of=_owner_hook(src)),
             thing="one column",
             cycle=_cycler(src.kinds, insp, remaining, counts=counts))
         prompter.note("  " + _grain_story(state["group_by"], [],
@@ -1493,7 +1763,7 @@ def ask_level(prompter: Prompter, src: SourceSpec,
             counts = insp.unique_counts(usable)
             column = str(prompter.select(
                 "Leave rows out based on which column?",
-                _kind_rows(usable, src.kinds, counts=counts)))
+                _kind_rows(usable, src.kinds, counts=counts, owner_of=_owner_hook(src))))
             spec = _one_row_filter(prompter, insp, column,
                                    numeric=src.kinds.get(column) == "numbers")
             if spec is not None:
@@ -1674,7 +1944,7 @@ def _analysis_possible(src: SourceSpec, steps: Sequence[_recipes.Recipe]
     The reason is shown rather than swallowed -- a stage that silently is not
     there reads as a stage that is broken.
     """
-    if src.source != "csv":
+    if not src.is_table:
         return False, ("Statistics need a spreadsheet with grouping or "
                        "outcome columns in it; this run reads its text from "
                        f"{'a folder of documents' if src.source == 'txt_dir' else 'media files'}.")
@@ -1908,14 +2178,23 @@ def _label_choices(src: "SourceSpec", insp: Inspection,
         [*offered, *rest, *varies], kinds,
         help_of=lambda c: ", ".join(insp.distinct(c, limit=6))
         or "no values sampled",
-        disabled=disabled)
+        disabled=disabled, owner_of=_owner_hook(src))
+
+
+def _owner_hook(src) -> Optional[Callable[[str], str]]:
+    """``owner_of`` for `_kind_rows` from a source's `labels` (the table each
+    output column came from), or None for a source with one table."""
+    owners = {c: t for c, t in (getattr(src, "labels", None) or {}).items() if t}
+    return (lambda c: owners.get(c, "")) if owners else None
 
 
 def _kind_rows(columns: Sequence[str], kinds: Dict[str, str], *,
                checked: Sequence[str] = (),
                help_of: Optional[Callable[[str], str]] = None,
                counts: Optional[Dict[str, int]] = None,
-               disabled: Optional[Dict[str, str]] = None) -> List[Choice]:
+               disabled: Optional[Dict[str, str]] = None,
+               label_of: Optional[Callable[[str], str]] = None,
+               owner_of: Optional[Callable[[str], str]] = None) -> List[Choice]:
     """
     Column names as a table: the name, what it is treated as, and optionally
     how many different values it holds.
@@ -1932,11 +2211,17 @@ def _kind_rows(columns: Sequence[str], kinds: Dict[str, str], *,
     possible to answer that question without ever being told the number.
     """
     ticked = set(checked)
-    return [Choice(c, c.strip(),
+    # `owner_of` names the table a column came from, for a source built from
+    # several: it goes in a lined-up column of its own between the name and
+    # the kind, while the value stays the plain output name every later
+    # step reads. `label_of` is the older hook for a label that says it all
+    owners = {c: (owner_of(c) if owner_of else "") for c in columns}
+    owner_w = max((len(o) for o in owners.values()), default=0)
+    return [Choice(c, label_of(c) if label_of else c.strip(),
                    help=help_of(c) if help_of else "",
                    checked=c in ticked,
-                   annotation=_aligned(c, kinds.get(c, ""), columns,
-                                       counts=counts),
+                   annotation=_aligned(c, kinds.get(c, ""), columns, counts=counts,
+                                       owner=owners[c].ljust(owner_w) if owner_w else ""),
                    disabled=(disabled or {}).get(c, ""))
             for c in columns]
 
@@ -1947,12 +2232,13 @@ _KIND_WIDTH = 7
 
 
 def _aligned(column: str, kind: str, columns: Sequence[str], *,
-             counts: Optional[Dict[str, int]] = None) -> str:
+             counts: Optional[Dict[str, int]] = None, owner: str = "") -> str:
     """The kind, padded so it lines up under one heading whatever the name's
     length -- the padding is in the annotation, not the label, so the label
-    stays the tidy column name the person reads back."""
+    stays the tidy column name the person reads back. ``owner`` (the table
+    a column came from, already padded) goes first when there is one."""
     width = max((len(c.strip()) for c in columns), default=0)
-    pad = " " * (width - len(column.strip()))
+    pad = " " * (width - len(column.strip())) + (f"{owner}  " if owner else "")
     if not counts:
         return pad + kind
     n = counts.get(column)
@@ -2115,21 +2401,28 @@ def ask_analysis(prompter: Prompter, src: SourceSpec,
     # lying around for `apply_analysis` to wire up later.
     state: Dict[str, Any] = {"stop": False, "controls": False, "chosen": []}
 
-    # the checks below read whole columns, not the sample. a class of three
-    # or an "n/a" on row 812 is invisible in 200 rows and fatal at the last
-    # step. we read once per column, on demand. when rows are being combined
-    # the raw column isn't what the analysis sees anyway, so we vet nothing.
-    full: Dict[str, List[str]] = {}
+    # the checks below look at whole columns, not the sample. a class of
+    # three or an "n/a" on row 812 is invisible in 200 rows and fatal at the
+    # last step. what they need is a tally -- rows per value, the cells that
+    # aren't numbers -- never the values themselves, which for a long file
+    # was most of its memory per column. read once per column, on demand.
+    # when rows are being combined the raw column isn't what the analysis
+    # sees anyway, so we vet nothing.
+    full: Dict[str, Tally] = {}
 
-    def column(name: str) -> Optional[List[str]]:
+    def column(name: str) -> Optional[Tally]:
         if grouped():
             return None
         if name not in full:
             try:
                 with prompter.scanning(f"Reading {name}") as seen:
-                    full.update(read_columns(src.path, [name],
-                                             delimiter=src.delimiter,
-                                             on_rows=seen))
+                    if src.source == "db":
+                        # the same tally, counted by the server
+                        full[name] = src.inspection.column_tally(name, on_rows=seen)
+                    else:
+                        full.update(tally_columns(src.path, [name],
+                                                  delimiter=src.delimiter,
+                                                  on_rows=seen))
             except Exception:
                 return None
         return full.get(name)
@@ -2194,7 +2487,7 @@ def ask_analysis(prompter: Prompter, src: SourceSpec,
         *here*, next to the statistics it is for, rather than folded into the
         one question about grain.
         """
-        if state["stop"] or src.source != "csv":
+        if state["stop"] or not src.is_table:
             src.feature_levels = []
             return False
         if src.group_by:
@@ -2237,7 +2530,8 @@ def ask_analysis(prompter: Prompter, src: SourceSpec,
                 prompter,
                 "Average by which column(s)?" if not levels
                 else "Average again, by which column(s)?",
-                _kind_rows(pool, kinds, checked=was, counts=counts),
+                _kind_rows(pool, kinds, checked=was, counts=counts,
+                           owner_of=_owner_hook(src)),
                 thing="one column",
                 cycle=_cycler(kinds, insp, pool, counts=counts))
             levels.append(list(picked))
@@ -2327,7 +2621,7 @@ def ask_analysis(prompter: Prompter, src: SourceSpec,
             rows = _kind_rows(
                 numeric, kinds, checked=spec.outcome_cols,
                 help_of=lambda c: ", ".join(insp.distinct(c, limit=6))
-                or "no values sampled")
+                or "no values sampled", owner_of=_owner_hook(src))
             spec.outcome_cols = ask_at_least_one(
                 prompter, "Which column(s) hold the outcomes?", rows,
                 thing="one column",
@@ -2495,7 +2789,7 @@ def ask_analysis(prompter: Prompter, src: SourceSpec,
         rows = _kind_rows(own, kinds, checked=spec.control_cols,
                           help_of=lambda c: ", ".join(
                               insp.distinct(c, limit=6))
-                          or "no values sampled")
+                          or "no values sampled", owner_of=_owner_hook(src))
         if GROUP_SIZE_COL in eligible:
             at = grain()
             rows.append(Choice(
@@ -4181,8 +4475,12 @@ def finish_screen(prompter: Prompter, *, ok: bool, manifest: dict,
             continue
         prompter.note(f"      {_shortened(line)}", style="red", wrap=True)
 
+    root = str((manifest.get("vars") or {}).get("results_root") or "")
+    if root.startswith("db://"):
+        for line in _tables_in(root):
+            prompter.note(line, style="cyan", wrap=False)
     if folder is not None:
-        prompter.note(f"\n  Everything from this run is in:\n    {folder}",
+        prompter.note(f"\n  {'The report and figures are' if root.startswith('db://') else 'Everything from this run is'} in:\n    {folder}",
                       style="cyan", wrap=False)
         outputs = _outputs_in(folder)
         for line in outputs:
@@ -4239,6 +4537,31 @@ def finish_screen(prompter: Prompter, *, ok: bool, manifest: dict,
         break
     if choice == "quit":
         raise QuitRequested(ok=ok)
+
+
+def _tables_in(root: str, limit: int = 8) -> List[str]:
+    """The tables a run left in its database, for the finished screen."""
+    from ..helpers import db as _db, tables
+
+    try:
+        ref = tables.parse_ref(root.rstrip("/") + "/x")
+        profile = _db.get_profile(ref.profile)
+        session = tables._session(ref)
+        entries = _db.registered_under(session, "/".join(ref.parts[:-1]))
+    except Exception as e:
+        return [f"\n  Results are in {root}: could not list them ({e})."]
+    where = f" (database {profile.database})" if profile.database else ""
+    lines = [f"\n  Results are in {profile.name}{where}:"]
+    # the readable path and the name the database knows it by, side by side:
+    # the name is the path with every separator flattened to underscores,
+    # which a table called features_readability makes impossible to unpick
+    width = max((len(e.logical) for e in entries), default=0)
+    for e in entries[:limit]:
+        lines.append(f"      {e.logical.ljust(width)}  {e.n_rows:,} rows   "
+                     f"(table {e.table_name})")
+    if len(entries) > limit:
+        lines.append(f"      …and {len(entries) - limit} more.")
+    return lines
 
 
 def _outputs_in(folder: Path, limit: int = 8) -> List[str]:
@@ -4339,7 +4662,10 @@ def _derive(prompter: Prompter, src: SourceSpec, selected: List[str],
     # source-agnostic; these just keep the compose call sites short.
     source_kwargs = dict(
         source=src.source,
-        input_path=str(src.path),
+        input_path=str(src.path) if src.source != "db" else None,
+        source_spec=dict(src.source_spec),
+        connection=src.connection,
+        results_root=src.results_root,
         text_cols=src.text_cols,
         id_cols=src.id_cols,
         text_mode=src.text_mode,
@@ -4591,19 +4917,22 @@ def _check_controls(plans, src) -> None:
     model or another spreadsheet.
     """
     needed = sorted({str(c) for p in plans for c in getattr(p, "controls", ())})
-    if not needed or src.source != "csv":
+    if not needed or not src.is_table:
         return
-    try:
-        columns, _rows = peek_csv(src.path, 1, delimiter=src.delimiter)
-    except Exception:
-        return          # can't read it here; the run will say so in its own words
+    if src.source == "db":
+        columns = list(src.columns)
+    else:
+        try:
+            columns, _rows = peek_csv(src.path, 1, delimiter=src.delimiter)
+        except Exception:
+            return      # can't read it here; the run will say so in its own words
     missing = [c for c in needed if c not in columns]
     if missing:
         models = ", ".join(sorted(p.model for p in plans
                                   if getattr(p, "controls", ())))
         raise ComposeError(
             f"{models} was fitted with control column(s) "
-            f"{', '.join(needed)}, and {Path(src.path).name} has no "
+            f"{', '.join(needed)}, and {src.where} has no "
             f"{', '.join(missing)} column. Score a spreadsheet that carries "
             f"them, or use a model fitted without controls.")
 
@@ -4736,7 +5065,8 @@ def run_wizard(prompter: Prompter, *, cwd: Optional[Path] = None,
             src = ask_source(prompter, analyses=analyses, text_only=text_only,
                              sources=allowed, columns_are_measures=measures)
             prompter.stage("source", "Source", status="done",
-                           detail=f"{src.path}  ({len(src.inputs)} file(s))")
+                           detail=(src.where if src.source == "db"
+                                   else f"{src.path}  ({len(src.inputs)} file(s))"))
             at = "features"
 
         if at == "features":
@@ -4790,6 +5120,13 @@ def run_wizard(prompter: Prompter, *, cwd: Optional[Path] = None,
             if back_to_source:
                 at = "source"
                 continue
+            if src.source != "media":
+                # anything in, anything out: asked once, here, where the
+                # shape of the run is settled and before anything is named
+                try:
+                    src.results_root = ask_results(prompter, src)
+                except GoBack:
+                    continue
             _ask_required_models(
                 prompter, resolve_selection(selected, providers=providers,
                                             source=src.source), overrides)

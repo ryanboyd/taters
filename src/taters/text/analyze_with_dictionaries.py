@@ -1,6 +1,5 @@
 from pathlib import Path
 from typing import Callable, Optional, Literal, Union, Sequence, Iterable, Tuple
-import csv
 
 from .dictionary_analyzers import multi_dict_analyzer as mda
 from ..helpers.find_files import find_files
@@ -203,14 +202,13 @@ def analyze_with_dictionaries(
         overwrite_existing=overwrite_existing, on_progress=on_progress,
         workers=workers)
 
-    if out_features_csv is None:
-        out_features_csv = Path.cwd() / "features" / "dictionary" / analysis_ready.name
-    out_features_csv = Path(out_features_csv)
-    out_features_csv.parent.mkdir(parents=True, exist_ok=True)
+    from ..helpers import tables
 
-    if not overwrite_existing and Path(out_features_csv).is_file():
-        print("Dictionary content coding output file already exists; returning existing file.")
-        return out_features_csv
+    out_ref = tables.output_ref(out_features_csv, source=analysis_ready,
+                                default=("features", "dictionary"))
+    if not overwrite_existing and tables.exists(out_ref):
+        print(f"Dictionary content coding output already exists; returning existing: {out_ref}")
+        return tables.handle(out_ref)
 
 
     # 2) validate the dictionaries
@@ -299,25 +297,23 @@ def analyze_with_dictionaries(
             to its string value ('' if missing).
         """
         wanted = list(pass_through_cols or [])
-        with path.open("r", newline="", encoding=encoding) as f:
-            reader = csv.DictReader(f, delimiter=delimiter)
-            fields = reader.fieldnames or []
-            if id_col not in fields or text_col not in fields:
-                raise ValueError(
-                    f"Expected columns '{id_col}' and '{text_col}' in {path}; found {fields}"
-                )
-            # if id_cols were requested, make sure they exist up-front (fail fast)
-            missing = [c for c in wanted if c not in fields]
-            if missing:
-                raise ValueError(
-                    f"Requested id_cols not present in analysis-ready CSV {path}: {missing}"
-                )
-
-            for row in reader:
-                tid = str(row.get(id_col, "") or "")
-                text = str(row.get(text_col, "") or "")
-                meta = {c: str(row.get(c, "") or "") for c in wanted}
-                yield tid, text, meta
+        # the table layer reads a file or a database table the same way
+        fields = tables.columns_of(path, encoding=encoding, delimiter=delimiter)
+        if id_col not in fields or text_col not in fields:
+            raise ValueError(
+                f"Expected columns '{id_col}' and '{text_col}' in {path}; found {fields}"
+            )
+        # if id_cols were requested, make sure they exist up-front (fail fast)
+        missing = [c for c in wanted if c not in fields]
+        if missing:
+            raise ValueError(
+                f"Requested id_cols not present in analysis-ready table {path}: {missing}"
+            )
+        for row in tables.read_rows(path, encoding=encoding, delimiter=delimiter):
+            tid = str(row.get(id_col, "") or "")
+            text = str(row.get(text_col, "") or "")
+            meta = {c: str(row.get(c, "") or "") for c in wanted}
+            yield tid, text, meta
 
 
     # we use multi_dict_analyzer as the middle layer (new API). it pulls the
@@ -331,16 +327,15 @@ def analyze_with_dictionaries(
     # analyzer uses, and the same two columns that never get carried
     from ..helpers.row_map import resolve_passthrough_columns
 
-    with analysis_ready.open("r", newline="", encoding=encoding) as _fh:
-        _header = csv.DictReader(_fh).fieldnames or []
+    _header = tables.columns_of(analysis_ready, encoding=encoding)
     passthrough = resolve_passthrough_columns(
         _header, id_cols=id_cols, group_by=group_by,
-        analysis_ready=analysis_ready)
+        analysis_ready=str(analysis_ready))
 
     mda.analyze_texts_to_csv(
         items=_iter_items_from_csv_with_meta(analysis_ready, pass_through_cols=passthrough),
         dict_files=dict_paths,
-        out_csv=out_features_csv,
+        out_csv=str(out_ref),
         relative_freq=relative_freq,
         drop_punct=drop_punct,
         rounding=rounding,
@@ -356,7 +351,7 @@ def analyze_with_dictionaries(
     )
 
 
-    return out_features_csv
+    return tables.handle(out_ref)
 
 
 

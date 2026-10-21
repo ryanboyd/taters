@@ -64,6 +64,19 @@ def _refuse_duplicate_keys(df, key_cols: Sequence[str], label: str) -> None:
 _matches = _row_filter.matches
 
 
+def _cell(value) -> str:
+    """A cell as the analysis table writes it: a float back to the shortest
+    text that reads as the same number, an integral one without the ``.0``
+    the CSV never had, a missing one blank."""
+    if isinstance(value, float):
+        if value != value:                     # NaN
+            return ""
+        if value.is_integer() and abs(value) < 1e15:
+            return str(int(value))
+        return repr(value)
+    return "" if value is None else str(value)
+
+
 def _validate_filters(filters, columns: Sequence[str], sample) -> List[list]:
     """
     The filter spec, checked while the user can still fix it.
@@ -100,7 +113,10 @@ def _validate_filters(filters, columns: Sequence[str], sample) -> List[list]:
                 raise ValueError(
                     f"filter [{column}, {op}, {value!r}]: the value is not "
                     f"a number, and {op!r} orders numbers") from None
-            if not looks_numeric(sample[column].tolist()):
+            import pandas as pd
+
+            if not (pd.api.types.is_numeric_dtype(sample[column])
+                    or looks_numeric(sample[column].tolist())):
                 raise ValueError(
                     f"filter [{column}, {op}, …]: column {column!r} holds "
                     f"non-numeric values, and {op!r} orders numbers")
@@ -215,8 +231,10 @@ def assemble_analysis_table(
     import json
 
 
-    feature_paths = [Path(p) for p in (feature_csvs or [])]
-    filter_paths = [Path(p) for p in (filter_csvs or [])]
+    from ..helpers import tables
+
+    feature_paths = [tables.parse_ref(p) for p in (feature_csvs or [])]
+    filter_paths = [tables.parse_ref(p) for p in (filter_csvs or [])]
     if not feature_paths:
         raise ValueError(
             "feature_csvs is empty: nothing to assemble"
@@ -229,19 +247,22 @@ def assemble_analysis_table(
     # the feature tables carry the extra (split) dimension; the metadata doesn't.
     feature_key = key_cols + ([split_col] if split_col else [])
 
+    # the analysis table goes where the run's tables go (a folder, or a
+    # database); the manifest and the report fragment are bookkeeping and
+    # stay in `out_dir` on disk either way
     out_dir = Path(out_dir)
-    out_path = Path(out_csv) if out_csv else out_dir / "analysis_table.csv"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    sets_path = out_path.with_name(out_path.stem + "_sets.json")
-    manifest_path = out_path.parent / "assemble_manifest.json"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_ref = tables.parse_ref(out_csv) if out_csv else \
+        tables.parse_ref(out_dir / "analysis_table.csv")
+    manifest_path = out_dir / "assemble_manifest.json"
 
-    if reusable(out_path, feature_csvs, filter_csvs, metadata_csv,
+    if reusable(out_ref, feature_csvs, filter_csvs, metadata_csv,
                 overwrite_existing=overwrite_existing, verbose=verbose,
                 what="the analysis table"):
         if verbose:
-            print(f"Analysis table already exists; returning existing file: "
-                  f"{out_path}")
-        return out_path
+            print(f"Analysis table already exists; returning existing: "
+                  f"{out_ref}")
+        return tables.handle(out_ref)
 
     if bookkeeping not in ("aside", "features"):
         raise ValueError(
@@ -257,7 +278,12 @@ def assemble_analysis_table(
 
     # ------------------------------------------------------------------ read
     announce(on_progress, "reading the feature tables")
-    frames: List[tuple] = []      # (stem, DataFrame w/ key + kept cols, is_feature)
+    # one table at a time, typed as it is read: the keys stay text, every
+    # measure becomes a float (half the memory of the same digits as
+    # strings), and each table is merged into the growing analysis table
+    # and dropped before the next is read. names that collide have to be
+    # known before the first rename, so the headers are looked at first
+    frames: List[tuple] = []      # (stem, ref, is_feature, header)
     seen_stems: dict = {}
     # per table, the numeric columns that aren't actually measures: whatever
     # the analyzer declared in the record beside the table (see
@@ -269,7 +295,7 @@ def assemble_analysis_table(
     named = {str(c) for c in bookkeeping_cols}
     for path, is_feature in ([(p, True) for p in feature_paths]
                              + [(p, False) for p in filter_paths]):
-        if not path.is_file():
+        if not tables.exists(path):
             raise FileNotFoundError(f"feature table not found: {path}")
         stem = path.stem
         if stem in seen_stems:
@@ -278,53 +304,75 @@ def assemble_analysis_table(
                 f"({seen_stems[stem]} and {path}); rename one -- the name "
                 f"labels its feature set in every result table.")
         seen_stems[stem] = path
-        df = read_str_csv(path, encoding=encoding)
-        missing = [k for k in feature_key if k not in df.columns]
+        header = [str(c) for c in tables.columns_of(path, encoding=encoding)]
+        missing = [k for k in feature_key if k not in header]
         if missing:
             raise ValueError(
-                f"{path.name} is missing key column(s) {missing}; it cannot "
+                f"{path.stem} is missing key column(s) {missing}; it cannot "
                 f"be joined into the analysis table.")
+        frames.append((stem, path, is_feature, header))
+        if not is_feature:
+            manifest["filter_only"].append(stem)
+
+    def load(stem: str, path, is_feature: bool):
+        """One feature table, keys as text and measures as floats; the
+        columns that are not numbers (and not asked for as text) dropped."""
+        import numpy as np
+        import pandas as pd
+
+        df = read_str_csv(path, encoding=encoding)
         _refuse_duplicate_keys(df, feature_key, path.name)
         kept, dropped = [], []
         wanted = {str(c) for c in text_cols}
-        for col in df.columns:
+        for col in list(df.columns):
             if col in feature_key:
                 continue
-            if col in wanted or looks_numeric(df[col].tolist()):
+            if col in wanted:
                 kept.append(col)
-            else:
+                continue
+            stripped = df[col].str.strip()
+            blank = stripped == ""
+            if blank.all():
                 dropped.append(col)
+                continue
+            try:
+                values = pd.to_numeric(stripped.where(~blank, None))
+            except (ValueError, TypeError):
+                dropped.append(col)
+                continue
+            df[col] = values.astype("float64")
+            kept.append(col)
         if dropped:
             manifest["dropped_columns"][stem] = dropped
             if verbose:
-                print(f"[assemble] {path.name}: dropping non-numeric "
+                print(f"[assemble] {path.stem}: dropping non-numeric "
                       f"column(s) {dropped}")
         if not kept:
             raise ValueError(
-                f"{path.name} has no numeric feature columns beyond the key; "
+                f"{path.stem} has no numeric feature columns beyond the key; "
                 f"there is nothing in it to analyze.")
-        frames.append((stem, df[feature_key + kept], is_feature))
-        if not is_feature:
-            manifest["filter_only"].append(stem)
-        elif bookkeeping == "aside":
+        if is_feature and bookkeeping == "aside":
             declared = set(_declared_bookkeeping(path)) | named
             found = [c for c in kept if _is_bookkeeping(c, declared)]
             if found:
                 aside[stem] = found
                 manifest["bookkeeping"][stem] = found
+        del np
+        return df[feature_key + kept]
 
     # ----------------------------------------------------------- metadata
     meta = None
     meta_kept: List[str] = []
     if metadata_csv is not None:
         announce(on_progress, "reading the metadata")
-        meta = read_str_csv(Path(metadata_csv), encoding=encoding)
+        meta_ref = tables.parse_ref(metadata_csv)
+        meta = read_str_csv(meta_ref, encoding=encoding)
         missing = [k for k in key_cols if k not in meta.columns]
         if missing:
             raise ValueError(
-                f"{Path(metadata_csv).name} is missing key column(s) "
+                f"{meta_ref.stem} is missing key column(s) "
                 f"{missing}; it cannot anchor the analysis table.")
-        _refuse_duplicate_keys(meta, key_cols, Path(metadata_csv).name)
+        _refuse_duplicate_keys(meta, key_cols, meta_ref.name)
         if metadata_cols:
             absent = [c for c in metadata_cols if c not in meta.columns]
             if absent:
@@ -361,8 +409,8 @@ def assemble_analysis_table(
     # where these tables end up.
     reserved = set(feature_key) | set(meta_kept)
     counts: dict = {}
-    for _, df, _is_feature in frames:
-        for col in df.columns:
+    for _stem, _path, _is_feature, header in frames:
+        for col in header:
             if col not in feature_key:
                 counts[col] = counts.get(col, 0) + 1
     colliding = {c for c, n in counts.items() if n > 1} | \
@@ -375,13 +423,27 @@ def assemble_analysis_table(
     # the record of how they were measured -- and that's the whole point of
     # recording it.
     sources: dict = {}
-    renamed_frames = []
-    for stem, df, is_feature in frames:
-        renames = {c: f"{stem}{SEPARATOR}{c}" for c in df.columns
-                   if c not in feature_key and c in colliding}
-        if renames:
-            df = df.rename(columns=renames)
-            manifest["renamed_columns"].update(renames)
+
+    def loaded():
+        """Each table in turn, typed and renamed, never two at once."""
+        for stem, path, is_feature, _header in frames:
+            df = load(stem, path, is_feature)
+            renames = {c: f"{stem}{SEPARATOR}{c}" for c in df.columns
+                       if c not in feature_key and c in colliding}
+            if renames:
+                df = df.rename(columns=renames)
+                manifest["renamed_columns"].update(renames)
+            yield stem, df, is_feature, renames
+            del df
+
+    # ---------------------------------------------------------- join
+    # the metadata (one row per text) anchors the table when there is one;
+    # otherwise the first feature table does. each later table is merged
+    # in as soon as it is loaded and then let go
+    announce(on_progress, "joining the tables")
+    table = meta
+    start_label = tables.parse_ref(metadata_csv).stem if meta is not None else ""
+    for stem, df, is_feature, renames in loaded():
         columns_here = [c for c in df.columns if c not in feature_key]
         # only a feature table's columns become a *set*. every analysis reads
         # the sidecar's `sets` to decide what counts as a feature, so if a
@@ -395,21 +457,16 @@ def assemble_analysis_table(
             columns_here = [c for c in columns_here if c not in kept_aside]
         (sets if is_feature else filter_columns)[stem] = columns_here
         if is_feature and stem in seen_stems:
-            sources[stem] = str(Path(seen_stems[stem]).resolve())
-        renamed_frames.append((stem, df))
-
-    # --------------------------------------------------------------- join
-    announce(on_progress, "joining the tables")
-    if meta is not None:
-        table = meta
-        start_label = Path(metadata_csv).name
-    else:
-        stem, table = renamed_frames[0]
-        start_label = stem
-        renamed_frames = renamed_frames[1:]
-    manifest["rows_start"] = int(len(table))
-    manifest["start"] = start_label
-    for stem, df in renamed_frames:
+            src_ref = seen_stems[stem]
+            sources[stem] = str(src_ref) if src_ref.is_db else str(Path(src_ref).resolve())
+        if table is None:
+            table, start_label = df, stem
+            manifest["rows_start"] = int(len(table))
+            manifest["start"] = start_label
+            continue
+        if "rows_start" not in manifest:
+            manifest["rows_start"] = int(len(table))
+            manifest["start"] = start_label
         before = int(len(table))
         # the metadata is one row per text; a feature table under a split is
         # several. joining on what they share broadcasts the metadata across
@@ -432,6 +489,9 @@ def assemble_analysis_table(
         if on_progress is not None:
             on_progress(len(manifest["joins"]), len(frames),
                         f"joined {stem}")
+    if "rows_start" not in manifest:
+        manifest["rows_start"] = int(len(table))
+        manifest["start"] = start_label
 
     if len(table) == 0:
         raise ValueError(
@@ -444,7 +504,7 @@ def assemble_analysis_table(
     checked = _validate_filters(filters, table.columns, table)
     for column, op, value in checked:
         before = int(len(table))
-        mask = table[column].map(lambda cell: _matches(cell, op, value))
+        mask = table[column].map(lambda cell: _matches(_cell(cell), op, value))
         table = table[mask]
         manifest["filters"].append(
             {"filter": [column, op, value], "removed": before - int(len(table))})
@@ -457,25 +517,26 @@ def assemble_analysis_table(
 
     # -------------------------------------------------------------- write
     announce(on_progress, "writing the analysis table")
-    with atomic_write(out_path, mode="w", encoding=encoding,
-                      newline="") as fh:
-        table.to_csv(fh, index=False)
-    with atomic_write(sets_path, mode="w", encoding="utf-8") as fh:
-        json.dump({"key": feature_key, "split": split_col or "",
-                   "metadata": meta_kept, "sets": sets,
-                   "sources": sources,
-                   "filters": filter_columns,
-                   "bookkeeping": bookkeeping_columns}, fh, indent=1)
+    columns = [str(c) for c in table.columns]
+    with tables.write_table(out_ref, columns, encoding=encoding) as w:
+        for row in table.itertuples(index=False, name=None):
+            w.writerow([_cell(v) for v in row])
+    tables.write_sidecar(out_ref, "sets", {
+        "key": feature_key, "split": split_col or "",
+        "metadata": meta_kept, "sets": sets,
+        "sources": sources,
+        "filters": filter_columns,
+        "bookkeeping": bookkeeping_columns})
     manifest["taters"] = taters_version()
+    manifest["table"] = str(out_ref)
     with atomic_write(manifest_path, mode="w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=1)
 
-    write_section(out_path.parent, "assemble",
-                  _section_md(manifest, sets))
+    write_section(out_dir, "assemble", _section_md(manifest, sets))
     if verbose:
         print(f"[assemble] {manifest['rows_final']:,} rows × "
-              f"{len(table.columns):,} columns -> {out_path}")
-    return out_path
+              f"{len(table.columns):,} columns -> {out_ref}")
+    return tables.handle(out_ref)
 
 
 def _is_bookkeeping(column: str, declared: Iterable[str]) -> bool:

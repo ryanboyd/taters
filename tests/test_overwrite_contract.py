@@ -64,6 +64,7 @@ WRITERS = [
     ("helpers", "stack_spreadsheets"),
     ("helpers", "wide_to_long"),
     ("helpers", "long_to_wide"),
+    ("helpers", "export_table"),
 ]
 
 # `extract_wavs_from_video` still takes the old `overwrite` spelling, but only

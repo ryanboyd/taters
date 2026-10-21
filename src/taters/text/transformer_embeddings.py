@@ -22,11 +22,9 @@ sentence gets blank cells, not zeros.
 """
 from __future__ import annotations
 
-import csv
 from pathlib import Path
 from typing import Callable, List, Literal, Optional, Sequence, Union
 
-from ..helpers.atomic import atomic_write
 from ..helpers.cliargs import CliSpec
 from ..helpers.csvio import widen_csv_field_limit
 from ..helpers.doc_text import DOCUMENT_PATTERN
@@ -208,23 +206,25 @@ def extract_transformer_embeddings(
         overwrite_existing=overwrite_existing, on_progress=on_progress,
         workers=workers, carry_cols=list(pass_through_cols or []) or None,
         verbose=verbose)
-    out_features_csv = Path(out_features_csv) if out_features_csv else \
-        Path.cwd() / "features" / "transformer_embeddings.csv"
-    out_features_csv.parent.mkdir(parents=True, exist_ok=True)
-    if not overwrite_existing and out_features_csv.is_file():
+    from ..helpers import tables
+
+    out_ref = tables.output_ref(out_features_csv, source=analysis_ready,
+                                default=("features",))
+    if not out_features_csv:
+        out_ref = out_ref.sibling("transformer_embeddings")
+    if not overwrite_existing and tables.exists(out_ref):
         if verbose:
-            print("Transformer embeddings output already exists; returning existing file.")
-        return out_features_csv
+            print(f"Transformer embeddings output already exists; returning existing: {out_ref}")
+        return tables.handle(out_ref)
 
     announce(on_progress, f"loading the encoder ({model_name_or_path})")
     set_threads(workers)
     model, tokenizer, resolved, device_name, reason = load_encoder(
         model_name_or_path, device=device, verbose=verbose)
-    with analysis_ready.open("r", newline="", encoding=encoding) as rf:
-        header_fields = csv.DictReader(rf, delimiter=delimiter).fieldnames or []
+    header_fields = tables.columns_of(analysis_ready, encoding=encoding, delimiter=delimiter)
     passthrough = resolve_passthrough_columns(
         header_fields, pass_through_cols=pass_through_cols, id_cols=id_cols,
-        group_by=group_by, analysis_ready=analysis_ready)
+        group_by=group_by, analysis_ready=str(analysis_ready))
 
     total = count_rows(analysis_ready, on_progress=on_progress)
     # which device we ended up on, said where it stays put: the ticks below
@@ -271,38 +271,39 @@ def extract_transformer_embeddings(
             writer.writerow(cells)
             ticker.tick()
 
-    with atomic_write(out_features_csv, newline="", encoding=encoding) as out, \
-            analysis_ready.open("r", newline="", encoding=encoding) as rf:
-        reader = csv.DictReader(rf, delimiter=delimiter)
-        writer = csv.writer(out)
-        # we can't write the header until we know the embedding width, and we
-        # don't know that until the first forward pass. so, we buffer rows until
-        # the first flush and write the header then
-        header_written = False
-        pending: list = []
-        buffered = 0
+    # we can't name the columns until we know the embedding width, and we
+    # don't know that until the first forward pass. so the first batch is
+    # read and probed before the table is opened, and the rest streams in
+    reader = iter(tables.read_rows(analysis_ready, encoding=encoding, delimiter=delimiter))
+    pending: list = []
+    buffered = 0
+    for row in reader:
+        sents = split_sentences(row.get("text") or "")
+        pending.append((row, sents))
+        buffered += len(sents)
+        if buffered >= _SENTENCES_PER_CALL:
+            break
+    _probe_dim(pending, encode, model, layers)
+    dim = _probe_dim.dim
+    header = _header(passthrough, dim)
+    hints = {c: "text" for c in ["text_id", *passthrough]}
+    with tables.write_table(out_ref, header, encoding=encoding, hints=hints) as writer:
+        if pending:
+            flush(pending, writer)
+            pending, buffered = [], 0
         for row in reader:
             sents = split_sentences(row.get("text") or "")
             pending.append((row, sents))
             buffered += len(sents)
             if buffered >= _SENTENCES_PER_CALL:
-                if not header_written:
-                    _probe_dim(pending, encode, model, layers)
-                    dim = _probe_dim.dim
-                    writer.writerow(_header(passthrough, dim))
-                    header_written = True
                 flush(pending, writer)
                 pending, buffered = [], 0
-        if not header_written:
-            _probe_dim(pending, encode, model, layers)
-            dim = _probe_dim.dim
-            writer.writerow(_header(passthrough, dim))
         if pending:
             flush(pending, writer)
     if verbose:
         print(f"[transformer_embeddings] {total} text(s) embedded with {resolved.label} "
-              f"(layers={layers}, pooling={pooling}) on {device_name} -> {out_features_csv}")
-    return out_features_csv
+              f"(layers={layers}, pooling={pooling}) on {device_name} -> {out_ref}")
+    return tables.handle(out_ref)
 
 
 def _header(passthrough: Sequence[str], dim: int) -> List[str]:

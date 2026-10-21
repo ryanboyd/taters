@@ -90,6 +90,19 @@ where the results should go. You never have to write a line of code.
 
     Working with text only? You don't need this.
 
+??? note "My data is in a database"
+
+    Text in a MySQL, MariaDB or PostgreSQL database rather than in files?
+    One extra installs the drivers for both:
+
+    ```bash
+    pip install "taters[db]"
+    ```
+
+    A SQLite file needs nothing more. Setting up the connection, including a
+    database you reach by logging in to a machine first, is on
+    [Working with a Database](guides/databases.md).
+
 ??? note "I like keeping my Python installs tidy"
 
     A virtual environment keeps TATERS and its dependencies from mingling

@@ -295,10 +295,17 @@ def resolve_feature_sets(
         sets = {str(k): [str(c) for c in v] for k, v in feature_sets.items()}
     else:
         if feature_sets == "per_table":
-            sidecar = Path(table_csv).with_name(
-                Path(table_csv).stem + "_sets.json")
-        else:
-            sidecar = Path(feature_sets)
+            from ..helpers.tables import read_sidecar
+
+            doc = read_sidecar(table_csv, "sets")
+            if not doc:
+                raise FileNotFoundError(
+                    f"no feature sets recorded beside {table_csv}. "
+                    f"feature_sets='per_table' needs the sidecar the assemble "
+                    f"step writes next to the analysis table; re-run the "
+                    f"assemble step, or pass explicit sets.")
+            return {str(k): [str(c) for c in v] for k, v in (doc.get("sets") or {}).items()}
+        sidecar = Path(feature_sets)
         if not sidecar.is_file():
             raise FileNotFoundError(
                 f"{sidecar} does not exist. feature_sets='per_table' needs "
@@ -335,12 +342,10 @@ def default_feature_cols(table, table_csv: PathLike,
     explicitly excluded counts as a feature; the group/outcome columns an
     analysis was pointed at are excluded by their caller.
     """
-    import json
+    from ..helpers.tables import read_sidecar
 
-    sidecar = Path(table_csv).with_name(Path(table_csv).stem + "_sets.json")
-    if sidecar.is_file():
-        with sidecar.open("r", encoding="utf-8") as fh:
-            payload = json.load(fh)
+    payload = read_sidecar(table_csv, "sets")
+    if payload:
         cols = [c for cols in (payload.get("sets") or {}).values()
                 for c in cols]
         return [c for c in cols if c not in set(exclude)]
@@ -349,14 +354,14 @@ def default_feature_cols(table, table_csv: PathLike,
             if c not in banned and looks_numeric(table[c].tolist())]
 
 
-def read_str_csv(path, *, encoding: str):
+def read_str_csv(path, *, encoding: str, columns=None):
     """A CSV as an all-string DataFrame -- no NA magic, no dtype guessing.
     Every analysis reads its table this way; it lived in `assemble` and four
-    siblings imported it from there."""
-    import pandas as pd
+    siblings imported it from there. ``columns`` narrows it to the ones a
+    caller needs, which for a wide feature table is most of the memory."""
+    from ..helpers.tables import read_str_table
 
-    return pd.read_csv(path, dtype=str, keep_default_na=False,
-                       encoding=encoding)
+    return read_str_table(path, encoding=encoding, columns=columns)
 
 
 def components_appendix(pca_notes) -> str:
@@ -482,16 +487,14 @@ def source_tables(table_csv, cols) -> list:
     missing: this is provenance for a human to act on, so being unable to
     determine it is not an error.
     """
-    import json
+    from ..helpers.tables import read_sidecar
 
     wanted = set(str(c) for c in cols)
-    sidecar = Path(table_csv).with_name(Path(table_csv).stem + "_sets.json")
-    if not sidecar.is_file():
-        return []
     try:
-        with sidecar.open("r", encoding="utf-8") as fh:
-            doc = json.load(fh)
-    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+        doc = read_sidecar(table_csv, "sets") or {}
+    except Exception:
+        return []
+    if not doc:
         return []
     found = []
     for stem, owned in (doc.get("sets") or {}).items():
@@ -514,16 +517,15 @@ def zero_when_absent(table_csv, cols) -> list:
     Empty when the sidecar or the records are missing: without a record
     nothing is known, and "unknown" must fall on the refusing side.
     """
-    import json
-
     from ..helpers import provenance
+    from ..helpers.tables import read_sidecar
 
     wanted = set(str(c) for c in cols)
-    sidecar = Path(table_csv).with_name(Path(table_csv).stem + "_sets.json")
     try:
-        with sidecar.open("r", encoding="utf-8") as fh:
-            doc = json.load(fh)
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        doc = read_sidecar(table_csv, "sets") or {}
+    except Exception:
+        return []
+    if not doc:
         return []
     sources = doc.get("sources") or {}
     out = []
@@ -826,21 +828,24 @@ def reusable(output, *inputs, overwrite_existing: bool, verbose: bool,
     asked to be redone, and is at least as new as every input that exists.
     Says so when it is not.
     """
-    output = Path(output)
-    if overwrite_existing or not output.is_file():
+    from ..helpers.tables import exists, modified_at, parse_ref
+
+    out_ref = parse_ref(output)
+    if overwrite_existing or not exists(out_ref):
         return False
-    made = output.stat().st_mtime
+    made = modified_at(out_ref) or 0.0
     newer = []
     for path in inputs:
         if not path:
             continue
         for one in (path if isinstance(path, (list, tuple, set)) else [path]):
-            p = Path(str(one))
             try:
-                if p.is_file() and p.stat().st_mtime > made:
-                    newer.append(p.name)
-            except OSError:
+                ref = parse_ref(one)
+                when = modified_at(ref) if exists(ref) else None
+            except Exception:
                 continue
+            if when is not None and when > made:
+                newer.append(ref.stem)
     if newer:
         if verbose:
             print(f"[stats] {what} exists but {', '.join(newer)} changed "

@@ -114,6 +114,7 @@ FACADE_METHODS = [
     ("helpers", "stack_spreadsheets"),
     ("helpers", "wide_to_long"),
     ("helpers", "long_to_wide"),
+    ("helpers", "export_table"),
     ("video", "analyze_visual_dynamics"),
     ("video", "analyze_faces"),
     ("video", "extract_video_embeddings"),

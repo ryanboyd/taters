@@ -76,6 +76,15 @@ def count_rows(
 
     widen_csv_field_limit()
 
+    if getattr(path, "is_db", False) or str(path).startswith(("db://", "db:/")):
+        # a table in a database knows its own size; see helpers.tables. a
+        # file-backed ref falls through and gets counted like the path it is
+        from .tables import count
+
+        try:
+            return count(path)
+        except Exception:
+            return 0
     seen = 0
     try:
         with Path(path).open("r", encoding=encoding, newline="") as fh:

@@ -193,6 +193,9 @@ def test_var_templates_are_declared_somewhere(recipe):
     declared = set(BASE_VARS)
     for other in RECIPES:
         declared |= set(other.vars)
+    # a source's own vars are declared by the source, not by any recipe
+    for source_vars in _r.SOURCE_VARS.values():
+        declared |= set(source_vars)
 
     # templates_in() walks nested lists/dicts and copes with templates buried in
     # a longer string, e.g. "{{var:features_dir}}/acoustics"
@@ -744,7 +747,7 @@ def test_every_level_groups_on_columns_the_source_actually_produces():
     for source, levels in _r.LEVELS.items():
         for level in levels:
             if level.group_by is None:
-                assert source == "csv", (
+                assert source in ("csv", "db"), (
                     f"{source}/{level.id} leaves its columns to the user, but "
                     "only a spreadsheet can do that"
                 )
@@ -1114,7 +1117,7 @@ def test_every_stats_step_is_a_tail_global_on_the_csv_path():
         if recipe.stage != "analyze":
             continue
         assert recipe.scope == "global", recipe.id
-        assert recipe.sources == ("csv",), recipe.id
+        assert recipe.sources == _r.TABULAR, recipe.id
         assert not recipe.text_input, recipe.id
         assert "stats" in recipe.tags, recipe.id
 
@@ -1130,7 +1133,7 @@ def test_word_count_is_a_filter_ingredient_not_a_feature_to_pick():
     # ...but it's still a real, joinable step the pipeline can run
     recipe = _r.by_id("word_count")
     assert recipe.feature_table and recipe.scope == "global"
-    assert set(recipe.sources) == {"media", "txt_dir", "csv"}
+    assert set(recipe.sources) == {"media", "txt_dir", "csv", "db"}
 
 
 # ---------------------------------------------------------------------------

@@ -57,7 +57,6 @@ References
 from __future__ import annotations
 
 import bz2
-import csv
 import lzma
 import re
 import string
@@ -68,7 +67,7 @@ from pathlib import Path
 from typing import (Callable, Dict, Iterable, List, Literal, Optional, Sequence,
                     Tuple, Union)
 
-from ..helpers.atomic import atomic_write
+from ..helpers import tables
 from ..helpers.cliargs import CliSpec
 from ..helpers.doc_text import DOCUMENT_PATTERN
 from ..helpers.feature_columns import ColumnSpec
@@ -526,7 +525,9 @@ def analyze_entropy(
         The usual input contract: a spreadsheet of texts, a folder of
         documents, or a table somebody already gathered.
     out_features_csv : str or Path, optional
-        Where to write. Default ``./features/entropy.csv``.
+        Where to write: a file path, or a ``db://`` table. Default
+        ``./features/entropy/<source stem>.csv`` beside a file, the matching
+        table beside a database source.
     overwrite_existing : bool, default False
         Rebuild the table if it is already there.
     lowercase : bool, default True
@@ -567,8 +568,8 @@ def analyze_entropy(
 
     Returns
     -------
-    pathlib.Path
-        ``out_features_csv``.
+    pathlib.Path or TableRef
+        ``out_features_csv``: the path of a file, the ref of a database table.
 
     Notes
     -----
@@ -598,20 +599,24 @@ def analyze_entropy(
         overwrite_existing=overwrite_existing, on_progress=on_progress,
         workers=workers, verbose=verbose)
 
-    out = Path(out_features_csv) if out_features_csv \
-        else Path("features") / "entropy.csv"
-    if out.exists() and not overwrite_existing:
+    # a file beside the run, or a table in the database the text came from;
+    # see helpers.tables for the one rule. this step used to build its own
+    # Path here, which is why it was the one "database-capable" analyzer
+    # that blew up the moment a db:// table reached it
+    out_ref = tables.output_ref(out_features_csv, source=analysis_ready,
+                                default=("features", "entropy"))
+    if not overwrite_existing and tables.exists(out_ref):
         if verbose:
-            print(f"[entropy] exists, leaving alone: {out}")
-        return out
-    out.parent.mkdir(parents=True, exist_ok=True)
+            print(f"[entropy] exists, leaving alone: {out_ref}")
+        return tables.handle(out_ref)
 
     if int(max_order) < 1:
         raise ValueError("max_order must be at least 1: order 1 is the "
                          "single-unit entropy, which is the point of it.")
 
-    with Path(analysis_ready).open("r", newline="", encoding=encoding) as fin:
-        header_fields = csv.DictReader(fin).fieldnames or []
+    # the header alone says what the output looks like; the gathered table
+    # is always comma-separated, so `delimiter` stopped at the gatherer
+    header_fields = tables.columns_of(analysis_ready, encoding=encoding)
     if "text_id" not in header_fields or "text" not in header_fields:
         raise ValueError(f"Expected columns 'text_id' and 'text' in "
                          f"{analysis_ready}; found {header_fields}")
@@ -624,10 +629,11 @@ def analyze_entropy(
                      strip_digits=strip_digits, max_order=int(max_order))
 
     announce(on_progress, "measuring entropy")
-    with atomic_write(out, newline="", encoding="utf-8") as fout:
-        writer = csv.DictWriter(fout, fieldnames=["text_id", *passthrough,
-                                                  *names])
-        writer.writeheader()
+    # the ids and whatever rides along are text; everything we measure is a
+    # number, which a database can see for itself
+    hints = {c: "text" for c in ["text_id", *passthrough]}
+    with tables.write_table(out_ref, ["text_id", *passthrough, *names],
+                            encoding=encoding, hints=hints) as writer:
         for row, values in map_text_rows(
                 analysis_ready, encoding=encoding, workers=workers,
                 message="entropy", on_progress=on_progress,
@@ -642,8 +648,8 @@ def analyze_entropy(
             writer.writerow(out_row)
 
     if verbose:
-        print(f"[entropy] wrote {out}")
-    return out
+        print(f"[entropy] wrote {out_ref}")
+    return tables.handle(out_ref)
 
 
 CLI = CliSpec(

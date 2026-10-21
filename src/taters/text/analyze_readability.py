@@ -3,10 +3,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Callable, Optional, Union, Sequence, Literal, Dict, Any
-import csv
 
 
-from ..helpers.atomic import atomic_write
+from ..helpers import tables
 from ..helpers.doc_text import DOCUMENT_PATTERN
 from ..helpers.feature_columns import ColumnSpec
 from ..helpers.text_gather import (resolve_analysis_ready)
@@ -299,14 +298,13 @@ def analyze_readability(
         overwrite_existing=overwrite_existing, on_progress=on_progress,
         workers=workers)
 
-    if out_features_csv is None:
-        out_features_csv = Path.cwd() / "features" / "readability" / analysis_ready.name
-    out_features_csv = Path(out_features_csv)
-    out_features_csv.parent.mkdir(parents=True, exist_ok=True)
-
-    if not overwrite_existing and out_features_csv.is_file():
-        print(f"Readability output file already exists; returning existing file: {out_features_csv}")
-        return out_features_csv
+    # a file beside the run, or a table in the database the text came from;
+    # see helpers.tables for the one rule
+    out_ref = tables.output_ref(out_features_csv, source=analysis_ready,
+                                default=("features", "readability"))
+    if not overwrite_existing and tables.exists(out_ref):
+        print(f"Readability output already exists; returning existing: {out_ref}")
+        return tables.handle(out_ref)
 
     # 3) our list of metrics
     metrics = list(METRICS)
@@ -317,8 +315,7 @@ def analyze_readability(
     # we did pass it on, a ";" spreadsheet blew up with "Expected columns
     # 'text_id' and 'text' ... found ['text_id,id,text']" -- on the one step
     # that almost every study picks
-    with analysis_ready.open("r", newline="", encoding=encoding) as fin:
-        header_fields = csv.DictReader(fin).fieldnames or []
+    header_fields = tables.columns_of(analysis_ready, encoding=encoding)
 
     if "text_id" not in header_fields or "text" not in header_fields:
         raise ValueError(
@@ -332,7 +329,7 @@ def analyze_readability(
 
     passthrough_cols = resolve_passthrough_columns(
         header_fields, pass_through_cols=pass_through_cols, id_cols=id_cols,
-        group_by=group_by, analysis_ready=analysis_ready)
+        group_by=group_by, analysis_ready=str(analysis_ready))
     fieldnames = ["text_id", *passthrough_cols, *metrics]
 
     # 5) scoring is CPU-bound per row and the rows don't depend on each other,
@@ -343,9 +340,9 @@ def analyze_readability(
     from ..helpers.parallel_map import pool_workers
     from ..helpers.row_map import map_text_rows
 
-    with atomic_write(out_features_csv, newline="", encoding=encoding) as fout:
-        writer = csv.DictWriter(fout, fieldnames=fieldnames)
-        writer.writeheader()
+    with tables.write_table(out_ref, fieldnames, encoding=encoding,
+                            hints={c: "text" for c in ["text_id", *passthrough_cols]}
+                            ) as writer:
         for row, values in map_text_rows(
                 analysis_ready, encoding=encoding,
                 workers=lambda n_rows: pool_workers(workers, n_rows),
@@ -360,7 +357,7 @@ def analyze_readability(
                 **dict(zip(metrics, values)),
             }
             writer.writerow(out_row)
-    return out_features_csv
+    return tables.handle(out_ref)
 
 
 # ---- CLI ---------------------------------------------------------------------

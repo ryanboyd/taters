@@ -40,9 +40,11 @@ That's it. After that, running the command `taters` opens the app. It asks what 
 
 Every pipeline gets a folder of its own holding the pipeline file, the results, and a record of what ran — so you can re-run it, edit it, or hand the whole thing to a colleague, share it on OSF, whatever's clever.
 
-The menu is basically just a list of verbs. What would you like to do? Tidy up a spreadsheet (merge two by participant ID, stack a folder of them, flip wide to long), extract features, extract features *and* run the statistics, run statistics on numbers you already have, train a model, or re-run something you built before? Sure, we can do that.
+The menu is basically just a list of verbs. What would you like to do? Tidy up a spreadsheet (merge two by participant ID, stack a folder of them, flip wide to long, pull tables out of a database), extract features, extract features *and* run the statistics, run statistics on numbers you already have, train a model, or re-run something you built before? Sure, we can do that.
 
-It works on audio and video, and on text you already have. To be fair, it's mostly for text. But hey, it does other things too. More stuff being added regularly as I have the time. Point it at a folder of `.txt` (or `.docx`, or `.pdf`) files or a spreadsheet with a column of text and start extracting features to your heart's content. No ffmpeg, no models, no GPU if you don't need them.
+It works on audio and video, and on text you already have. To be fair, it's mostly for text. But hey, it does other things too. More stuff being added regularly as I have the time. Point it at a folder of `.txt` (or `.docx`, or `.pdf`) files, a spreadsheet with a column of text, or tables in a MySQL, PostgreSQL or SQLite database (joined across tables if the text and the outcomes live apart, results written back as tables, and a database you reach over ssh is fine) and start extracting features to your heart's content. No ffmpeg, no models, no GPU if you don't need them.
+
+Read more: **[Working with a database](https://www.taters.wiki/guides/databases/)**
 
 Read more: **[The app guide](https://www.taters.wiki/guides/wizard/)**
 

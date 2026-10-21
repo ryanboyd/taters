@@ -60,8 +60,11 @@ class Finding:
     fatal: bool = False
 
 
-def level_counts(values: Sequence[object]) -> Counter:
-    """Rows per distinct non-blank value, whitespace trimmed."""
+def level_counts(values) -> Counter:
+    """Rows per distinct non-blank value, whitespace trimmed -- from the
+    values, or straight from a column's :class:`~taters.ui.columns.Tally`."""
+    if hasattr(values, "counts") and hasattr(values, "truncated"):
+        return values.counts
     return Counter(str(v).strip() for v in values if str(v or "").strip())
 
 
@@ -196,17 +199,20 @@ def non_numeric_outcome(values: Sequence[object], column: str) -> Optional[Findi
     the words are the problem and the question is re-asked, with the cells
     named so they can be fixed in the spreadsheet.
     """
-    bad = Counter()
-    seen = 0
-    for v in values:
-        raw = str(v or "").strip()
-        if not raw:
-            continue
-        try:
-            float(raw)
-            seen += 1
-        except ValueError:
-            bad[raw] += 1
+    if hasattr(values, "bad") and hasattr(values, "numeric"):
+        bad, seen = Counter(values.bad), int(values.numeric)
+    else:
+        bad = Counter()
+        seen = 0
+        for v in values:
+            raw = str(v or "").strip()
+            if not raw:
+                continue
+            try:
+                float(raw)
+                seen += 1
+            except ValueError:
+                bad[raw] += 1
     if not seen and not bad:
         return Finding(column, fatal=True,
                        message=f"{column} is empty; an outcome needs numbers.")

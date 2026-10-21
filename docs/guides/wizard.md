@@ -25,7 +25,7 @@ of the answers do not involve new data at all.
 
 | | |
 |---|---|
-| **Wrangle/Analyze data** | The two things you do to a spreadsheet you already have. *Wrangle data* collects text into a tidy spreadsheet — a folder of documents to CSV, or a CSV combined by any column(s) — and does the other things a spreadsheet needs before it is ready: two files matched up by an ID, several stacked into one, or one flipped between wide and long, with a read-back of what will match before anything is written. *Analyze data* runs the statistics over one: LIWC output from elsewhere, questionnaire scales, anything measured in another program. Tick which columns are the predictors and answer the same statistics questions; nothing is extracted. |
+| **Wrangle/Analyze data** | The two things you do to a spreadsheet you already have. *Wrangle data* collects text into a tidy spreadsheet — a folder of documents to CSV, or a CSV combined by any column(s) — and does the other things a spreadsheet needs before it is ready: two files matched up by an ID, several stacked into one, one flipped between wide and long, or tables copied out of (or a spreadsheet into) a database — with a read-back of what will match before anything is written. See [Working with a Database](databases.md). *Analyze data* runs the statistics over one: LIWC output from elsewhere, questionnaire scales, anything measured in another program. Tick which columns are the predictors and answer the same statistics questions; nothing is extracted. |
 | **Extract features from my data** | Turn audio, video or text into measures. Builds a new pipeline. |
 | **Extract features and run analyses** | The same, then compare groups, correlate with outcomes, or fit a prediction model. Needs a spreadsheet with those columns in it. |
 | **Wrangle Language Models** | Asks what you want to do, then with what. *Train a model from scratch* — word embeddings, or a whole transformer with its own tokenizer (heavy-duty, and it tells you the cost first). *Adapt an existing model to my texts*. *Fine-tune a transformer to predict my outcomes*. *Import or export language models* — your text encoders and saved models, or pre-trained word vectors from elsewhere. Every model trained here is saved with a report of how it was trained, kept in your library, and applied to new data from the checklist. |
@@ -418,7 +418,17 @@ Rename, copy, import, export or delete your pipelines. The pipelines that ship
 with Taters are read-only — copy one to adapt it.
 
 Deleting asks you to type the pipeline's name, and says what else goes with it:
-a pipeline owns its folder, so deleting it removes that run's results too.
+a pipeline owns its folder, so deleting it removes that run's results too. A
+run that wrote its results into a database left tables there; Taters says how
+many and asks whether to remove those as well (default no).
+
+### Database connections
+
+Where the databases are and how Taters logs in: a name, the kind of database,
+the server (or the machine you ssh to first), your username, and how the
+password is obtained, which is never by saving it. Add one, test it, change
+it, forget it. The whole story, including databases behind an ssh host and
+PuTTY keys, is on [Working with a Database](databases.md).
 
 #### Manage saved models, text encoders, dictionaries, archetypes, stop lists
 

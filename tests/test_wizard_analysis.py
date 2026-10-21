@@ -809,7 +809,7 @@ def test_the_analysis_flow_only_offers_a_spreadsheet(tmp_path):
         pass
     offered = [c.value for c in p.offered_choices(
         "What kind of data do you have?")]
-    assert offered == ["csv"]
+    assert offered == ["csv", "db"], "a spreadsheet, or tables in a database"
     assert "Statistics need a spreadsheet" in p.text_output
 
     # ...and the ordinary flow still offers everything
@@ -818,7 +818,7 @@ def test_the_analysis_flow_only_offers_a_spreadsheet(tmp_path):
         wiz.ask_source(p2)
     except Exception:
         pass
-    assert len(p2.offered_choices("What kind of data do you have?")) == 5
+    assert len(p2.offered_choices("What kind of data do you have?")) == 6
 
 
 def test_the_optional_middle_mode_still_exists_for_callers(tmp_path,

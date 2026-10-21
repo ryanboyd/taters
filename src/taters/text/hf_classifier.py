@@ -52,7 +52,6 @@ model in Settings like any other class labels.
 """
 from __future__ import annotations
 
-import csv
 import json
 import shutil
 from dataclasses import dataclass
@@ -73,6 +72,11 @@ FEATURE_COLUMNS = ColumnSpec(
     label="Hugging Face classifier",
     dynamic="pred_/p_ columns named from the model's own labels and classes",
 )
+
+#: how many texts go to the model per call when scoring. each call sorts its
+#: windows by length so the batches pad little; this many is plenty for
+#: that, and it's the whole of what sits in RAM at once
+_TEXTS_PER_CALL = 512
 
 __all__ = ["HF_CLASSIFIER_KIND", "CheckpointInfo", "inspect_checkpoint",
            "checkpoint_problem", "cached_hub_classifiers", "import_hf_classifier",
@@ -598,13 +602,16 @@ def apply_hf_classifier(
         include_source_path=include_source_path,
         overwrite_existing=overwrite_existing, on_progress=on_progress,
         workers=workers)
-    out_features_csv = Path(out_features_csv) if out_features_csv else \
-        Path.cwd() / "features" / "hf_classifier_applied.csv"
-    out_features_csv.parent.mkdir(parents=True, exist_ok=True)
-    if not overwrite_existing and out_features_csv.is_file():
+    from ..helpers import tables
+
+    out_ref = tables.output_ref(out_features_csv, source=analysis_ready,
+                                default=("features",))
+    if not out_features_csv:
+        out_ref = out_ref.sibling("hf_classifier_applied")
+    if not overwrite_existing and tables.exists(out_ref):
         if verbose:
-            print("Classifier output already exists; returning existing file.")
-        return out_features_csv
+            print(f"Classifier output already exists; returning existing: {out_ref}")
+        return tables.handle(out_ref)
 
     set_threads(workers)
     announce(on_progress, f"loading {doc.get('name')}")
@@ -619,20 +626,18 @@ def apply_hf_classifier(
 
     import numpy as np
 
-    with analysis_ready.open("r", newline="", encoding=encoding) as fh:
-        rows = list(csv.DictReader(fh, delimiter=delimiter))
-    texts = [r.get("text") or "" for r in rows]
+    from ..helpers.progress import Ticker, count_rows
+
+    total = count_rows(analysis_ready, on_progress=on_progress)
     # the device goes in the message that stays up for the whole scoring run,
     # the same as the embedding steps: see helpers.gpu.device_note
-    announce(on_progress, device_note(f"scoring {len(rows)} text(s)", device_name))
+    announce(on_progress, device_note(f"scoring {total} text(s)", device_name))
     # the model's own ceiling wins over the setting, and says so rather than
     # quietly reading less than was asked for
     max_length, capped = window_length(tokenizer, max_length)
     if capped:
         announce(on_progress, capped)
-    preds, counts, n_windows = _predict(
-        model, tokenizer, texts, task, max_length=max_length, batch_size=batch_size,
-        device_name=device_name, precision=precision, verbose=verbose)
+    ticker = Ticker(on_progress, total)
 
     label = output_label(doc, outcome)
     header = ["text_id", "token_count", "n_windows", f"pred_{label}"]
@@ -650,9 +655,12 @@ def apply_hf_classifier(
             # probability it would be. one column per label is the whole story
             header += [f"p_{label}_{class_label(doc, outcome, c)}"
                        for c in classes]
-    with atomic_write(out_features_csv, mode="w", newline="", encoding=encoding) as out:
-        writer = csv.writer(out)
-        writer.writerow(header)
+    def score(rows: list, writer) -> None:
+        """Run the model over one slice of the table and write its rows."""
+        texts = [r.get("text") or "" for r in rows]
+        preds, counts, n_windows = _predict(
+            model, tokenizer, texts, task, max_length=max_length, batch_size=batch_size,
+            device_name=device_name, precision=precision, verbose=verbose)
         for i, r in enumerate(rows):
             blank = not texts[i].strip()
             cells: list = [r.get("text_id", ""), counts[i], n_windows[i]]
@@ -673,7 +681,23 @@ def apply_hf_classifier(
                     cells.append("" if blank else _fmt(p[best], rounding))
                     cells += ["" if blank else _fmt(v, rounding) for v in p]
             writer.writerow(cells)
-    return out_features_csv
+        ticker.tick(len(rows))
+
+    # the table goes through in slices, never all at once: this used to
+    # list() every row and every text up front, so a million-row table meant
+    # a million texts in RAM before the model saw one. a slice is big enough
+    # that _predict's sort-by-length still packs the batches well
+    with tables.write_table(out_ref, header, encoding=encoding,
+                            hints={"text_id": "text"}) as writer:
+        pending: list = []
+        for row in tables.read_rows(analysis_ready, encoding=encoding, delimiter=delimiter):
+            pending.append(row)
+            if len(pending) >= _TEXTS_PER_CALL:
+                score(pending, writer)
+                pending = []
+        if pending:
+            score(pending, writer)
+    return tables.handle(out_ref)
 
 
 # ---------------------------------------------------------------------------

@@ -33,7 +33,6 @@ and differences. The headline corrections:
 
 from __future__ import annotations
 
-import csv
 import re
 from collections import Counter
 from functools import lru_cache
@@ -41,7 +40,7 @@ from pathlib import Path
 from typing import (Callable, Dict, List, Literal, Optional, Sequence, Tuple,
                     Union)
 
-from ..helpers.atomic import atomic_write
+from ..helpers import tables
 from ..helpers.doc_text import DOCUMENT_PATTERN
 from ..helpers.feature_columns import ColumnSpec
 from ..helpers.progress import announce
@@ -863,13 +862,11 @@ def analyze_cohesion(
         overwrite_existing=overwrite_existing, on_progress=on_progress,
         workers=workers)
 
-    if out_features_csv is None:
-        out_features_csv = Path.cwd() / "features" / "cohesion" / analysis_ready.name
-    out_features_csv = Path(out_features_csv)
-    out_features_csv.parent.mkdir(parents=True, exist_ok=True)
-    if not overwrite_existing and out_features_csv.is_file():
-        print("Cohesion output file already exists; returning existing file.")
-        return out_features_csv
+    out_ref = tables.output_ref(out_features_csv, source=analysis_ready,
+                                default=("features", "cohesion"))
+    if not overwrite_existing and tables.exists(out_ref):
+        print(f"cohesion output already exists; returning existing: {out_ref}")
+        return tables.handle(out_ref)
 
     if engine == "stanza":
         # the model might download (hundreds of MB) or load right here, so we
@@ -909,9 +906,7 @@ def analyze_cohesion(
             return ""
         return round(float(value), rounding)
 
-    with atomic_write(out_features_csv, newline="", encoding=encoding) as out:
-        writer = csv.writer(out)
-        writer.writerow(["text_id", "nwords", *columns])
+    with tables.write_table(out_ref, ["text_id", "nwords", *columns], encoding=encoding) as writer:
         for row, (nwords, values, sent_texts, para_texts) in map_text_rows(
                 analysis_ready, encoding=encoding,
                 workers=lambda n_rows: pooled_text_workers(
@@ -934,7 +929,7 @@ def analyze_cohesion(
                 values = values[:insert_at] + semantic + values[insert_at:]
             writer.writerow([row.get("text_id", ""), nwords,
                              *(_fmt(v) for v in values)])
-    return out_features_csv
+    return tables.handle(out_ref)
 
 
 # --- CLI ---------------------------------------------------------------------

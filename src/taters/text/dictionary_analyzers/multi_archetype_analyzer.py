@@ -1,11 +1,9 @@
 from __future__ import annotations
 from pathlib import Path
 from typing import Iterable, Sequence, Tuple, Union, Optional, List, Dict
-import csv
 import re
 
 # we only ever touch archetyper's public API
-from ...helpers.atomic import atomic_write
 from ...helpers.gpu import hidden_gpu, resolve_device
 from ...helpers.csvio import widen_csv_field_limit
 
@@ -88,7 +86,9 @@ def analyze_texts_to_csv(
         ArchetypeCollection, ArchetypeQuantifier,
     )
 
-    out_csv = Path(out_csv)
+    from ...helpers import tables
+
+    out_ref = tables.parse_ref(out_csv)
     out_csv.parent.mkdir(parents=True, exist_ok=True)
 
     # 1) first, we build a quantifier per CSV and hang on to the archetype
@@ -125,9 +125,7 @@ def analyze_texts_to_csv(
         header.extend([f"{pref}__{n}" for n in names])
 
     # 2) now we stream: analyze each item, aggregate, and write as we go
-    with atomic_write(out_csv, newline=newline, encoding=encoding) as f:
-        writer = csv.writer(f, delimiter=delimiter)
-        writer.writerow(header)
+    with tables.write_table(out_ref, header, encoding=encoding) as writer:
 
         for it in items:
             # we take either (text_id, text) or (text_id, text, meta)
@@ -168,5 +166,5 @@ def analyze_texts_to_csv(
             pt_vals = [str(meta.get(c, "")) for c in pass_through_cols]
             writer.writerow([text_id, *pt_vals, total_wc_val, *all_scores])
 
-    return out_csv
+    return tables.handle(out_ref)
 

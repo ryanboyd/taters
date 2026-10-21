@@ -9,6 +9,11 @@ Those pages get you as far as a folder full of measures.
 which statistical question fits the data you have, what each answer actually
 tells you, and what to do with it once you have it.
 
+If your data lives in a MySQL or PostgreSQL database rather than in files,
+[Working with a Database](databases.md) is the page: setting up a
+connection (including one you reach over ssh), picking columns across
+tables, and getting the results written back as tables.
+
 Taters also arrives with a bunch of ready-made dictionaries and archetypes.
 [Built-in dictionaries and archetypes](bundled-dictionaries.md) lists every
 one of them, what it measures, and the citation to use when it ends up in

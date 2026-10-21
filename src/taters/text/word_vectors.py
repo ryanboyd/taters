@@ -47,7 +47,6 @@ says how many words each text lost that way.
 """
 from __future__ import annotations
 
-import csv
 import json
 import math
 import os
@@ -60,6 +59,7 @@ from pathlib import Path
 from typing import (Callable, Dict, Iterable, List, Literal, Optional,
                     Sequence, Tuple, Union)
 
+from ..helpers import tables
 from ..helpers.atomic import atomic_write
 from ..helpers.cliargs import CliSpec
 from ..helpers.feature_columns import ColumnSpec
@@ -109,11 +109,18 @@ _CHUNK_ROWS = 65536
 #: argued with and replaced (``probes``). Any not in a model's vocabulary is
 #: skipped. Function words are not here on purpose -- the neighbors of "the"
 #: are the same in every corpus and diagnostic of none -- and no stoplist is
-#: involved in deciding that: the list is the whole of the rule.
+#: involved in deciding that: the list is the whole of the rule. Only when a
+#: model knows *none* of these (a synthetic or specialized corpus) do the
+#: most frequent content words stand in; see :func:`_probe_words`.
 DEFAULT_PROBES: Tuple[str, ...] = (
     "time", "people", "work", "life", "home", "family", "money", "love",
     "food", "friend", "think", "good",
 )
+
+#: The built-in stop lists, every language at once, which the probe fallback
+#: reads through. Over-stripping is harmless here (we just move on to the
+#: next most frequent word), so one folder serves every corpus language.
+_SHIPPED_STOPLISTS = Path(__file__).resolve().parents[1] / "data" / "library" / "stoplists"
 
 
 # ---------------------------------------------------------------------------
@@ -693,8 +700,15 @@ def train_word_vectors(
         The same input contract as every other text analyzer: a spreadsheet
         of texts, a folder of documents, or a prebuilt analysis-ready CSV.
     out_features_csv : str or Path, optional
-        The features -- one row per text -- default
-        ``./features/word_vectors.csv``.
+        The features -- one row per text -- a file path or a
+        ``db://<connection>/<table>`` ref; default beside the source, under
+        ``features/word_vectors/``.
+    out_model_json, out_neighbors_csv, out_report_md : str or Path, optional
+        The model file (always a file, with its weights beside it; default
+        ``models/word_vectors.json`` beside the features, or under
+        ``db_local/`` when the features are a database table), the
+        neighbors table (a table like the features: beside the model file,
+        or in the same database as the features), and the report.
     overwrite_existing : bool, default False
         If False and the output files exist, return them untouched.
     workers : int, default 0
@@ -762,8 +776,10 @@ def train_word_vectors(
         Comma-separated words whose nearest neighbors the report shows;
         every concept category's neighbors are shown as well. Empty:
         :data:`DEFAULT_PROBES`, a dozen common content words, skipping any
-        the model did not learn. Nothing about training depends on this; it
-        only decides which words the clouds are about.
+        the model did not learn -- and when it learned none of them, the
+        most frequent words that are not stop words, which the report says.
+        Nothing about training depends on this; it only decides which words
+        the clouds are about.
     top_neighbors : int
         Neighbors per probe in the table and the clouds.
     rounding : int
@@ -771,8 +787,8 @@ def train_word_vectors(
 
     Returns
     -------
-    Path
-        ``out_features_csv``.
+    Path or TableRef
+        ``out_features_csv``: the path of a file, the ref of a database table.
 
     Notes
     -----
@@ -811,19 +827,26 @@ def train_word_vectors(
         overwrite_existing=overwrite_existing, on_progress=on_progress,
         workers=workers)
 
-    out_features_csv = Path(out_features_csv) if out_features_csv else \
-        Path.cwd() / "features" / "word_vectors.csv"
-    out_model_json = Path(out_model_json) if out_model_json else \
-        out_features_csv.parent / "models" / "word_vectors.json"
-    out_neighbors_csv = Path(out_neighbors_csv) if out_neighbors_csv else \
-        out_model_json.with_name(out_model_json.stem + "_neighbors.csv")
+    # the features and the neighbors are tables, so they follow the run's
+    # destination (a file beside the run, or a table in the database the
+    # texts came from). the model, its weights and the report are not rows:
+    # they stay files, in a folder beside the features table -- see
+    # TableRef.local_dir for where that is when the table is in a database
+    out_ref = tables.output_ref(out_features_csv, source=analysis_ready,
+                                default=("features", "word_vectors"))
+    # a pipeline on a database renders the model's address as db://...json;
+    # a model is not rows, so that lands under the run's db_local/ folder
+    from ._topics import local_file
+
+    out_model_json = local_file(out_model_json, out_ref, "models/word_vectors.json") \
+        if out_model_json else out_ref.local_dir() / "models" / "word_vectors.json"
+    out_neighbors = _neighbors_ref(out_neighbors_csv, out_ref, out_model_json)
     out_report_md = Path(out_report_md) if out_report_md else \
         out_model_json.with_name(out_model_json.stem + "_report.md")
-    if not overwrite_existing and out_features_csv.is_file() and out_model_json.is_file():
+    if not overwrite_existing and tables.exists(out_ref) and out_model_json.is_file():
         if verbose:
             print("Word-vector features already exist; returning existing file.")
-        return out_features_csv
-    out_features_csv.parent.mkdir(parents=True, exist_ok=True)
+        return tables.handle(out_ref)
     out_model_json.parent.mkdir(parents=True, exist_ok=True)
 
     lowercase = True
@@ -834,18 +857,23 @@ def train_word_vectors(
                      "lowercase": lowercase}
 
     # 1) first, we tokenize every text once, out to a scratch file that gensim
-    #    can stream from. only the type counts stay in memory
+    #    can stream from, with the ids in a second scratch file line for line
+    #    (a list of ids is small per text and still grows with the corpus, so
+    #    it goes to disk with everything else). only the type counts stay in
+    #    memory, and those are vocabulary-sized
     if engine == "stanza":
         announce(on_progress, "loading the stanza pipeline (first use downloads its model)")
     stream = _stream_for(text_settings, device)
     tokens_path = out_model_json.with_name(f".{out_model_json.stem}_tokens.txt")
-    ids: List[str] = []
+    ids_path = out_model_json.with_name(f".{out_model_json.stem}_ids.txt")
+    n_docs = 0
     type_counts: Counter = Counter()
     n_tokens = 0
     from ..helpers.row_map import map_text_rows
     from .ngram_prep import pooled_text_workers
 
-    with atomic_write(tokens_path, mode="w", encoding="utf-8") as fh:
+    with atomic_write(tokens_path, mode="w", encoding="utf-8") as fh, \
+            atomic_write(ids_path, mode="w", encoding="utf-8") as idf:
         for row, tokens in map_text_rows(
                 analysis_ready, encoding=encoding,
                 workers=lambda n_rows: pooled_text_workers(
@@ -855,7 +883,11 @@ def train_word_vectors(
                 inline_fn=lambda pair: _tokens_of(stream, bool(lowercase), pair[1]),
                 pool_fn=_tokens_in_worker, initializer=_init_token_worker,
                 initargs=(_stream_args(text_settings, device), bool(lowercase))):
-            ids.append(str(row.get("text_id", "")))
+            # one line per text, so the two scratch files zip back together;
+            # a line break inside an id would put every id after it off by one
+            text_id = str(row.get("text_id", "")).replace("\r", " ").replace("\n", " ")
+            idf.write(text_id + "\n")
+            n_docs += 1
             clean = [t.replace(" ", "_") for t in tokens if t.strip()]
             type_counts.update(clean)
             n_tokens += len(clean)
@@ -864,9 +896,10 @@ def train_word_vectors(
     surviving = sum(1 for c in type_counts.values() if c >= int(min_count))
     if surviving < 2:
         tokens_path.unlink(missing_ok=True)
+        ids_path.unlink(missing_ok=True)
         raise ValueError(
             f"only {surviving} word(s) occur at least {min_count} times in "
-            f"these {len(ids)} text(s) ({n_tokens} tokens, {len(type_counts)} "
+            f"these {n_docs} text(s) ({n_tokens} tokens, {len(type_counts)} "
             f"distinct), which is not enough to train on. Lower min_count "
             f"or use a larger corpus.")
 
@@ -916,7 +949,7 @@ def train_word_vectors(
         "min_count": int(min_count), "epochs": int(epochs),
         "negative": int(negative), "seed": int(seed),
         "reproducible": bool(reproducible), "threads": threads,
-        "n_documents": len(ids), "n_tokens": n_tokens,
+        "n_documents": n_docs, "n_tokens": n_tokens,
         "n_types": len(type_counts), "vocabulary_size": len(vocabulary),
         "coverage": (covered / n_tokens) if n_tokens else 0.0,
         "top_oov": oov, "loss_per_epoch": losses,
@@ -935,25 +968,28 @@ def train_word_vectors(
     concept_columns, concept_vecs, concept_rows = _concept_vectors(
         model, dicts, stream, bool(lowercase))
     announce(on_progress, "writing the features")
-    with atomic_write(out_features_csv, mode="w", newline="", encoding=encoding) as out, \
-            tokens_path.open("r", encoding="utf-8") as fh:
-        writer = csv.writer(out)
-        writer.writerow(_header(model, concept_columns))
-        for text_id, line in zip(ids, fh):
+    header = _header(model, concept_columns)
+    with tables.write_table(out_ref, header, encoding=encoding,
+                            hints=_feature_hints(header)) as writer, \
+            tokens_path.open("r", encoding="utf-8") as fh, \
+            ids_path.open("r", encoding="utf-8") as idf:
+        for text_id, line in zip(idf, fh):
             tokens = line.rstrip("\n").split(" ") if line.strip() else []
-            writer.writerow([text_id, *_feature_row(
+            writer.writerow([text_id.rstrip("\n"), *_feature_row(
                 model, tokens, weighting=weighting,
                 normalize_words=normalize_words, concept_vectors=concept_vecs,
                 rounding=rounding)])
     tokens_path.unlink(missing_ok=True)
+    ids_path.unlink(missing_ok=True)
 
     # 5) lastly, the neighbors (of the probe words, and of every concept
     #    category) and the report
     probe_words = _probe_words(probes, vocabulary, counts)
+    probe_note = _probe_note(probes, probe_words)
     neighbors = _neighbors(model, probe_words, stream, top_n=int(top_neighbors))
     neighbors.update(_neighbors_of_vectors(model, concept_columns, concept_vecs,
                                              top_n=int(top_neighbors)))
-    _write_neighbors(out_neighbors_csv, neighbors, encoding=encoding,
+    _write_neighbors(out_neighbors, neighbors, encoding=encoding,
                       rounding=rounding)
     training["wall_seconds"] = round(time.time() - started, 1)
     doc = json.loads(out_model_json.read_text(encoding="utf-8"))
@@ -961,17 +997,39 @@ def train_word_vectors(
     with atomic_write(out_model_json, mode="w", encoding="utf-8") as fh:
         json.dump(doc, fh, indent=1)
     _write_report(out_report_md, doc, out_model_json, weights, neighbors,
-                  concept_rows, features_csv=out_features_csv,
-                  neighbors_csv=out_neighbors_csv, model=model)
+                  concept_rows, features_csv=out_ref,
+                  neighbors_csv=out_neighbors, model=model,
+                  probe_note=probe_note)
     if verbose:
         print(f"[word_vectors] {len(vocabulary)} words x {vector_size} dims "
-              f"from {len(ids)} text(s); coverage "
+              f"from {n_docs} text(s); coverage "
               f"{100 * training['coverage']:.1f}% -> {out_model_json}")
+        if probe_note:
+            print(f"[word_vectors] note: {probe_note}")
         for row in concept_rows:
             if row["missed"]:
                 print(f"[word_vectors] note: {row['column']}: {len(row['missed'])} of "
                       f"{row['n_terms']} term(s) not in the vocabulary")
-    return out_features_csv
+    return tables.handle(out_ref)
+
+
+def _feature_hints(header: Sequence[str]) -> Dict[str, str]:
+    """Column types for a database destination: the id is text, the two
+    counts are integers, every vector and concept column a float."""
+    return {"text_id": "text", "token_count": "int", "in_vocab_count": "int",
+            **{c: "float" for c in header[3:]}}
+
+
+def _neighbors_ref(given: Optional[PathLike], features_ref: tables.TableRef,
+                   model_json: Path) -> tables.TableRef:
+    """Where the neighbors table goes: what the caller said, else beside
+    the model file -- or, when the features are a database table, in the
+    same database beside them (a table does not live in a folder)."""
+    if given:
+        return tables.parse_ref(given)
+    if features_ref.is_db:
+        return features_ref.sibling(model_json.stem + "_neighbors")
+    return tables.parse_ref(model_json.with_name(model_json.stem + "_neighbors.csv"))
 
 
 def _probe_words(probes: str, vocabulary: Sequence[str],
@@ -983,17 +1041,70 @@ def _probe_words(probes: str, vocabulary: Sequence[str],
 
     An earlier version took the corpus's most frequent words, and every
     cloud was function words. A fixed list needs no explaining: it is on the
-    options screen, and it is the whole rule. ``counts`` is accepted for the
-    callers that have it and no longer used.
+    options screen, and it is the whole rule -- as long as the model knows
+    at least one word of it. A model that knows none (a synthetic corpus, a
+    specialized one) would otherwise get an empty table and no clouds, so
+    then, and only then, the most frequent words that are not stop words
+    stand in, as many as the list would have given; ``counts`` ranks them
+    (vocabulary order when a model carries none, which is frequency order
+    for everything gensim trains and everything word2vec or GloVe ship).
+    :func:`_probe_note` is the sentence that says it happened.
     """
     out: List[str] = []
     for w in [p.strip() for p in str(probes or "").split(",")]:
         if w and w not in out:
             out.append(w)
-    if out:
-        return out
     known = set(str(w) for w in vocabulary)
-    return [w for w in DEFAULT_PROBES if w in known]
+    if out:
+        # named probes are kept as named (an unknown one gets a blank row,
+        # which is the honest answer), unless the model knows none of them:
+        # a pipeline passes the default list by name, and a corpus that
+        # has none of those words would get no neighbors at all
+        if any(w in known for w in out):
+            return out
+        return out + _frequent_content_words(vocabulary, counts, len(DEFAULT_PROBES))
+    picked = [w for w in DEFAULT_PROBES if w in known]
+    if picked:
+        return picked
+    return _frequent_content_words(vocabulary, counts, len(DEFAULT_PROBES))
+
+
+def _frequent_content_words(vocabulary: Sequence[str], counts: Optional[Sequence[int]],
+                            n: int) -> List[str]:
+    """The ``n`` most frequent words that are neither stop words (any of
+    the built-in lists) nor bare numbers or punctuation."""
+    from .ngram_prep import load_stoplist
+
+    stopset = load_stoplist([_SHIPPED_STOPLISTS]) if _SHIPPED_STOPLISTS.is_dir() else set()
+    words = [str(w) for w in vocabulary]
+    if counts is not None and len(counts) == len(words):
+        order = sorted(range(len(words)), key=lambda i: (-float(counts[i]), i))
+        words = [words[i] for i in order]
+    out: List[str] = []
+    for w in words:
+        if w.lower() in stopset or not any(ch.isalpha() for ch in w) or w in out:
+            continue
+        out.append(w)
+        if len(out) >= int(n):
+            break
+    return out
+
+
+def _probe_note(probes: str, picked: Sequence[str]) -> str:
+    """The sentence the report and the console carry when frequent words
+    stood in for the probes: empty when the model knew at least one of the
+    words asked for (by name, or from :data:`DEFAULT_PROBES`)."""
+    named = [w.strip() for w in str(probes or "").split(",") if w.strip()]
+    if named and len(picked) <= len(named):
+        return ""                      # the named ones, nothing standing in
+    if not named and any(w in DEFAULT_PROBES for w in picked):
+        return ""
+    if not picked:
+        return ("None of the usual probe words are in this model, and no frequent "
+                "content word was found to stand in, so only the concept "
+                "categories (if any) have neighbors.")
+    return ("None of the usual probe words are in this model, so the most "
+            "frequent content words stand in.")
 
 
 def _neighbors_of_vectors(model: _Loaded, names: Sequence[str], vectors,
@@ -1024,12 +1135,14 @@ def _neighbors_of_vectors(model: _Loaded, names: Sequence[str], vectors,
     return out
 
 
-def _write_neighbors(path: Path, neighbors: Dict[str, List[Tuple[str, float]]],
+def _write_neighbors(ref: tables.RefLike, neighbors: Dict[str, List[Tuple[str, float]]],
                       *, encoding: str, rounding: int) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with atomic_write(path, mode="w", newline="", encoding=encoding) as fh:
-        writer = csv.writer(fh)
-        writer.writerow(["probe", "rank", "word", "similarity"])
+    # a table like any other: a file beside the model, or a table in the
+    # database the features went to
+    with tables.write_table(ref, ["probe", "rank", "word", "similarity"],
+                            encoding=encoding,
+                            hints={"probe": "text", "rank": "int", "word": "text",
+                                   "similarity": "float"}) as writer:
         for probe, found in neighbors.items():
             if not found:
                 writer.writerow([probe, "", "", ""])
@@ -1122,9 +1235,10 @@ def apply_word_vectors(
 
     Returns
     -------
-    Path
+    Path or TableRef
         ``out_features_csv``: ``text_id, token_count, in_vocab_count,
-        wv_1..wv_k, sim_<dictionary>__<category>...``.
+        wv_1..wv_k, sim_<dictionary>__<category>...``; the path of a file,
+        the ref of a database table.
     """
     model = _load_model(one_model_path(model_json))
     weighting, normalize_words, dicts = _settings_of(
@@ -1140,13 +1254,13 @@ def apply_word_vectors(
         include_source_path=include_source_path,
         overwrite_existing=overwrite_existing, on_progress=on_progress,
         workers=workers)
-    out_features_csv = Path(out_features_csv) if out_features_csv else \
-        Path.cwd() / "features" / "word_vectors_applied.csv"
-    out_features_csv.parent.mkdir(parents=True, exist_ok=True)
-    if not overwrite_existing and out_features_csv.is_file():
+    # a file beside the run, or a table in the database the texts came from
+    out_ref = tables.output_ref(out_features_csv, source=analysis_ready,
+                                default=("features", "word_vectors_applied"))
+    if not overwrite_existing and tables.exists(out_ref):
         if verbose:
             print("Word-vector features already exist; returning existing file.")
-        return out_features_csv
+        return tables.handle(out_ref)
 
     if text["engine"] == "stanza":
         announce(on_progress, "loading the stanza pipeline (first use downloads its model)")
@@ -1157,9 +1271,9 @@ def apply_word_vectors(
     from ..helpers.row_map import map_text_rows
     from .ngram_prep import pooled_text_workers
 
-    with atomic_write(out_features_csv, mode="w", newline="", encoding=encoding) as out:
-        writer = csv.writer(out)
-        writer.writerow(_header(model, concept_columns))
+    header = _header(model, concept_columns)
+    with tables.write_table(out_ref, header, encoding=encoding,
+                            hints=_feature_hints(header)) as writer:
         for row, tokens in map_text_rows(
                 analysis_ready, encoding=encoding,
                 workers=lambda n_rows: pooled_text_workers(
@@ -1179,7 +1293,7 @@ def apply_word_vectors(
             if row["missed"]:
                 print(f"[word_vectors] note: {row['column']}: {len(row['missed'])} of "
                       f"{row['n_terms']} term(s) not in the vocabulary")
-    return out_features_csv
+    return tables.handle(out_ref)
 
 
 # ---------------------------------------------------------------------------
@@ -1391,10 +1505,14 @@ def import_word_vectors(
     concept_columns, concept_vecs, concept_rows = _concept_vectors(
         model, dicts, stream, bool(lowercase))
     probe_words = _probe_words(probes, words, None)
+    probe_note = _probe_note(probes, probe_words)
     neighbors = _neighbors(model, probe_words, stream, top_n=int(top_neighbors))
     neighbors.update(_neighbors_of_vectors(model, concept_columns, concept_vecs,
                                              top_n=int(top_neighbors)))
-    neighbors_csv = out_model_json.with_name(out_model_json.stem + "_neighbors.csv")
+    # there's no features table to sit beside, so the neighbors go beside
+    # the model file, as a file
+    neighbors_csv = tables.parse_ref(
+        out_model_json.with_name(out_model_json.stem + "_neighbors.csv"))
     _write_neighbors(neighbors_csv, neighbors, encoding="utf-8-sig", rounding=4)
     training["wall_seconds"] = round(time.time() - started, 1)
     doc = json.loads(out_model_json.read_text(encoding="utf-8"))
@@ -1404,7 +1522,8 @@ def import_word_vectors(
     report = Path(out_report_md) if out_report_md else \
         out_model_json.with_name(out_model_json.stem + "_report.md")
     _write_report(report, doc, out_model_json, weights, neighbors, concept_rows,
-                  features_csv=None, neighbors_csv=neighbors_csv, model=model)
+                  features_csv=None, neighbors_csv=neighbors_csv, model=model,
+                  probe_note=probe_note)
     if verbose:
         print(f"[word_vectors] imported {len(words)} words x {dim} dims from "
               f"{src.name} -> {out_model_json}")
@@ -1427,29 +1546,34 @@ def describe_word_vectors(
     overwrite_existing: bool = False,
     verbose: bool = True,
     on_progress: Optional[Callable[..., None]] = None,
-) -> Path:
+):
     """
     Write the nearest-neighbors table of a saved model.
 
-    ``probes`` are comma-separated words; empty means the model's most
-    frequent words. Every concept category the model carries is listed
-    too, as the words closest to its vector. The table has one row
-    per (probe, neighbor): ``probe, rank, word, similarity``; a probe not
-    in the vocabulary gets one row with blanks, so its absence is visible.
+    ``probes`` are comma-separated words; empty means :data:`DEFAULT_PROBES`
+    (or, when the model knows none of them, its most frequent content
+    words). Every concept category the model carries is listed too, as the
+    words closest to its vector. The table has one row per (probe,
+    neighbor): ``probe, rank, word, similarity``; a probe not in the
+    vocabulary gets one row with blanks, so its absence is visible.
+    ``out_neighbors_csv`` is a file path or a ``db://`` ref; the default
+    is a file beside the model. Returns the path, or the ref of a database
+    table.
     """
     path = one_model_path(model_json)
     model = _load_model(path)
-    out = Path(out_neighbors_csv) if out_neighbors_csv else \
-        path.with_name(path.stem + "_neighbors.csv")
-    if out.is_file() and not overwrite_existing:
+    out = tables.parse_ref(out_neighbors_csv) if out_neighbors_csv else \
+        tables.parse_ref(path.with_name(path.stem + "_neighbors.csv"))
+    if tables.exists(out) and not overwrite_existing:
         if verbose:
             print("Neighbors table already exists; returning existing file.")
-        return out
+        return tables.handle(out)
     announce(on_progress, "finding nearest neighbors")
     stream = _stream_for(model.text_settings, device)
     dicts = concept_dicts_from_json((model.doc.get("apply") or {}).get("concept_dicts") or [])
     words = _probe_words(probes, list(model.index),
                          model.counts if model.counts is not None else None)
+    probe_note = _probe_note(probes, words)
     neighbors = _neighbors(model, words, stream, top_n=int(top_neighbors))
     if dicts:
         columns, vecs, _rows = _concept_vectors(model, dicts, stream,
@@ -1459,7 +1583,9 @@ def describe_word_vectors(
     _write_neighbors(out, neighbors, encoding=encoding, rounding=rounding)
     if verbose:
         print(f"[word_vectors] neighbors of {len(words)} word(s) -> {out}")
-    return out
+        if probe_note:
+            print(f"[word_vectors] note: {probe_note}")
+    return tables.handle(out)
 
 
 # ---------------------------------------------------------------------------
@@ -1534,18 +1660,25 @@ def _methods_paragraph(doc: dict, model: _Loaded) -> str:
 
 def _write_report(path: Path, doc: dict, manifest: Path, weights: Path,
                   neighbors: Dict[str, List[Tuple[str, float]]],
-                  concept_rows: Sequence[dict], *, features_csv: Optional[Path],
-                  neighbors_csv: Path, model: _Loaded) -> None:
+                  concept_rows: Sequence[dict], *,
+                  features_csv: Optional[tables.RefLike],
+                  neighbors_csv: tables.RefLike, model: _Loaded,
+                  probe_note: str = "") -> None:
     """
     ``<stem>_report.md``: what a paper needs to report the model.
 
     A methods paragraph ready to paste, the settings, the corpus coverage
     and the words that fell out of the vocabulary, the training loss per
     epoch (a plot when the chart renderer is available), the neighbors
-    of every probe, the spread of vector norms, and the versions.
+    of every probe (with ``probe_note`` saying when they are stand-ins),
+    the spread of vector norms, and the versions. The report is always a
+    file; the two tables it names may be database tables, named by their
+    table name.
     """
     import numpy as np
 
+    features_name = tables.parse_ref(features_csv).name if features_csv is not None else ""
+    neighbors_name = tables.parse_ref(neighbors_csv).name
     t = doc.get("training") or {}
     text = doc["text"]
     apply = doc.get("apply") or {}
@@ -1597,8 +1730,10 @@ def _write_report(path: Path, doc: dict, manifest: Path, weights: Path,
 
     lines += ["## Nearest neighbors", "",
               f"The words closest to each probe by cosine similarity, from "
-              f"`{neighbors_csv.name}`. These are the evidence that the model "
+              f"`{neighbors_name}`. These are the evidence that the model "
               f"learned what the study assumes it learned.", ""]
+    if probe_note:
+        lines += [probe_note, ""]
     for probe, found in neighbors.items():
         if not found:
             lines += [f"**{probe}** — not in the vocabulary.", ""]
@@ -1624,10 +1759,10 @@ def _write_report(path: Path, doc: dict, manifest: Path, weights: Path,
               f"max {float(norms.max()):.3f}. Frequent words tend to have longer "
               f"vectors; `normalize_words` evens that out before averaging.", ""]
     if features_csv is not None:
-        lines += ["## Outputs", "", f"- `{features_csv.name}` — one row per text: "
+        lines += ["## Outputs", "", f"- `{features_name}` — one row per text: "
                   f"`token_count`, `in_vocab_count`, `wv_1..wv_{doc['dim']}`"
                   + (", the `sim_*` columns" if apply.get("concept_dicts") else "") + ".",
-                  f"- `{neighbors_csv.name}` — the neighbors table.", ""]
+                  f"- `{neighbors_name}` — the neighbors table.", ""]
     lines += ["## Provenance", ""]
     prov = [("wall time (s)", t.get("wall_seconds")),
             ("machine", f"{platform.system()} {platform.machine()}, "

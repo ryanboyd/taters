@@ -601,6 +601,12 @@ def _classification_metrics(labels, probabilities, classes) -> dict:
     return out
 
 
+#: how many texts go to the model per call when scoring. each call sorts its
+#: windows by length so the batches pad little; this many is plenty for
+#: that, and it's the whole of what sits in RAM at once
+_TEXTS_PER_CALL = 512
+
+
 def _fmt(v, rounding: int) -> str:
     if v is None:
         return ""
@@ -817,22 +823,28 @@ def finetune_text_predictor(
         max_open_bucket_files=max_open_bucket_files, tmp_root=tmp_root,
         overwrite_existing=overwrite_existing, on_progress=on_progress,
         workers=workers, carry_cols=list(outcome_cols), verbose=verbose)
-    with analysis_ready.open("r", newline="", encoding=encoding) as fh:
-        table = [r for r in csv.DictReader(fh, delimiter=delimiter)
-                 if (r.get("text") or "").strip()]
-    missing_cols = [c for c in outcome_cols if table and c not in table[0]]
+    from ..helpers import tables
+
+    header_fields = tables.columns_of(analysis_ready, encoding=encoding, delimiter=delimiter)
+    missing_cols = [c for c in outcome_cols if c not in header_fields]
     if missing_cols:
         raise ValueError(
             f"outcome column(s) {', '.join(missing_cols)} are not in the table "
-            f"(it has {', '.join(table[0].keys())})")
+            f"(it has {', '.join(header_fields)})")
+    # the training rows do sit in RAM -- every fold shuffles and re-reads
+    # them -- but only the rows that have words and an outcome. the rest of
+    # the table is dropped as it streams past instead of being held and
+    # filtered afterwards, and only the columns the trainer looks at come in
+    keep = ["text_id", "text", *outcome_cols]
+    table = [r for r in tables.read_rows(analysis_ready, encoding=encoding,
+                                         delimiter=delimiter, columns=keep)
+             if (r.get("text") or "").strip()
+             and any((r.get(c) or "").strip() for c in outcome_cols)]
     tasks = _outcome_tasks(table, outcome_cols, [str(c) for c in categorical_outcomes])
-    labeled = [i for i, r in enumerate(table)
-                if any((r.get(c) or "").strip() for c in outcome_cols)]
-    if len(labeled) < 2 * int(n_folds):
+    if len(table) < 2 * int(n_folds):
         raise ValueError(
-            f"{len(labeled)} row(s) have an outcome; {n_folds}-fold cross-validation "
+            f"{len(table)} row(s) have an outcome; {n_folds}-fold cross-validation "
             f"needs at least {2 * int(n_folds)}.")
-    table = [table[i] for i in labeled]
     texts = [r.get("text") or "" for r in table]
     ids = [r.get("text_id", "") for r in table]
 
@@ -1499,13 +1511,17 @@ def apply_text_predictor(
         include_source_path=include_source_path,
         overwrite_existing=overwrite_existing, on_progress=on_progress,
         workers=workers)
-    out_features_csv = Path(out_features_csv) if out_features_csv else \
-        Path.cwd() / "features" / "text_predictor_applied.csv"
-    out_features_csv.parent.mkdir(parents=True, exist_ok=True)
-    if not overwrite_existing and out_features_csv.is_file():
+    from ..helpers import tables
+
+    # a file beside the run, or a table in the database the text came from
+    out_ref = tables.output_ref(out_features_csv, source=analysis_ready,
+                                default=("features",))
+    if not out_features_csv:
+        out_ref = out_ref.sibling("text_predictor_applied")
+    if not overwrite_existing and tables.exists(out_ref):
         if verbose:
             print("Text predictor output already exists; returning existing file.")
-        return out_features_csv
+        return tables.handle(out_ref)
 
     import numpy as np
 
@@ -1528,19 +1544,16 @@ def apply_text_predictor(
             heads[_key(name)][1].bias.copy_(loaded["heads"][f"{key}.bias"])
     heads.to(device_name)
 
-    with analysis_ready.open("r", newline="", encoding=encoding) as fh:
-        rows = list(csv.DictReader(fh, delimiter=delimiter))
-    texts = [r.get("text") or "" for r in rows]
-    announce(on_progress, f"scoring {len(rows)} text(s)")
+    from ..helpers.progress import Ticker, count_rows
+
+    total = count_rows(analysis_ready, on_progress=on_progress)
+    announce(on_progress, f"scoring {total} text(s)")
     # the encoder's own ceiling wins over the setting, and says so rather than
     # quietly reading less than was asked for
     max_length, capped = window_length(tokenizer, max_length)
     if capped:
         announce(on_progress, capped)
-    preds, counts, n_windows = _predict(
-        model, heads, tokenizer, texts, tasks, layer_idx=layer_idx, combine=combine,
-        pooling=doc["encoder"]["pooling"], max_length=max_length, batch_size=batch_size,
-        device_name=device_name, precision=precision, verbose=verbose)
+    ticker = Ticker(on_progress, total)
     header = ["text_id", "token_count", "n_windows"]
     for name, spec in tasks.items():
         label = output_label(doc, name)
@@ -1548,9 +1561,14 @@ def apply_text_predictor(
         if spec["task"] == "classification" and emit:
             header += [f"prob_{label}"] + [f"p_{label}_{class_label(doc, name, c)}"
                                            for c in spec["classes"]]
-    with atomic_write(out_features_csv, mode="w", newline="", encoding=encoding) as out:
-        writer = csv.writer(out)
-        writer.writerow(header)
+
+    def score(rows: list, writer) -> None:
+        """Run the model over one slice of the table and write its rows."""
+        texts = [r.get("text") or "" for r in rows]
+        preds, counts, n_windows = _predict(
+            model, heads, tokenizer, texts, tasks, layer_idx=layer_idx, combine=combine,
+            pooling=doc["encoder"]["pooling"], max_length=max_length, batch_size=batch_size,
+            device_name=device_name, precision=precision, verbose=verbose)
         for i, r in enumerate(rows):
             blank = not texts[i].strip()
             cells: list = [r.get("text_id", ""), counts[i], n_windows[i]]
@@ -1565,10 +1583,25 @@ def apply_text_predictor(
                         cells.append("" if blank else _fmt(max(p), rounding))
                         cells += ["" if blank else _fmt(v, rounding) for v in p]
             writer.writerow(cells)
+        ticker.tick(len(rows))
+
+    # the table goes through in slices, never all at once: this used to
+    # list() every row up front and predict over the lot. a slice is big
+    # enough that _predict's sort-by-length still packs the batches well
+    with tables.write_table(out_ref, header, encoding=encoding,
+                            hints={"text_id": "text"}) as writer:
+        pending: list = []
+        for row in tables.read_rows(analysis_ready, encoding=encoding, delimiter=delimiter):
+            pending.append(row)
+            if len(pending) >= _TEXTS_PER_CALL:
+                score(pending, writer)
+                pending = []
+        if pending:
+            score(pending, writer)
     if verbose:
-        print(f"[text_predictor] {len(rows)} text(s) scored with {doc.get('name')} "
-              f"on {device_name} -> {out_features_csv}")
-    return out_features_csv
+        print(f"[text_predictor] {total} text(s) scored with {doc.get('name')} "
+              f"on {device_name} -> {out_ref}")
+    return tables.handle(out_ref)
 
 
 # we keep this importable for the registry's reader, without dragging torch in

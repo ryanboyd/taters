@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Callable, Optional, Union, Sequence, Literal, Dict, Any, Iterable, List, Tuple
-import csv
 import re
 import string
 import random
@@ -12,7 +11,7 @@ from itertools import islice
 from math import log, sqrt, comb
 from statistics import mean
 
-from ..helpers.atomic import atomic_write
+from ..helpers import tables
 from ..helpers.doc_text import DOCUMENT_PATTERN
 from ..helpers.feature_columns import ColumnSpec
 from ..helpers.provenance import TEXT_GRAIN, TEXT_INPUT, records_settings
@@ -616,14 +615,11 @@ def analyze_lexical_richness(
         overwrite_existing=overwrite_existing, on_progress=on_progress,
         workers=workers)
 
-    if out_features_csv is None:
-        out_features_csv = Path.cwd() / "features" / "lexical-richness" / analysis_ready.name
-    out_features_csv = Path(out_features_csv)
-    out_features_csv.parent.mkdir(parents=True, exist_ok=True)
-
-    if not overwrite_existing and out_features_csv.is_file():
-        print(f"Lexical richness output file already exists; returning existing file: {out_features_csv}")
-        return out_features_csv
+    out_ref = tables.output_ref(out_features_csv, source=analysis_ready,
+                                default=("features", "lexical-richness"))
+    if not overwrite_existing and tables.exists(out_ref):
+        print(f"lexical-richness output already exists; returning existing: {out_ref}")
+        return tables.handle(out_ref)
 
     # 3) name our metrics
     metrics_fixed = list(METRICS_FIXED)
@@ -635,8 +631,7 @@ def analyze_lexical_richness(
     metric_names = metrics_fixed + [m_msttr, m_mattr, m_mtld, m_hdd, m_vocd]
 
     # 4) figure out the output's shape from the input's header alone
-    with analysis_ready.open("r", newline="", encoding=encoding) as fin:
-        header_fields = csv.DictReader(fin).fieldnames or []
+    header_fields = tables.columns_of(analysis_ready, encoding=encoding)
 
     if "text_id" not in header_fields or "text" not in header_fields:
         raise ValueError(
@@ -649,7 +644,7 @@ def analyze_lexical_richness(
 
     passthrough_cols = resolve_passthrough_columns(
         header_fields, pass_through_cols=pass_through_cols, id_cols=id_cols,
-        group_by=group_by, analysis_ready=analysis_ready)
+        group_by=group_by, analysis_ready=str(analysis_ready))
     fieldnames = ["text_id", *passthrough_cols, *metric_names]
 
     # 5) scoring is CPU-bound per row and the rows don't depend on each other,
@@ -664,9 +659,7 @@ def analyze_lexical_richness(
                   vocd_ntokens=vocd_ntokens,
                   vocd_within_sample=vocd_within_sample,
                   vocd_iterations=vocd_iterations, vocd_seed=vocd_seed)
-    with atomic_write(out_features_csv, newline="", encoding=encoding) as fout:
-        writer = csv.DictWriter(fout, fieldnames=fieldnames)
-        writer.writeheader()
+    with tables.write_table(out_ref, fieldnames, encoding=encoding) as writer:
         for row, values in map_text_rows(
                 analysis_ready, encoding=encoding,
                 workers=lambda n_rows: pool_workers(workers, n_rows),
@@ -680,7 +673,7 @@ def analyze_lexical_richness(
                 **dict(zip(metric_names, values)),
             }
             writer.writerow(out_row)
-    return out_features_csv
+    return tables.handle(out_ref)
 
 # ------------------------------------------------------------------------------
 # CLI

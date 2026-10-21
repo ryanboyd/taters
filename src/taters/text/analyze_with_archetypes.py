@@ -1,6 +1,5 @@
 from pathlib import Path
 from typing import Callable, Optional, Literal, Union, Sequence, Iterable, Tuple
-import csv
 
 from ..helpers.find_files import find_files
 from ..helpers.nltk_data import ensure_punkt
@@ -208,14 +207,13 @@ def analyze_with_archetypes(
         overwrite_existing=overwrite_existing, on_progress=on_progress,
         workers=workers)
 
-    if out_features_csv is None:
-        out_features_csv = Path.cwd() / "features" / "archetypes" / analysis_ready.name
-    out_features_csv = Path(out_features_csv)
-    out_features_csv.parent.mkdir(parents=True, exist_ok=True)
+    from ..helpers import tables
 
-    if not overwrite_existing and Path(out_features_csv).is_file():
-        print("Archetypes output file already exists; returning existing file.")
-        return out_features_csv
+    out_ref = tables.output_ref(out_features_csv, source=analysis_ready,
+                                default=("features", "archetypes"))
+    if not overwrite_existing and tables.exists(out_ref):
+        print(f"Archetypes output already exists; returning existing: {out_ref}")
+        return tables.handle(out_ref)
 
 
     # 2) resolve/validate the archetype CSVs
@@ -270,29 +268,26 @@ def analyze_with_archetypes(
         Enforces that all requested `wanted` columns exist (fail fast).
         """
         wanted = list(wanted or [])
-        with path.open("r", newline="", encoding=encoding) as f:
-            reader = csv.DictReader(f, delimiter=delimiter)
-            fields = reader.fieldnames or []
-            if id_col not in fields or text_col not in fields:
-                raise ValueError(
-                    f"Expected columns '{id_col}' and '{text_col}' in {path}; found {fields}"
-                )
-            missing = [c for c in wanted if c not in fields]
-            if missing:
-                raise ValueError(
-                    f"Requested id_cols not present in analysis-ready CSV {path}: {missing}"
-                )
-
-            for row in reader:
-                tid = str(row.get(id_col, "") or "")
-                txt = str(row.get(text_col, "") or "")
-                meta = {c: str(row.get(c, "") or "") for c in wanted}
-                # we name each tick because these rows are wildly uneven: one
-                # book-sized document can take minutes where its neighbors
-                # take milliseconds, and an unnamed pause that long looks
-                # like a hang
-                _ticker.tick(message=f"scoring {tid}")
-                yield tid, txt, meta
+        fields = tables.columns_of(path, encoding=encoding, delimiter=delimiter)
+        if id_col not in fields or text_col not in fields:
+            raise ValueError(
+                f"Expected columns '{id_col}' and '{text_col}' in {path}; found {fields}"
+            )
+        missing = [c for c in wanted if c not in fields]
+        if missing:
+            raise ValueError(
+                f"Requested id_cols not present in analysis-ready table {path}: {missing}"
+            )
+        for row in tables.read_rows(path, encoding=encoding, delimiter=delimiter):
+            tid = str(row.get(id_col, "") or "")
+            txt = str(row.get(text_col, "") or "")
+            meta = {c: str(row.get(c, "") or "") for c in wanted}
+            # we name each tick because these rows are wildly uneven: one
+            # book-sized document can take minutes where its neighbors
+            # take milliseconds, and an unnamed pause that long looks
+            # like a hang
+            _ticker.tick(message=f"scoring {tid}")
+            yield tid, txt, meta
 
 
     # the middle layer pulls the generator above lazily and writes as it goes,
@@ -309,16 +304,15 @@ def analyze_with_archetypes(
     # analyzer uses, and the same two columns that never get carried
     from ..helpers.row_map import resolve_passthrough_columns
 
-    with analysis_ready.open("r", newline="", encoding=encoding) as _fh:
-        _header = csv.DictReader(_fh).fieldnames or []
+    _header = tables.columns_of(analysis_ready, encoding=encoding)
     passthrough = resolve_passthrough_columns(
         _header, id_cols=id_cols, group_by=group_by,
-        analysis_ready=analysis_ready)
+        analysis_ready=str(analysis_ready))
 
     maa.analyze_texts_to_csv(
         items=_iter_items_from_csv_with_meta(analysis_ready, wanted=passthrough),
         archetype_csvs=archetype_csvs,
-        out_csv=out_features_csv,
+        out_csv=str(out_ref),
         model_name=model_name,
         device=device,
         mean_center_vectors=mean_center_vectors,
@@ -331,7 +325,7 @@ def analyze_with_archetypes(
         verbose=on_progress is None,
     )
 
-    return out_features_csv
+    return tables.handle(out_ref)
 
 
 

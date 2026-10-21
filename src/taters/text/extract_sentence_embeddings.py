@@ -1,11 +1,9 @@
 from __future__ import annotations
 from pathlib import Path
-from typing import Callable, Optional, Literal, Union, Sequence, Iterable, Tuple
-import csv
+from typing import Callable, Optional, Literal, Union, Sequence
 import numpy as np
 
 from ..helpers.nltk_data import ensure_punkt
-from ..helpers.atomic import atomic_write
 from ..helpers.gpu import device_note, resolve_device
 from ..helpers.progress import Ticker, announce, count_rows
 from ..helpers.doc_text import DOCUMENT_PATTERN
@@ -58,43 +56,6 @@ def _split_sentences(text: str) -> list[str]:
 
     return split_sentences(text)
 
-
-def _iter_items_from_csv(path: Path, *, id_col: str = "text_id", text_col: str = "text",
-                         encoding: str = "utf-8-sig", delimiter: str = ",") -> Iterable[Tuple[str, str]]:
-    """
-    Stream ``(text_id, text)`` pairs from an analysis-ready CSV.
-
-    Parameters
-    ----------
-    path : pathlib.Path
-        Path to the CSV file.
-    id_col : str, default="text_id"
-        Name of the identifier column in the CSV.
-    text_col : str, default="text"
-        Name of the text column in the CSV.
-    encoding : str, default="utf-8-sig"
-        File encoding.
-    delimiter : str, default=","
-        Field delimiter.
-
-    Yields
-    ------
-    tuple of (str, str)
-        The ``(text_id, text)`` for each row. Missing text values are emitted
-        as empty strings.
-
-    Raises
-    ------
-    ValueError
-        If the required ``id_col`` and ``text_col`` are not present in the header.
-    """
-
-    with path.open("r", newline="", encoding=encoding) as f:
-        reader = csv.DictReader(f, delimiter=delimiter)
-        if id_col not in reader.fieldnames or text_col not in reader.fieldnames:
-            raise ValueError(f"Expected columns '{id_col}' and '{text_col}' in {path}; found {reader.fieldnames}")
-        for row in reader:
-            yield str(row[id_col]), (row.get(text_col) or "")
 
 @records_settings(binding=TEXT_INPUT, grain=TEXT_GRAIN,
                   outputs=("out_features_csv",))
@@ -335,15 +296,14 @@ def extract_sentence_embeddings(
         workers=workers,
         carry_cols=pt_cols or None, verbose=verbose)
 
-    if out_features_csv is None:
-        out_features_csv = Path.cwd() / "features" / "sentence-embeddings" / analysis_ready.name
-    out_features_csv = Path(out_features_csv)
-    out_features_csv.parent.mkdir(parents=True, exist_ok=True)
+    from ..helpers import tables
 
-    if not overwrite_existing and Path(out_features_csv).is_file():
+    out_ref = tables.output_ref(out_features_csv, source=analysis_ready,
+                                default=("features", "sentence-embeddings"))
+    if not overwrite_existing and tables.exists(out_ref):
         if verbose:
-            print("Sentence embedding feature output file already exists; returning existing file.")
-        return out_features_csv
+            print(f"Sentence embedding output already exists; returning existing: {out_ref}")
+        return tables.handle(out_ref)
 
     # 2) load model
     #
@@ -380,55 +340,54 @@ def extract_sentence_embeddings(
     # 4) stream rows → split → encode → average → (optional) L2 normalize → write
     if verbose:
         print("Extracting embeddings...")
-    with atomic_write(out_features_csv, newline="", encoding=encoding) as f:
-        writer = csv.writer(f)
-        writer.writerow(header)
+    # every column after the id is a number; said up front so the database
+    # writer does not have to look
+    hints = {c: "text" for c in ["text_id", *pt_cols]}
+    with tables.write_table(out_ref, header, encoding=encoding, hints=hints) as writer:
+        # the analysis-ready table as dicts, so the extra columns come along
+        fields = tables.columns_of(analysis_ready, encoding=encoding, delimiter=delimiter)
+        # light validation: warn if any requested pass-through column is missing
+        missing = [c for c in pt_cols if c not in fields]
+        if missing and verbose:
+            print(f"[sentence-embeddings] WARNING: pass-through columns missing in source: {missing}")
 
-        # open the analysis-ready CSV as dicts so we can read the extra cols
-        with analysis_ready.open("r", newline="", encoding=encoding) as rf:
-            reader = csv.DictReader(rf, delimiter=delimiter)
-            # light validation: warn if any requested pass-through column is missing
-            missing = [c for c in pt_cols if c not in (reader.fieldnames or [])]
-            if missing and verbose:
-                print(f"[sentence-embeddings] WARNING: pass-through columns missing in source: {missing}")
+        _ticker = Ticker(on_progress,
+                         count_rows(analysis_ready, on_progress=on_progress))
 
-            _ticker = Ticker(on_progress,
-                             count_rows(analysis_ready, on_progress=on_progress))
+        for row in tables.read_rows(analysis_ready, encoding=encoding,
+                                    delimiter=delimiter):
+            text_id = str(row.get("text_id", ""))
+            text = (row.get("text") or "")
+            pt_vals = [row.get(c, "") for c in pt_cols]
 
-            for row in reader:
-                text_id = str(row.get("text_id", ""))
-                text = (row.get("text") or "")
-                pt_vals = [row.get(c, "") for c in pt_cols]
+            sents = _split_sentences(text)
+            if not sents:
+                vec = None
+            else:
+                emb = model.encode(
+                    sents,
+                    batch_size=batch_size,
+                    convert_to_numpy=True,
+                    normalize_embeddings=False,
+                    show_progress_bar=show_progress and on_progress is None,
+                )
+                vec = emb.mean(axis=0).astype(np.float32, copy=False)
 
-                sents = _split_sentences(text)
-                if not sents:
-                    vec = None
-                else:
-                    emb = model.encode(
-                        sents,
-                        batch_size=batch_size,
-                        convert_to_numpy=True,
-                        normalize_embeddings=False,
-                        show_progress_bar=show_progress and on_progress is None,
-                    )
-                    vec = emb.mean(axis=0).astype(np.float32, copy=False)
+            if vec is None:
+                values = [""] * dim
+            else:
+                if normalize_l2:
+                    n = float(np.linalg.norm(vec))
+                    if n > 1e-12:
+                        vec = vec / n
+                values = [float(x) for x in vec.tolist()]
+                if rounding is not None:
+                    values = [round(v, int(rounding)) for v in values]
 
-                if vec is None:
-                    values = [""] * dim
-                else:
-                    if normalize_l2:
-                        n = float(np.linalg.norm(vec))
-                        if n > 1e-12:
-                            vec = vec / n
-                    values = [float(x) for x in vec.tolist()]
-                    if rounding is not None:
-                        values = [round(v, int(rounding)) for v in values]
+            writer.writerow([text_id] + pt_vals + values)
+            _ticker.tick()
 
-                writer.writerow([text_id] + pt_vals + values)
-                _ticker.tick()
-
-
-    return out_features_csv
+    return tables.handle(out_ref)
 
 
 

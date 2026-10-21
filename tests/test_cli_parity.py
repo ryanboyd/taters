@@ -32,6 +32,7 @@ MODULES = [
     "taters.text.finetune_predictor", "taters.text.hf_classifier", "taters.score_model",
     "taters.helpers.text_gather", "taters.helpers.feature_gather",
     "taters.helpers.feature_average", "taters.helpers.reshape",
+    "taters.helpers.tables",
     "taters.audio.convert_to_wav", "taters.audio.transcribe_with_whisper",
     "taters.audio.extract_whisper_embeddings", "taters.audio.extract_wav_from_video",
     "taters.audio.split_wav_by_speaker", "taters.audio.diarizer.whisper_diar_wrapper",

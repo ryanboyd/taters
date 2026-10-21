@@ -33,10 +33,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, List, Optional, Sequence, Union
 
-from .atomic import atomic_write
+from . import tables
 from .cliargs import CliSpec
 from .feature_columns import ColumnSpec
-from .progress import announce
+from .progress import Ticker, announce
 from .provenance import records_settings
 from .text_gather import _compose_id
 
@@ -75,20 +75,7 @@ def _numeric(value: str) -> Optional[float]:
         return None
 
 
-def _read_rows(path: Path, *, encoding: str, delimiter: str):
-    """Header and rows of a CSV, as strings."""
-    import csv
-
-    from .csvio import widen_csv_field_limit
-
-    widen_csv_field_limit()
-    with path.open("r", newline="", encoding=encoding) as fh:
-        reader = csv.DictReader(fh, delimiter=delimiter)
-        header = list(reader.fieldnames or [])
-        return header, [dict(row) for row in reader]
-
-
-def _key_lookup(keys_csv: Path, *, key_cols: Sequence[str],
+def _key_lookup(keys_csv, *, key_cols: Sequence[str],
                 group_by: Sequence[str], encoding: str, delimiter: str) -> dict:
     """
     ``{row key: (group values)}`` from the key map.
@@ -97,16 +84,23 @@ def _key_lookup(keys_csv: Path, *, key_cols: Sequence[str],
     its own numbers and nothing else -- there is no column on it saying which
     speaker the utterance belonged to. Later averages do not: their input
     already carries the columns it was grouped on.
+
+    The whole map is held, but it is ids only -- one row key and its group
+    values per row, never a measure or a text -- so it is the smallest thing
+    we could hold and still answer "which group" for a row in any order.
     """
-    header, rows = _read_rows(keys_csv, encoding=encoding, delimiter=delimiter)
-    missing = [c for c in list(key_cols) + list(group_by) if c not in header]
+    keys_csv = tables.parse_ref(keys_csv)
+    header = tables.columns_of(keys_csv, encoding=encoding, delimiter=delimiter)
+    wanted = list(key_cols) + [c for c in group_by if c not in key_cols]
+    missing = [c for c in wanted if c not in header]
     if missing:
         raise ValueError(
             f"{keys_csv.name} has no column(s) {missing}, so it cannot say "
             f"which rows belong together. It needs {list(key_cols)} to match "
             f"the feature table on, and {list(group_by)} to group by.")
     lookup = {}
-    for row in rows:
+    for row in tables.read_rows(keys_csv, columns=wanted, encoding=encoding,
+                                delimiter=delimiter):
         lookup[tuple(str(row.get(c, "")) for c in key_cols)] = \
             tuple(str(row.get(c, "")) for c in group_by)
     return lookup
@@ -155,9 +149,9 @@ def average_feature_table(
     in_csv : str or Path
         The feature table to average: one row per text, a row key, and numeric
         columns. Non-numeric columns are dropped, since there is no mean of a
-        word.
+        word. A file, or ``db://<connection>/<table>``.
     out_csv : str or Path
-        Where to write the averaged table.
+        Where to write the averaged table: a file, or a database table.
     group_by : sequence of str
         The columns whose shared values make a group. They come from
         ``keys_csv`` on the first average and from ``in_csv`` itself on any
@@ -182,7 +176,8 @@ def average_feature_table(
     overwrite_existing : bool, default False
         Rebuild the table if it is already there.
     delimiter, encoding : str
-        How to read and write the CSVs.
+        How to read the CSVs. The output is written comma-separated, as every
+        feature table is.
     on_progress : callable, optional
         Progress callback.
     verbose : bool, default True
@@ -190,8 +185,8 @@ def average_feature_table(
 
     Returns
     -------
-    pathlib.Path
-        ``out_csv``.
+    pathlib.Path or TableRef
+        ``out_csv``: the path for a file, the ref for a database table.
 
     Notes
     -----
@@ -202,35 +197,35 @@ def average_feature_table(
     count column reports the rows in the group, not the rows behind any one
     number.
     """
-    src = Path(in_csv)
-    out = Path(out_csv)
+    src = tables.parse_ref(in_csv)
+    out = tables.parse_ref(out_csv)
     keys = list(group_by) + ([split_col] if split_col else [])
     if not keys:
         raise ValueError(
             "group_by is empty, so there is nothing to average by. Averaging "
             "a table by nothing would copy it.")
-    if out.exists() and not overwrite_existing:
+    if tables.exists(out) and not overwrite_existing:
         if verbose:
             print(f"[average] exists, leaving alone: {out}")
-        return out
-    if not src.is_file():
+        return tables.handle(out)
+    if not tables.exists(src):
         raise FileNotFoundError(f"in_csv not found: {src}")
 
     announce(on_progress, f"averaging {src.name} by {', '.join(keys)}")
-    header, rows = _read_rows(src, encoding=encoding, delimiter=delimiter)
+    header = tables.columns_of(src, encoding=encoding, delimiter=delimiter)
     if not header:
         raise ValueError(f"{src.name} has no header row.")
 
     lookup = None
     if keys_csv is not None:
-        lookup = _key_lookup(Path(keys_csv), key_cols=key_cols,
+        lookup = _key_lookup(keys_csv, key_cols=key_cols,
                              group_by=group_by, encoding=encoding,
                              delimiter=delimiter)
         missing = [c for c in key_cols if c not in header]
         if missing:
             raise ValueError(
                 f"{src.name} has no column(s) {missing}, so its rows cannot "
-                f"be matched to the ones in {Path(keys_csv).name}.")
+                f"be matched to the ones in {tables.parse_ref(keys_csv).name}.")
     else:
         absent = [c for c in keys if c not in header]
         if absent:
@@ -247,11 +242,18 @@ def average_feature_table(
     # once as a mean of counts and once as this level's own count.
     skip = set(keys) | set(key_cols) | {COUNT_COLUMN}
     candidates = [c for c in header if c not in skip]
+    # one pass, and what we keep is per group: a running sum and a count per
+    # column. the table itself streams through, so a million utterances cost
+    # what their speakers cost
     sums = {}
     counts = {}
     members = {}
     order: List[tuple] = []
-    for row in rows:
+    n_rows = 0
+    ticker = Ticker(on_progress, tables.count(src, encoding=encoding))
+    for row in tables.read_rows(src, encoding=encoding, delimiter=delimiter):
+        n_rows += 1
+        ticker.tick(message="averaging rows")
         if lookup is not None:
             found = lookup.get(tuple(str(row.get(c, "")) for c in key_cols))
             if found is None:
@@ -287,14 +289,11 @@ def average_feature_table(
             f"every group in {src.name} was assembled from fewer than "
             f"{min_rows} row(s), so nothing is left to write.")
 
-    out.parent.mkdir(parents=True, exist_ok=True)
     id_col = list(key_cols)[0]
     out_header = [id_col, *keys, COUNT_COLUMN, *kept_cols]
-    import csv as _csv
-
-    with atomic_write(out, mode="w", newline="", encoding="utf-8") as fh:
-        writer = _csv.writer(fh, delimiter=delimiter)
-        writer.writerow(out_header)
+    hints = {**{c: "text" for c in [id_col, *keys]}, COUNT_COLUMN: "int",
+             **{c: "float" for c in kept_cols}}
+    with tables.write_table(out, out_header, encoding="utf-8", hints=hints) as writer:
         for group in survivors:
             row_id = _compose_id(group) or GROUP_FALLBACK_ID
             values = []
@@ -307,9 +306,9 @@ def average_feature_table(
         dropped = len(order) - len(survivors)
         tail = f", {dropped} group(s) under {min_rows} row(s) left out" \
             if dropped else ""
-        print(f"[average] {src.name}: {len(rows)} row(s) -> "
+        print(f"[average] {src.name}: {n_rows} row(s) -> "
               f"{len(survivors)} group(s) by {', '.join(keys)}{tail}")
-    return out
+    return tables.handle(out)
 
 
 CLI = CliSpec(

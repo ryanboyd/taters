@@ -1,10 +1,8 @@
 from __future__ import annotations
 from pathlib import Path
 from typing import Iterable, List, Sequence, Tuple, Union
-import csv
 import re
 import warnings
-from ...helpers.atomic import atomic_write
 from ...helpers.csvio import widen_csv_field_limit
 
 # we only ever touch ContentCoder's public API
@@ -277,8 +275,9 @@ def analyze_texts_to_csv(
     """
     from ...helpers.parallel_map import ordered_parallel_map, resolve_workers
 
-    out_csv = Path(out_csv)
-    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    from ...helpers import tables
+
+    out_ref = tables.parse_ref(out_csv)
 
     if verbose:
         coders = _load_coders(dict_files, keep_zero_weights=weighted_mean)
@@ -318,11 +317,13 @@ def analyze_texts_to_csv(
     # the metas stay here in the parent; only (text_id, text) crosses over to
     # a worker. the id rides along so that the display can name the document
     # each worker is chewing on. `ordered_parallel_map` only pulls inputs a
-    # small window ahead of the results it has handed back, so this list never
-    # runs away from us, and result i always pairs up with ids_meta[i]
+    # small window ahead of the results it has handed back, and each result
+    # pops its id off the front, so this never holds more than that window
     from ...helpers.progress import FlightReporter
 
-    ids_meta: List[Tuple[str, dict]] = []
+    from collections import deque
+
+    ids_meta: deque = deque()
     reporter = FlightReporter(on_progress, total_hint, "scoring documents") \
         if on_progress is not None else None
 
@@ -352,12 +353,9 @@ def analyze_texts_to_csv(
     )
 
     # ---- lastly, we stream the rows out ------------------------------------
-    with atomic_write(out_csv, newline=newline, encoding=encoding) as f:
-        writer = csv.writer(f)
-        writer.writerow(header)
-
-        for i, cells in enumerate(cells_stream):
-            text_id, meta = ids_meta[i]
+    with tables.write_table(out_ref, header, encoding=encoding) as writer:
+        for cells in cells_stream:
+            text_id, meta = ids_meta.popleft()
             if reporter is not None:
                 reporter.consumed()
             if verbose:
@@ -371,5 +369,5 @@ def analyze_texts_to_csv(
             row_out.extend(cells)
             writer.writerow(row_out)
 
-    return out_csv
+    return tables.handle(out_ref)
 

@@ -289,12 +289,65 @@ def _delete(ctx: TaskContext, paths: List[Path]) -> None:
         prompter.pause()
         return
 
+    # read before the file goes: the tables a run left in a database are
+    # named by the preset, and nothing else remembers them
+    root = _results_root(path)
     if whole_folder:
         shutil.rmtree(path.parent)
         prompter.note(f"  Deleted {path.parent.name}/.", style="green")
     else:
         path.unlink()
         prompter.note(f"  Deleted {path.name}.", style="green")
+    _offer_to_drop_tables(prompter, root)
+
+
+def _offer_to_drop_tables(prompter: Prompter, root: str) -> None:
+    """
+    A run that wrote its results into a database left tables there, and
+    deleting the folder does not touch them. Say so, and offer -- only the
+    tables the registry says Taters made under this run's root, never
+    anything else in the database.
+    """
+    from ...helpers import db, tables
+
+    if not root:
+        return
+    try:
+        found = tables.tables_under(root)
+    except Exception as e:
+        prompter.note(f"  Its tables in {root} were not looked at: {e}", style="dim")
+        return
+    if not found:
+        return
+    name = found[0].profile
+    try:
+        where = db.get_profile(name).database
+    except Exception:
+        where = ""
+    prompter.note(f"  Its {len(found)} table(s) in {name}"
+                  + (f" (database {where})" if where else "") + " are still there.",
+                  style="yellow")
+    if not prompter.confirm("Remove them too?", default=False):
+        prompter.note(f"  Left in place: {', '.join(t.stem for t in found[:6])}"
+                      + (" …" if len(found) > 6 else "") + ".", style="dim")
+        return
+    dropped = 0
+    for ref in found:
+        try:
+            dropped += int(tables.delete_table(ref))
+        except Exception as e:
+            prompter.note(f"  {ref.stem} was not removed: {e}", style="yellow")
+    prompter.note(f"  Removed {dropped} table(s) from {name}.", style="green")
+
+
+def _results_root(path: Path) -> str:
+    """The database root a preset writes into, or "" for the run folder."""
+    try:
+        data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return ""
+    root = str(((data.get("vars") or {}).get("results_root")) or "")
+    return root if root.startswith("db://") else ""
 
 
 _ACTIONS = [

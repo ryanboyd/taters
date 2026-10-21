@@ -30,7 +30,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Union
 from ..helpers.atomic import atomic_write
 from ..helpers.cliargs import CliSpec
 from ..helpers.progress import announce
-from ._common import looks_numeric, numeric_column, read_str_csv, reusable
+from ._common import looks_numeric, numeric_column, reusable
 
 __all__ = ["describe_features", "describe_values", "COLUMNS", "SKIP_COLUMNS"]
 
@@ -101,17 +101,54 @@ def _fmt(value, rounding: int) -> str:
     return str(round(float(value), rounding))
 
 
-def _describe_table(path: Path, encoding: str) -> List[List[object]]:
-    """One row of descriptives per numeric column of a feature table."""
-    table = read_str_csv(path, encoding=encoding)
+def _describe_table(path, encoding: str) -> List[List[object]]:
+    """
+    One row of descriptives per numeric column of a feature table.
+
+    Read in blocks: each column's values are parsed to floats as they go
+    and only the floats are kept, so the table is never held as strings.
+    A column that stops parsing in a later block is dropped, the same
+    verdict `looks_numeric` gives over the whole column.
+    """
+    import numpy as np
+
+    from ..helpers.tables import columns_of, read_cells
+
+    names = [c for c in columns_of(path, encoding=encoding)]
+    wanted = [c for c in names if c not in SKIP_COLUMNS]
+    parts: Dict[str, List[object]] = {c: [] for c in wanted}
+    seen: Dict[str, bool] = {c: False for c in wanted}
+    block: Dict[str, List[str]] = {c: [] for c in wanted}
+
+    def flush() -> None:
+        for c in list(parts):
+            values = block[c]
+            if not values:
+                continue
+            if any(str(v or "").strip() for v in values):
+                if not looks_numeric(values):
+                    del parts[c]
+                    continue
+                seen[c] = True
+            parts[c].append(numeric_column(values, column=c))
+        for c in block:
+            block[c].clear()
+
+    n = 0
+    for cells in read_cells(path, columns=wanted, encoding=encoding):
+        for c, v in zip(wanted, cells):
+            if c in parts:
+                block[c].append(v)
+        n += 1
+        if n % 50_000 == 0:
+            flush()
+    flush()
     rows: List[List[object]] = []
-    for column in table.columns:
-        if column in SKIP_COLUMNS:
+    for column in wanted:
+        if column not in parts or not seen[column]:
             continue
-        values = table[column].tolist()
-        if not looks_numeric(values):
-            continue
-        stats = describe_values(numeric_column(values, column=column))
+        values = np.concatenate(parts[column]) if parts[column] else np.empty(0)
+        stats = describe_values(values)
         rows.append([column] + [stats[k] for k in COLUMNS[1:]])
     return rows
 
@@ -168,8 +205,12 @@ def describe_features(
     measures (``token_count``, ``WC``) are described like any other -- they
     are the first thing to look at when a measure looks strange.
     """
+    from ..helpers import tables
+
     out_dir = Path(out_dir)
-    paths = [Path(p) for p in feature_csvs]
+    # feature tables live wherever the run put them; the descriptives are
+    # bookkeeping and stay in `out_dir` on disk
+    paths = [tables.parse_ref(p) for p in feature_csvs]
     if not paths:
         if verbose:
             print("[describe] no feature tables to describe.")
@@ -178,12 +219,12 @@ def describe_features(
     index: List[str] = []
     for i, path in enumerate(paths):
         if on_progress is not None:
-            on_progress(i, len(paths), f"describing {path.name}")
-        if not path.is_file():
+            on_progress(i, len(paths), f"describing {path.stem}")
+        if not tables.exists(path):
             raise FileNotFoundError(f"feature table not found: {path}")
         out = out_dir / f"{path.stem}.csv"
         if reusable(out, path, overwrite_existing=overwrite_existing,
-                    verbose=verbose, what=f"the descriptives for {path.name}"):
+                    verbose=verbose, what=f"the descriptives for {path.stem}"):
             reused += 1
         else:
             rows = _describe_table(path, encoding)

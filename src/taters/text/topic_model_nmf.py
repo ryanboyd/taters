@@ -37,11 +37,11 @@ predictors than LDA's proportions, which are compositional.
 
 from __future__ import annotations
 
-import csv
 import json
 from pathlib import Path
 from typing import Callable, List, Literal, Optional, Sequence, Union
 
+from ..helpers import tables
 from ..helpers.atomic import atomic_write
 from ..helpers.cliargs import CliSpec
 from ..helpers.doc_text import DOCUMENT_PATTERN
@@ -359,22 +359,22 @@ def topic_model_nmf(
         overwrite_existing=overwrite_existing, on_progress=on_progress,
         workers=workers)
 
-    if out_features_csv is None:
-        out_features_csv = (Path.cwd() / "features" / "topic_model_nmf"
-                            / analysis_ready.name)
-    out_features_csv = Path(out_features_csv)
-    out_features_csv.parent.mkdir(parents=True, exist_ok=True)
-    stem = out_features_csv.stem
-    model_path = Path(out_model_json) if out_model_json else \
-        out_features_csv.with_name(f"{stem}_model.json")
-    loadings_path = Path(out_loadings_csv) if out_loadings_csv else \
-        out_features_csv.with_name(f"{stem}_loadings.csv")
-    terms_path = Path(out_top_terms_csv) if out_top_terms_csv else \
-        out_features_csv.with_name(f"{stem}_top_terms.csv")
+    # a file beside the run, or a table in the database the text came from;
+    # see helpers.tables for the one rule. the loadings and the top-terms
+    # table go wherever the features go; the model is not rows, so it stays
+    # on disk either way -- beside a file, under db_local/ for a table
+    out_ref = tables.output_ref(out_features_csv, source=analysis_ready,
+                                default=("features", "topic_model_nmf"))
+    stem = out_ref.stem
+    model_path = _topics.local_file(out_model_json, out_ref, f"{stem}_model.json")
+    loadings_ref = tables.parse_ref(out_loadings_csv) if out_loadings_csv else \
+        out_ref.sibling(f"{stem}_loadings")
+    terms_ref = tables.parse_ref(out_top_terms_csv) if out_top_terms_csv else \
+        out_ref.sibling(f"{stem}_top_terms")
 
-    if not overwrite_existing and out_features_csv.is_file():
-        print("NMF factor output file already exists; returning existing file.")
-        return out_features_csv
+    if not overwrite_existing and tables.exists(out_ref):
+        print("NMF factor output already exists; returning existing.")
+        return tables.handle(out_ref)
 
     text_settings = dict(lemmatize=lemmatize, pos_tagged=pos_tagged,
                          engine=engine, tokenizer=tokenizer,
@@ -394,7 +394,7 @@ def topic_model_nmf(
     # impossible rather than merely wired-around -- and it is the idiom the
     # rest of the codebase already uses for companion files.
         analysis_ready=analysis_ready,
-        out_dir=out_features_csv.with_name(f"{stem}_matrix"),
+        out_dir=_topics.matrix_dir_of(out_ref),
         weighting=weighting, matrix_rounding=matrix_rounding,
         text_settings=text_settings, vocab_settings=vocab_settings,
         ngram_settings=dict(ngram_n=ngram_n, stoplist_paths=stoplist_paths,
@@ -437,7 +437,7 @@ def topic_model_nmf(
             k_values=k_values, fit=fit_at, terms=terms, batches=batches,
             engine="nmf", rule=k_selection, metric=coherence_metric,
             top_terms=top_terms, rounding=rounding,
-            out_stem=out_features_csv.with_name(f"{stem}_k_selection"),
+            out_stem=_topics.local_file(None, out_ref, f"{stem}_k_selection"),
             encoding=encoding, on_progress=on_progress)
     topic_names = _topic_names(n_topics)
 
@@ -445,10 +445,10 @@ def topic_model_nmf(
     # already reads -- term, an optional pos, then one column per topic. it is
     # the same file for every topic model on purpose, so the word clouds are
     # written once and not once per engine.
-    with atomic_write(loadings_path, newline="", encoding=encoding) as f:
-        writer = csv.writer(f)
-        head = ["term", "pos", *topic_names] if pos_tagged else ["term", *topic_names]
-        writer.writerow(head)
+    head = ["term", "pos", *topic_names] if pos_tagged else ["term", *topic_names]
+    hints = {"term": "text", "pos": "text", **{t: "float" for t in topic_names}}
+    with tables.write_table(loadings_ref, head, encoding=encoding,
+                            hints=hints) as writer:
         # scaled to sum to one per factor purely so the numbers are readable
         # and comparable between factors. NMF's H carries no such constraint,
         # and the scale of a factor is arbitrary anyway -- W absorbs it.
@@ -462,9 +462,10 @@ def topic_model_nmf(
             writer.writerow(row)
 
     # and the readable one: what each topic is actually about, in order
-    with atomic_write(terms_path, newline="", encoding=encoding) as f:
-        writer = csv.writer(f)
-        writer.writerow(["topic", "rank", "term", "weight"])
+    with tables.write_table(terms_ref, ["topic", "rank", "term", "weight"],
+                            encoding=encoding,
+                            hints={"topic": "text", "rank": "int",
+                                   "term": "text", "weight": "float"}) as writer:
         weights = h / (h.sum(axis=1)[:, None] + 1e-100)
         for i, name in enumerate(topic_names):
             order = np.argsort(weights[i])[::-1][:top_terms]
@@ -499,13 +500,13 @@ def topic_model_nmf(
     with atomic_write(model_path, encoding="utf-8") as f:
         json.dump(model, f, indent=1)
 
-    _score_matrix(dtm_csv, out_features_csv, h=h, beta_loss=beta_loss,
+    _score_matrix(dtm_csv, out_ref, h=h, beta_loss=beta_loss,
                   topic_names=topic_names, rounding=rounding, encoding=encoding,
                   on_progress=on_progress, n_documents=n_documents)
-    return out_features_csv
+    return tables.handle(out_ref)
 
 
-def _score_matrix(dtm_csv: Path, out_csv: Path, *, h, beta_loss: str,
+def _score_matrix(dtm_csv, out_csv, *, h, beta_loss: str,
                   topic_names: Sequence[str], rounding: int, encoding: str,
                   on_progress, n_documents: int) -> None:
     """Stream the matrix through inference and write one row per document.
@@ -515,13 +516,13 @@ def _score_matrix(dtm_csv: Path, out_csv: Path, *, h, beta_loss: str,
     reproducing the training scores, and that is the test that would notice.
     """
     ticker = Ticker(on_progress, n_documents)
-    with Path(dtm_csv).open("r", newline="", encoding=encoding) as f, \
-            atomic_write(out_csv, newline="", encoding=encoding) as out:
-        reader = csv.reader(f)
-        next(reader)
-        writer = csv.writer(out)
-        writer.writerow(["text_id", "token_count", *topic_names])
-        for row in reader:
+    # positional cells in, a typed table out: the matrix and the scores can
+    # each be a file or a database table, and neither is ever held whole
+    hints = {"text_id": "text", "token_count": "int",
+             **{t: "float" for t in topic_names}}
+    with tables.write_table(out_csv, ["text_id", "token_count", *topic_names],
+                            encoding=encoding, hints=hints) as writer:
+        for row in tables.read_cells(dtm_csv, encoding=encoding):
             ticker.tick(message="scoring documents")
             counts = [float(x or 0) for x in row[2:]]
             weights = _topics.infer_nmf(h, counts, beta_loss=beta_loss)[0]
@@ -626,17 +627,16 @@ def apply_nmf_model(
         overwrite_existing=overwrite_existing, on_progress=on_progress,
         workers=workers)
 
+    # `_applied`, so that fitting and applying with the defaults do not
+    # write to one table -- and so their matrix folders, derived from this
+    # stem, can never be the same one
+    out_ref = tables.output_ref(out_features_csv, source=analysis_ready,
+                                default=("features", "topic_model_nmf"))
     if out_features_csv is None:
-        # `_applied`, so that fitting and applying with the defaults do not
-        # write to one file -- and so their matrix folders, derived from this
-        # stem, can never be the same one.
-        out_features_csv = (Path.cwd() / "features" / "topic_model_nmf"
-                            / f"{analysis_ready.stem}_applied{analysis_ready.suffix}")
-    out_features_csv = Path(out_features_csv)
-    out_features_csv.parent.mkdir(parents=True, exist_ok=True)
-    if not overwrite_existing and out_features_csv.is_file():
-        print("NMF factor output file already exists; returning existing file.")
-        return out_features_csv
+        out_ref = out_ref.sibling(f"{out_ref.stem}_applied")
+    if not overwrite_existing and tables.exists(out_ref):
+        print("NMF factor output already exists; returning existing.")
+        return tables.handle(out_ref)
 
     # rebuild the matrix the model's way, not the caller's. the vocabulary is
     # pinned to the model's own term list, so a word the training corpus never
@@ -659,13 +659,11 @@ def apply_nmf_model(
     # it up and modeled the wrong corpus. Deriving from the stem makes both
     # impossible rather than merely wired-around -- and it is the idiom the
     # rest of the codebase already uses for companion files.
-    matrix_dir = out_features_csv.with_name(
-        f"{out_features_csv.stem}_matrix")
-    matrix_dir.mkdir(parents=True, exist_ok=True)
-    dtm_csv = Path(build_doc_term_matrix(
-        freq_list_csv=_frozen_freq_list(model, matrix_dir, encoding=encoding),
+    freq_ref, dtm_ref = _topics.matrix_refs(_topics.matrix_dir_of(out_ref))
+    dtm_csv = build_doc_term_matrix(
+        freq_list_csv=str(_frozen_freq_list(model, freq_ref, encoding=encoding)),
         analysis_csv=analysis_ready,
-        out_features_csv=matrix_dir / "dtm.csv",
+        out_features_csv=dtm_ref,
         overwrite_existing=True, workers=workers, on_progress=on_progress,
         encoding=encoding, weighting=matrix_cfg["weighting"],
         rounding=int(matrix_cfg["rounding"]),
@@ -675,22 +673,22 @@ def apply_nmf_model(
         engine=text_cfg["engine"], tokenizer=text_cfg["tokenizer"],
         stanza_lang=text_cfg["stanza_lang"],
         keep_punctuation=bool(text_cfg.get("keep_punctuation", True)),
-        device=device))
+        device=device)
 
     h = np.asarray(fit["components"], dtype=np.float64)
-    n_documents = sum(1 for _ in Path(dtm_csv).open(encoding=encoding)) - 1
+    n_documents = tables.count(dtm_csv, encoding=encoding)
     # the divergence the model was fitted with, not this run's default: the
     # two have different update rules, so scoring a KL model with the
     # least-squares one gives weights the fit never produced.
-    _score_matrix(dtm_csv, out_features_csv, h=h,
+    _score_matrix(dtm_csv, out_ref, h=h,
                   beta_loss=str(fit.get("beta_loss", "frobenius")),
                   topic_names=list(fit["topics"]), rounding=rounding,
                   encoding=encoding, on_progress=on_progress,
                   n_documents=max(n_documents, 0))
-    return out_features_csv
+    return tables.handle(out_ref)
 
 
-def _frozen_freq_list(model: dict, out_dir: Path, *, encoding: str) -> Path:
+def _frozen_freq_list(model: dict, freq_ref, *, encoding: str):
     """Write the model's own vocabulary out as a frequency list.
 
     `build_doc_term_matrix` chooses its columns from a frequency list, and when
@@ -704,17 +702,17 @@ def _frozen_freq_list(model: dict, out_dir: Path, *, encoding: str) -> Path:
     idf = list(matrix_cfg.get("idf") or [0.0] * len(terms))
     pos_tagged = bool(model["text"].get("pos_tagged"))
 
-    path = out_dir / "freq_list.csv"
-    with atomic_write(path, newline="", encoding=encoding) as f:
-        # `_load_vocabulary` reads by name and needs ngram/frequency/obs_pct/idf,
-        # plus `pos` exactly when the model was tagged -- it refuses a mismatch
-        # both ways, because a tagged vocabulary scanned without tags matches
-        # almost nothing and does it silently.
-        head = ["ngram", "frequency", "obs_pct", "idf"]
-        if pos_tagged:
-            head.insert(1, "pos")
-        writer = csv.DictWriter(f, fieldnames=head)
-        writer.writeheader()
+    # `_load_vocabulary` reads by name and needs ngram/frequency/obs_pct/idf,
+    # plus `pos` exactly when the model was tagged -- it refuses a mismatch
+    # both ways, because a tagged vocabulary scanned without tags matches
+    # almost nothing and does it silently.
+    head = ["ngram", "frequency", "obs_pct", "idf"]
+    if pos_tagged:
+        head.insert(1, "pos")
+    with tables.write_table(freq_ref, head, encoding=encoding,
+                            hints={"ngram": "text", "pos": "text",
+                                   "frequency": "float", "obs_pct": "float",
+                                   "idf": "float"}) as writer:
         for rank, gram in enumerate(terms):
             # a descending, distinct frequency so that whatever cut the vocab
             # rule applies, it keeps everything and in the model's own order.
@@ -726,7 +724,7 @@ def _frozen_freq_list(model: dict, out_dir: Path, *, encoding: str) -> Path:
             if pos_tagged:
                 row["pos"] = tags_of(gram)
             writer.writerow(row)
-    return path
+    return tables.handle(freq_ref)
 
 
 CLI = CliSpec(

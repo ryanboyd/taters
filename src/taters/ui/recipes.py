@@ -86,7 +86,13 @@ SOURCES: Dict[str, str] = {
     "media": "audio or video files that need transcribing first",
     "txt_dir": "a folder of documents (.txt, .docx, .doc, .pdf)",
     "csv": "a spreadsheet with a column of text in it",
+    "db": "tables in a database, with the text in one of them",
 }
+
+#: The sources whose rows have columns a person can group by, filter on and
+#: run statistics against: a spreadsheet, or a database table. Everything
+#: that used to ask ``source == "csv"`` asks this instead.
+TABULAR = ("csv", "db")
 
 # every argument on a text analyzer that has a say in choosing an input.
 #
@@ -158,6 +164,13 @@ LEVELS: Dict[str, Tuple[Level, ...]] = {
               "One person's rows become a single text, measured once.",
               None),
     ),
+    "db": (
+        Level("row", "Measure every row on its own",
+              "One row of results per row of the table.", ()),
+        Level("group", "Join rows together, then measure",
+              "One person's rows become a single text, measured once.",
+              None),
+    ),
     "txt_dir": (
         Level("file", "Each file", "One row per document.", ()),
     ),
@@ -167,7 +180,7 @@ LEVELS: Dict[str, Tuple[Level, ...]] = {
 #: Taters has always done, which the shipped presets and their round-trip test
 #: depend on.
 DEFAULT_LEVEL: Dict[str, str] = {
-    "media": "speaker", "csv": "row", "txt_dir": "file",
+    "media": "speaker", "csv": "row", "txt_dir": "file", "db": "row",
 }
 
 
@@ -977,12 +990,26 @@ _MERGE_SHAPE = ("root_dir", "pattern", "recursive", "aggregate", "group_by",
                 "per_file", "stats", "add_source_path", "exclude_cols")
 
 # vars that come from the source itself rather than from any one step. we keep
+#: Where every table a run makes goes: "" for the run folder (so a path
+#: like ``gathered/texts.csv`` is exactly what it always was), or a database
+#: address with a trailing slash, ``db://lab/taters/study7/``, so the same
+#: template lands in the database. Anything in, anything out: this is the
+#: one knob, and the wizard asks it once.
+_RESULTS_ROOT = {
+    "results_root": {
+        "default": "",
+        "desc": "Where the tables this run makes go: blank for this folder, "
+                "or db://<connection>/<prefix>/ for a database.",
+    },
+}
+
 # the input path in a var (rather than baking it into five separate steps) so
 # that someone can re-point a finished preset at next term's essays with
 # `--var input_dir=...` instead of editing YAML.
 SOURCE_VARS: Dict[str, Dict[str, dict]] = {
     "media": {},
     "txt_dir": {
+        "results_root": _RESULTS_ROOT,
         "input_dir": {
             "default": ".",
             "desc": "Folder of documents (.txt, .docx, .doc, .pdf) to analyze.",
@@ -992,7 +1019,20 @@ SOURCE_VARS: Dict[str, Dict[str, dict]] = {
             "desc": "Which files to read, as globs separated by ';'.",
         },
     },
+    "db": {
+        "results_root": _RESULTS_ROOT,
+        "connection": {
+            "default": "",
+            "desc": "The saved database connection the text is read from.",
+        },
+        "source": {
+            "default": {},
+            "desc": "The table (and any tables joined to it) the text comes "
+                    "from; see the database guide for the shape.",
+        },
+    },
     "csv": {
+        "results_root": _RESULTS_ROOT,
         "input_csv": {
             "default": "",
             "desc": "Spreadsheet holding the text to analyze.",
@@ -1064,7 +1104,7 @@ def text_binding(
         # file in their Downloads.
         binding: dict = {
             "txt_dir": "{{var:input_dir}}",
-            "gathered_csv": "gathered/texts.csv",
+            "gathered_csv": "{{var:results_root}}gathered/texts.csv",
             "pattern": "{{var:txt_pattern}}",
             "recursive": True,
             "id_from": "stem",
@@ -1074,7 +1114,7 @@ def text_binding(
             binding["pass_through_cols"] = []
         return binding
 
-    if source == "csv" and gathered_artifact:
+    if source in TABULAR and gathered_artifact:
         # somebody has already gathered the text as its own step -- which is
         # what leaving rows out before measuring needs, since the analyzers
         # gather for themselves and take no argument for it. handed the
@@ -1088,18 +1128,23 @@ def text_binding(
             )
         return binding
 
-    if source == "csv":
+    if source in TABULAR:
         # one feature row per spreadsheet row unless the user asked us to
         # combine rows. `group_by` and `id_cols` are either/or, not both: the
         # gatherer composes `text_id` from `id_cols` *only when not grouping*,
         # so if we sent both, one of them would get silently ignored.
+        #
+        # a database source is the same binding with the table spec where
+        # the file path goes: the gather reads either. the gathered table
+        # lands wherever the results go, which `results_root` says
         binding = {
-            "csv_path": "{{var:input_csv}}",
-            "gathered_csv": "gathered/texts.csv",
+            "csv_path": "{{var:input_csv}}" if source == "csv" else "{{var:source}}",
+            "gathered_csv": "{{var:results_root}}gathered/texts.csv",
             "text_cols": list(text_cols),
             "mode": text_mode,
-            "delimiter": "{{var:csv_delimiter}}",
         }
+        if source == "csv":
+            binding["delimiter"] = "{{var:csv_delimiter}}"
         carried = list(group_by) if group_by else list(id_cols)
         if group_by:
             binding["group_by"] = list(group_by)
@@ -1372,9 +1417,15 @@ _STATS_SETS_VAR: Dict[str, dict] = {
 #: recipes spelled these out identically; a ninth got one key wrong.
 _TEXT_STEP: Dict[str, object] = {
     "hidden": ("txt_dir", "analysis_csv"),
-    "sources": ("media", "txt_dir", "csv"),
+    "sources": ("media", "txt_dir", "csv", "db"),
     "text_input": True,
 }
+
+#: The text steps that read from and write to a database today. The rest
+#: either spill text to local disk while they work (n-grams, the matrix and
+#: the topic models, word vectors, the encoder steps) or have not been moved
+#: to the table layer yet, and are not offered on a database source; the
+#: pass at the bottom of this module takes "db" off their sources.
 _TEXT_INPUT_WITH: Dict[str, object] = {
     "csv_path": "{{transcripts_all}}",
     "text_cols": ["text"],
@@ -1966,7 +2017,7 @@ RECIPES: List[Recipe] = [
         scope="global",
         save_as="word_counts",
         requires=frozenset({"unified_transcripts_csv"}),
-        sources=("media", "txt_dir", "csv"),
+        sources=("media", "txt_dir", "csv", "db"),
         text_input=True,
         gpu_use="cpu",
         hidden=("txt_dir", "analysis_csv"),
@@ -2116,7 +2167,7 @@ RECIPES: List[Recipe] = [
         # the shared `wordclouds` switch turns it off.
         user_facing=False,
         requires=frozenset({"ngram_freq_csv"}),
-        sources=("media", "txt_dir", "csv"),
+        sources=("media", "txt_dir", "csv", "db"),
         gpu_use="cpu",
         with_={
             "freq_csv": "{{ngram_freqs}}",
@@ -2347,7 +2398,7 @@ RECIPES: List[Recipe] = [
         save_as="mem_wordclouds",
         user_facing=False,
         requires=frozenset({"mem_loadings_csv"}),
-        sources=("media", "txt_dir", "csv"),
+        sources=("media", "txt_dir", "csv", "db"),
         gpu_use="cpu",
         with_={
             "loadings_csv": "{{var:features_dir}}/topic_model_mem/topic_model_mem_loadings.csv",
@@ -2471,7 +2522,7 @@ RECIPES: List[Recipe] = [
         save_as="lda_topics_wordclouds",
         user_facing=False,
         requires=frozenset({"lda_loadings_csv"}),
-        sources=("media", "txt_dir", "csv"),
+        sources=("media", "txt_dir", "csv", "db"),
         gpu_use="cpu",
         with_={
             "loadings_csv": "{{var:features_dir}}/topic_model_lda/topic_model_lda_loadings.csv",
@@ -2589,7 +2640,7 @@ RECIPES: List[Recipe] = [
         save_as="nmf_topics_wordclouds",
         user_facing=False,
         requires=frozenset({"nmf_loadings_csv"}),
-        sources=("media", "txt_dir", "csv"),
+        sources=("media", "txt_dir", "csv", "db"),
         gpu_use="cpu",
         with_={
             "loadings_csv": "{{var:features_dir}}/topic_model_nmf/topic_model_nmf_loadings.csv",
@@ -2929,7 +2980,7 @@ RECIPES: List[Recipe] = [
         produces=frozenset({"text_predictor_json"}),
         gpu_use="gpu_one_model",
         hidden=("analysis_csv",),
-        sources=("csv",),
+        sources=TABULAR,
         text_input=True,
         vars={
             **_FEATURES_DIR_VAR,
@@ -3113,7 +3164,7 @@ RECIPES: List[Recipe] = [
         save_as="word_vectors_wordclouds",
         user_facing=False,
         requires=frozenset({"word_vectors_neighbors_csv"}),
-        sources=("media", "txt_dir", "csv"),
+        sources=("media", "txt_dir", "csv", "db"),
         gpu_use="cpu",
         with_={
             "neighbors_csv":
@@ -3319,7 +3370,7 @@ RECIPES: List[Recipe] = [
         save_as="transformer_embeds_agg",
         requires=frozenset({"transformer_embeddings_csv"}),
         user_facing=False,
-        sources=("media", "txt_dir", "csv"),
+        sources=("media", "txt_dir", "csv", "db"),
         source_with={
             "txt_dir": {
                 "group_by": TEXT_IDENTITY,
@@ -3357,7 +3408,7 @@ RECIPES: List[Recipe] = [
         save_as="sent_embeds_agg",
         requires=frozenset({"sentence_embeddings_csv"}),
         user_facing=False,
-        sources=("media", "txt_dir", "csv"),
+        sources=("media", "txt_dir", "csv", "db"),
         # there's no `speaker` column when the input was essays or a
         # spreadsheet, and grouping by a column that isn't there is an error
         # rather than a no-op. `text_id` is the one identifier every input
@@ -3431,7 +3482,7 @@ RECIPES: List[Recipe] = [
         feature_tables_optional=True,
         hidden=("txt_dir", "analysis_csv", "key_cols", "feature_csvs",
                 "metadata_csv"),
-        sources=("media", "txt_dir", "csv"),
+        sources=("media", "txt_dir", "csv", "db"),
         text_input=True,
         vars={
             **_FEATURES_DIR_VAR,
@@ -3474,7 +3525,7 @@ RECIPES: List[Recipe] = [
         # never on the checklist: this is what "Run analyses" selects for you,
         # and it means nothing without the columns that flow comes with
         user_facing=False,
-        sources=("csv",),
+        sources=TABULAR,
         gpu_use="cpu",
         with_={
             "csv_path": "{{var:input_csv}}",
@@ -3537,7 +3588,7 @@ RECIPES: List[Recipe] = [
         consumes_feature_tables=True,
         feature_tables_optional=True,
         user_facing=False,
-        sources=("media", "txt_dir", "csv"),
+        sources=("media", "txt_dir", "csv", "db"),
         gpu_use="cpu",
         with_={
             "feature_csvs": [],
@@ -3565,7 +3616,7 @@ RECIPES: List[Recipe] = [
         produces=frozenset({"stats_metadata_csv"}),
         keys_like_metadata=True,
         user_facing=False,
-        sources=("csv",),
+        sources=TABULAR,
         gpu_use="cpu",
         tags=("stats",),
         stage="analyze",
@@ -3577,7 +3628,7 @@ RECIPES: List[Recipe] = [
         # happy coincidence.
         with_={
             "csv_path": "{{var:input_csv}}",
-            "out_csv": "gathered/metadata.csv",
+            "out_csv": "{{var:results_root}}gathered/metadata.csv",
             "text_cols": [],
             "delimiter": "{{var:csv_delimiter}}",
             "carry_cols": "{{var:stats_meta_carry}}",
@@ -3618,7 +3669,7 @@ RECIPES: List[Recipe] = [
         produces=frozenset({"analysis_table_csv"}),
         consumes_feature_tables=True,
         user_facing=False,
-        sources=("csv",),
+        sources=TABULAR,
         gpu_use="cpu",
         tags=("stats",),
         stage="analyze",
@@ -3638,6 +3689,9 @@ RECIPES: List[Recipe] = [
             # many rows this person had" is not a finding anybody wants
             "bookkeeping_cols": "{{var:stats_bookkeeping_cols}}",
             "metadata_csv": "{{stats_metadata}}",
+            # the row-level table goes wherever the run's tables go; the
+            # manifest and the report fragment stay in `out_dir` on disk
+            "out_csv": "{{var:results_root}}{{var:stats_dir}}/analysis_table.csv",
             "key_cols": ["text_id"],
             "split_col": "{{var:stats_split_col}}",
             "filters": "{{var:stats_filters}}",
@@ -3645,7 +3699,7 @@ RECIPES: List[Recipe] = [
             "out_dir": "{{var:stats_dir}}",
             "overwrite_existing": "{{var:overwrite_existing}}",
         },
-        hidden=("feature_csvs", "filter_csvs", "metadata_csv", "key_cols",
+        hidden=("feature_csvs", "filter_csvs", "metadata_csv", "key_cols", "out_csv",
                 "split_col", "out_csv", "metadata_cols", "bookkeeping_cols"),
         vars={**_STATS_DIR_VAR, **_STATS_FILTER_VAR, **_STATS_KEEP_VAR,
               **_STATS_SPLIT_VAR, **_STATS_BOOKKEEPING_VAR},
@@ -3663,7 +3717,7 @@ RECIPES: List[Recipe] = [
         save_as="group_differences",
         requires=frozenset({"analysis_table_csv"}),
         auto_with=("stats_wordclouds", "stats_report"),
-        sources=("csv",),
+        sources=TABULAR,
         gpu_use="cpu",
         tags=("stats",),
         stage="analyze",
@@ -3703,7 +3757,7 @@ RECIPES: List[Recipe] = [
         save_as="correlations",
         requires=frozenset({"analysis_table_csv"}),
         auto_with=("stats_wordclouds", "stats_report"),
-        sources=("csv",),
+        sources=TABULAR,
         gpu_use="cpu",
         tags=("stats",),
         stage="analyze",
@@ -3739,7 +3793,7 @@ RECIPES: List[Recipe] = [
         save_as="ridge_model",
         requires=frozenset({"analysis_table_csv"}),
         auto_with=("stats_wordclouds", "stats_report"),
-        sources=("csv",),
+        sources=TABULAR,
         gpu_use="cpu",
         tags=("stats",),
         stage="analyze",
@@ -3780,7 +3834,7 @@ RECIPES: List[Recipe] = [
         save_as="classifier_model",
         requires=frozenset({"analysis_table_csv"}),
         auto_with=("stats_wordclouds", "stats_report"),
-        sources=("csv",),
+        sources=TABULAR,
         gpu_use="cpu",
         tags=("stats",),
         stage="analyze",
@@ -3827,7 +3881,7 @@ RECIPES: List[Recipe] = [
         save_as="stats_wordclouds",
         user_facing=False,
         requires=frozenset({"analysis_table_csv"}),
-        sources=("csv",),
+        sources=TABULAR,
         gpu_use="cpu",
         tags=("stats",),
         stage="analyze",
@@ -3854,7 +3908,7 @@ RECIPES: List[Recipe] = [
         scope="global",
         save_as="stats_report",
         user_facing=False,
-        sources=("csv",),
+        sources=TABULAR,
         gpu_use="cpu",
         tags=("stats",),
         stage="analyze",
@@ -3876,6 +3930,8 @@ RECIPES: List[Recipe] = [
 #: adding a recipe, or one day a plugin registering one. Built once, the cache
 #: silently disagreed with the catalog and `by_id` raised "unknown recipe" for
 #: something sitting in `RECIPES`.
+
+
 _BY_ID: Dict[str, Recipe] = {}
 
 

@@ -283,13 +283,23 @@ def _run(ctx: TaskContext) -> Optional[bool]:
                     "one file, with a column saying where each row came from."),
              Choice("reshape", "One spreadsheet to flip between wide and long",
                     "score_t1, score_t2, score_t3 as one score column with a "
-                    "time column — or back again.")]))
+                    "time column — or back again."),
+             Choice("db_out", "Tables from a database, out to spreadsheets",
+                    "Each table as its own CSV, or several joined into one; "
+                    "every column or chosen ones. Needs only permission to read."),
+             Choice("db_in", "A spreadsheet, into a database table",
+                    "Copy a CSV into a database so runs can join it. Needs "
+                    "permission to create tables.")]))
         if source in ("merge", "stack", "reshape"):
             from . import wrangle_tables
             flow = {"merge": wrangle_tables.merge_flow,
                     "stack": wrangle_tables.stack_flow,
                     "reshape": wrangle_tables.reshape_flow}[source]
             out = flow(ctx)
+        elif source in ("db_out", "db_in"):
+            from . import wrangle_db
+            out = (wrangle_db.db_out_flow if source == "db_out"
+                   else wrangle_db.db_in_flow)(ctx)
         else:
             out = (_wrangle_folder if source == "folder" else _wrangle_csv)(ctx)
     except (GoBack, Cancelled):

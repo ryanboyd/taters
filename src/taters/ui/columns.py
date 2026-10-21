@@ -716,6 +716,83 @@ def constant_within(rows: Sequence[dict], keys: Sequence[str],
     return bool(seen)
 
 
+#: Distinct values a tally keeps before it stops learning new ones. Far past
+#: the most classes any check will accept, so a column this varied is an
+#: id or a measurement whatever the exact number.
+TALLY_CAP = 5000
+
+
+class Tally:
+    """
+    What the vetting checks need from a column, without the column: rows
+    per distinct value (up to :data:`TALLY_CAP` values), how many cells were
+    filled, how many read as numbers, and the values that did not (a few).
+    `level_counts` reads one of these as it reads a list of values.
+    """
+
+    __slots__ = ("counts", "truncated", "filled", "numeric", "bad")
+
+    def __init__(self):
+        from collections import Counter
+
+        self.counts: Counter = Counter()
+        self.truncated = False
+        self.filled = 0
+        self.numeric = 0
+        self.bad: Counter = Counter()
+
+    def see(self, raw: object) -> None:
+        text = str(raw or "").strip()
+        if not text:
+            return
+        self.filled += 1
+        if text in self.counts or len(self.counts) < TALLY_CAP:
+            self.counts[text] += 1
+        else:
+            self.truncated = True
+        try:
+            float(text)
+            self.numeric += 1
+        except ValueError:
+            if text in self.bad or len(self.bad) < 50:
+                self.bad[text] += 1
+
+
+def tally_columns(path: PathLike, columns: Sequence[str], *,
+                  delimiter: Optional[str] = None,
+                  encoding: str = "utf-8-sig",
+                  on_rows: Optional[Callable[[int], None]] = None
+                  ) -> Dict[str, Tally]:
+    """
+    One :class:`Tally` per named column, from a pass over the whole file.
+
+    The checks that vet a column -- a class with three members, an outcome
+    that says "n/a" on row 812 -- need counts, not the values; a tally
+    costs a few thousand entries where the values cost one per row.
+    """
+    wanted = [str(c) for c in columns]
+    out = {c: Tally() for c in wanted}
+    if not wanted:
+        return out
+    delimiter = delimiter or sniff_delimiter(path)
+    with Path(path).open("r", newline="", encoding=encoding) as fh:
+        reader = csv.reader(fh, delimiter=delimiter)
+        header = [str(c) for c in next(reader, [])]
+        at = [(out[c], header.index(c)) for c in wanted if c in header]
+        n = 0
+        for raw in reader:
+            if not raw:
+                continue
+            n += 1
+            for tally, i in at:
+                tally.see(raw[i] if i < len(raw) else "")
+            if on_rows is not None and n % _TICK_EVERY == 0:
+                on_rows(n)
+    if on_rows is not None:
+        on_rows(n)
+    return out
+
+
 def read_columns(path: PathLike, columns: Sequence[str], *,
                  delimiter: Optional[str] = None,
                  encoding: str = "utf-8-sig",

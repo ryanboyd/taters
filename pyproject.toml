@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "taters"
-version = "1.3.0"
+version = "1.4.0"
 authors = [{ name = "Ryan L. Boyd", email = "ryan@ryanboyd.io" }]
 description = "Analyze, process, and extract from many types of input data. Highly modular/customizable."
 
@@ -171,10 +171,20 @@ stanza = ["stanza>=1.7"]
 # installed". drop the marker when gensim publishes 3.14 wheels.
 vectors = ["gensim>=4.3.3; python_version < '3.14'"]
 
+# Reading from and writing to a MySQL/MariaDB or PostgreSQL database. SQLite
+# needs nothing: it is the standard library. Both drivers ship wheels for
+# every platform, which is why these two and not mysqlclient or psycopg2.
+db = ["PyMySQL>=1.1", "psycopg[binary]>=3.1"]
+# the two by name as well, for anyone who only ever talks to one engine
+mysql = ["PyMySQL>=1.1"]
+postgres = ["psycopg[binary]>=3.1"]
+
 standard = [
+  "PyMySQL>=1.1",
   "gensim>=4.3.3; python_version < '3.14'",
   "nvidia-cudnn-cu12",
   "praat-parselmouth>=0.4.6",
+  "psycopg[binary]>=3.1",
   "soundfile",
   "stanza>=1.7",
 ]
@@ -184,6 +194,8 @@ standard = [
 # `glottal` extra is left out because it cannot be installed without a C
 # compiler. See docs/install-guide.md.
 all = [
+  "PyMySQL>=1.1",
+  "psycopg[binary]>=3.1",
   # <3 is required: NeMo 3.0 removed nemo.collections.asr.models.msdd_models,
   # which the vendored whisper-diarization code imports.
   #

@@ -146,6 +146,7 @@ class Taters:
     def stack_spreadsheets(self, **kwargs):                     return self.helpers.stack_spreadsheets(**kwargs)
     def wide_to_long(self, **kwargs):                           return self.helpers.wide_to_long(**kwargs)
     def long_to_wide(self, **kwargs):                           return self.helpers.long_to_wide(**kwargs)
+    def export_table(self, **kwargs):                           return self.helpers.export_table(**kwargs)
     
 
 
@@ -426,4 +427,8 @@ class _HelpersAPI:
     def long_to_wide(self, **kwargs):
         from .helpers.reshape import long_to_wide
         return _forward(long_to_wide, kwargs)
+
+    def export_table(self, **kwargs):
+        from .helpers.tables import export_table
+        return _forward(export_table, kwargs)
     

@@ -67,6 +67,44 @@ A dot is a pass, `F` is a failure, `s` is a skip, `E` is an error while setting
 up. Failures print the source of the test, the values on both sides of the
 failed `assert`, and anything the code printed.
 
+## Live database tests
+
+Everything about databases runs against SQLite by default, which needs no
+server. The MySQL, PostgreSQL and ssh-tunnel paths have live tests too, which
+skip unless you point them at a server. Three containers give you all of it:
+
+```bash
+docker network create taters-net
+docker run -d --name taters-mysql --network taters-net -p 33306:3306 \
+  -e MYSQL_ROOT_PASSWORD=rootpw -e MYSQL_DATABASE=taters_test \
+  -e MYSQL_USER=taters -e MYSQL_PASSWORD=taterspw mysql:8.4
+docker run -d --name taters-pg --network taters-net -p 55432:5432 \
+  -e POSTGRES_USER=taters -e POSTGRES_PASSWORD=taterspw -e POSTGRES_DB=taters_test postgres:16
+```
+
+```bash
+export TATERS_TEST_MYSQL_URL=mysql://taters:taterspw@127.0.0.1:33306/taters_test
+export TATERS_TEST_POSTGRES_URL=postgres://taters:taterspw@127.0.0.1:55432/taters_test
+pytest tests/test_db_live.py
+```
+
+For the tunnel, an ssh server beside them that can reach both by name
+(`tests/sshd.Dockerfile` builds one from alpine with a key you generate):
+
+```bash
+ssh-keygen -q -t ed25519 -N "" -f /tmp/taters-ssh-key
+docker build -q -t taters-sshd -f tests/sshd.Dockerfile \
+  --build-arg PUBKEY="$(cat /tmp/taters-ssh-key.pub)" tests
+docker run -d --name taters-ssh --network taters-net -p 2222:22 taters-sshd
+ssh-keyscan -p 2222 127.0.0.1 >> ~/.ssh/known_hosts
+TATERS_TEST_SSH_KEY=/tmp/taters-ssh-key pytest tests/test_tables.py -k ssh
+```
+
+`pip install "taters[db]"` installs both drivers. The PuTTY path (`plink`,
+a `.ppk` key) is covered by stand-in programs in the unit tests; to try it
+for real, `puttygen` can convert the key and `plink` from the same package
+opens the tunnel, exactly as the app does.
+
 ## Reading a skip
 
 A skip is not a failure — it means "this machine cannot check that". The two

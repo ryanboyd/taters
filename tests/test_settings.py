@@ -96,7 +96,8 @@ def test_managing_pipelines_moved_under_settings(tmp_path):
     # shares one row, second from the top
     assert "manage" in {t.id for t in manage_data.entries()}
     assert [t.id for t in settings.entries()] == ["gpu", "manage_data",
-                                                  "inspect_rows", "terminal",
+                                                  "inspect_rows",
+                                                  "db_connections", "terminal",
                                                   "update_check",
                                                   "hashbrowns"]
 

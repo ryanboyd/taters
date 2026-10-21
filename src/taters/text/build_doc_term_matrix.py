@@ -23,11 +23,10 @@ Two agreements with the frequency list are load-bearing:
 
 from __future__ import annotations
 
-import csv
 from pathlib import Path
 from typing import Callable, Dict, Literal, Optional, Sequence, Union
 
-from ..helpers.atomic import atomic_write
+from ..helpers import tables
 from ..helpers.progress import announce
 from ..helpers.doc_text import DOCUMENT_PATTERN
 from ..helpers.text_gather import (resolve_analysis_ready)
@@ -51,7 +50,7 @@ def _tagged_key(words: str, tags: str) -> str:
 
 
 def _load_vocabulary(
-    freq_list_csv: Path,
+    freq_list_csv: PathLike,
     *,
     encoding: str,
     pos_tagged: bool,
@@ -74,40 +73,42 @@ def _load_vocabulary(
     otherwise -- near-zero matches, no error -- which is the worst outcome.
     """
     rows: Dict[str, dict] = {}
-    with Path(freq_list_csv).open("r", newline="", encoding=encoding) as f:
-        reader = csv.DictReader(f)
-        fields = reader.fieldnames or []
-        needed = {"ngram", "frequency", "obs_pct", "idf"}
-        missing = sorted(needed - set(fields))
-        if missing:
-            raise ValueError(
-                f"{freq_list_csv} does not look like a Taters n-gram frequency "
-                f"list: missing column(s) {', '.join(missing)}."
-            )
-        has_pos = "pos" in fields
-        if pos_tagged and not has_pos:
-            raise ValueError(
-                f"pos_tagged=True, but {freq_list_csv} has no 'pos' column -- "
-                "the frequency list was built without pos_tagged. The two "
-                "steps must agree, or scanning quietly matches nothing."
-            )
-        if has_pos and not pos_tagged:
-            raise ValueError(
-                f"{freq_list_csv} carries a 'pos' column (built with "
-                "pos_tagged=True), but this run has pos_tagged=False. The two "
-                "steps must agree, or scanning quietly matches nothing."
-            )
-        for row in reader:
-            gram = row["ngram"]
-            if not gram:
-                continue
-            key = _tagged_key(gram, row["pos"]) if pos_tagged else gram
-            if key not in rows:
-                rows[key] = {
-                    "frequency": float(row["frequency"]),
-                    "obs_pct": float(row["obs_pct"]),
-                    "idf": float(row["idf"]),
-                }
+    # the list is a table: a file, or a table in the database the corpus
+    # lives in. either way it's read by name, never by position
+    freq_ref = tables.parse_ref(freq_list_csv)
+    fields = tables.columns_of(freq_ref, encoding=encoding)
+    needed = {"ngram", "frequency", "obs_pct", "idf"}
+    missing = sorted(needed - set(fields))
+    if missing:
+        raise ValueError(
+            f"{freq_list_csv} does not look like a Taters n-gram frequency "
+            f"list: missing column(s) {', '.join(missing)}."
+        )
+    has_pos = "pos" in fields
+    if pos_tagged and not has_pos:
+        raise ValueError(
+            f"pos_tagged=True, but {freq_list_csv} has no 'pos' column -- "
+            "the frequency list was built without pos_tagged. The two "
+            "steps must agree, or scanning quietly matches nothing."
+        )
+    if has_pos and not pos_tagged:
+        raise ValueError(
+            f"{freq_list_csv} carries a 'pos' column (built with "
+            "pos_tagged=True), but this run has pos_tagged=False. The two "
+            "steps must agree, or scanning quietly matches nothing."
+        )
+    wanted = ["ngram", "frequency", "obs_pct", "idf"] + (["pos"] if has_pos else [])
+    for row in tables.read_rows(freq_ref, encoding=encoding, columns=wanted):
+        gram = row["ngram"]
+        if not gram:
+            continue
+        key = _tagged_key(gram, row["pos"]) if pos_tagged else gram
+        if key not in rows:
+            rows[key] = {
+                "frequency": float(row["frequency"]),
+                "obs_pct": float(row["obs_pct"]),
+                "idf": float(row["idf"]),
+            }
 
     # ONE rule decides the vocabulary. we used to have three that all applied
     # at once -- a minimum frequency, a minimum percent-of-documents, and a
@@ -428,23 +429,24 @@ def build_doc_term_matrix(
         overwrite_existing=overwrite_existing, on_progress=on_progress,
         workers=workers)
 
+    # a file beside the run, or a table in the database the text came from;
+    # see helpers.tables for the one rule
+    out_ref = tables.output_ref(out_features_csv, source=analysis_ready,
+                                default=("features", "doc_term_matrix"))
     if out_features_csv is None:
-        # the weighting goes in the FILENAME, not just the cells. with a bare
+        # the weighting goes in the NAME, not just the cells. with a bare
         # name, rerunning with a different weighting either handed back the
         # old matrix untouched (overwrite off -- silently the wrong numbers)
         # or destroyed it (overwrite on). this way the four matrices of one
         # corpus can all live side by side
-        out_features_csv = (Path.cwd() / "features" / "doc_term_matrix"
-                            / f"{analysis_ready.stem}_{weighting}.csv")
-    out_features_csv = Path(out_features_csv)
-    out_features_csv.parent.mkdir(parents=True, exist_ok=True)
+        out_ref = out_ref.sibling(f"{out_ref.stem}_{weighting}")
 
-    if not overwrite_existing and out_features_csv.is_file():
-        print("Doc-term matrix output file already exists; returning existing file.")
-        return out_features_csv
+    if not overwrite_existing and tables.exists(out_ref):
+        print("Doc-term matrix output already exists; returning existing.")
+        return tables.handle(out_ref)
 
     vocab = _load_vocabulary(
-        Path(freq_list_csv),
+        freq_list_csv,
         encoding=encoding,
         pos_tagged=pos_tagged,
         vocab_min_freq=vocab_min_freq,
@@ -482,9 +484,15 @@ def build_doc_term_matrix(
                        engine=engine, tokenizer=tokenizer,
                        stanza_lang=stanza_lang, device=device,
                        keep_punctuation=keep_punctuation)
-    with atomic_write(out_features_csv, newline="", encoding=encoding) as out:
-        writer = csv.writer(out)
-        writer.writerow(["text_id", "token_count", *columns])
+    # thousands of term columns is more than a database holds as columns; the
+    # table layer packs them away by itself, and readers never see it. the
+    # hints are what let it keep text_id as a real column and skip a typing
+    # pass over a matrix this wide
+    cell_kind = "int" if weighting in ("count", "binary") else "float"
+    hints = {"text_id": "text", "token_count": "int",
+             **{c: cell_kind for c in columns}}
+    with tables.write_table(out_ref, ["text_id", "token_count", *columns],
+                            encoding=encoding, hints=hints) as writer:
         for row, (n_tokens, scores) in map_text_rows(
                 analysis_ready, encoding=encoding,
                 workers=lambda n_rows: pooled_text_workers(
@@ -499,7 +507,7 @@ def build_doc_term_matrix(
                 initargs=(stream_args, terms, weighting, idf, rounding)):
             writer.writerow([row.get("text_id", ""), n_tokens, *scores])
 
-    return out_features_csv
+    return tables.handle(out_ref)
 
 
 # --- CLI ---------------------------------------------------------------------

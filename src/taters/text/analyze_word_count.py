@@ -21,11 +21,10 @@ this reads -- ``WC`` -- are computed before any category is scored.
 
 from __future__ import annotations
 
-import csv
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Sequence, Union
 
-from ..helpers.atomic import atomic_write
+from ..helpers import tables
 from ..helpers.doc_text import DOCUMENT_PATTERN
 from ..helpers.feature_columns import ColumnSpec
 from ..helpers.text_gather import (resolve_analysis_ready)
@@ -179,33 +178,26 @@ def analyze_word_count(
         overwrite_existing=overwrite_existing, on_progress=on_progress,
         workers=workers)
 
-    if out_features_csv is None:
-        out_features_csv = (Path.cwd() / "features" / "word_count"
-                            / analysis_ready.name)
-    out_features_csv = Path(out_features_csv)
-    out_features_csv.parent.mkdir(parents=True, exist_ok=True)
-    if not overwrite_existing and out_features_csv.is_file():
-        print(f"Word count output file already exists; returning existing "
-              f"file: {out_features_csv}")
-        return out_features_csv
+    out_ref = tables.output_ref(out_features_csv, source=analysis_ready,
+                                default=("features", "word_count"))
+    if not overwrite_existing and tables.exists(out_ref):
+        print(f"word_count output already exists; returning existing: {out_ref}")
+        return tables.handle(out_ref)
 
-    with analysis_ready.open("r", newline="", encoding=encoding) as f:
-        header_fields = next(csv.reader(f), [])
+    header_fields = tables.columns_of(analysis_ready, encoding=encoding)
 
     from ..helpers.row_map import resolve_passthrough_columns
 
     passthrough_cols = resolve_passthrough_columns(
         header_fields, pass_through_cols=pass_through_cols, id_cols=id_cols,
-        group_by=group_by, analysis_ready=analysis_ready)
+        group_by=group_by, analysis_ready=str(analysis_ready))
     fieldnames = ["text_id", *passthrough_cols, WORD_COUNT_COLUMN]
 
     from ..helpers.parallel_map import pool_workers
     from ..helpers.row_map import map_text_rows
 
     inline = _coder()
-    with atomic_write(out_features_csv, newline="", encoding=encoding) as fout:
-        writer = csv.DictWriter(fout, fieldnames=fieldnames)
-        writer.writeheader()
+    with tables.write_table(out_ref, fieldnames, encoding=encoding) as writer:
         for row, count in map_text_rows(
                 analysis_ready, encoding=encoding,
                 workers=lambda n_rows: pool_workers(workers, n_rows),
@@ -220,7 +212,7 @@ def analyze_word_count(
                 WORD_COUNT_COLUMN: count,
             }
             writer.writerow(out_row)
-    return out_features_csv
+    return tables.handle(out_ref)
 
 
 # ---------------------------------------------------------------------------

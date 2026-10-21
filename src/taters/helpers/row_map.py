@@ -51,10 +51,38 @@ def map_text_rows(
     (``message``) and the documents in flight, which is what draws one
     sub-bar per document under the step's row.
     """
-    total = count_rows(analysis_ready, on_progress=on_progress)
+    from .tables import columns_of, parse_ref, read_rows
+
+    ref = parse_ref(analysis_ready)
+    total = count_rows(ref, on_progress=on_progress)
     if callable(workers):
         workers = workers(total)
     reporter = FlightReporter(on_progress, total, message)
+    # a file is read with the csv module as it always was; a table in a
+    # database streams through the table layer. the pool only ever sees
+    # (text_id, text) pairs either way, which is what keeps a database
+    # password out of every worker
+    if ref.is_db:
+        fields = columns_of(ref)
+        if "text_id" not in fields or "text" not in fields:
+            raise ValueError(f"Expected columns 'text_id' and 'text' in {ref}; "
+                             f"found {fields}")
+        pending: deque = deque()
+
+        def pairs():
+            for row in read_rows(ref):
+                pending.append(row)
+                yield (str(row.get("text_id", "") or ""),
+                       str(row.get("text", "") or ""))
+
+        for result in ordered_parallel_map(
+                inline_fn, pairs(), workers=workers, pool_fn=pool_fn,
+                initializer=initializer, initargs=initargs,
+                on_start=lambda pair: reporter.start(pair[0]),
+                on_finish=lambda pair: reporter.finish(pair[0])):
+            reporter.consumed()
+            yield pending.popleft(), result
+        return
     with Path(analysis_ready).open("r", newline="", encoding=encoding) as f:
         reader = csv.DictReader(f, delimiter=delimiter)
         fields = reader.fieldnames or []
@@ -64,7 +92,7 @@ def map_text_rows(
                 f"found {fields}"
             )
 
-        pending: deque = deque()
+        pending = deque()
 
         def pairs():
             for row in reader:

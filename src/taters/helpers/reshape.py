@@ -544,6 +544,11 @@ class MergeReport:
     loose_examples: Tuple[Tuple[str, str], ...]
     clashes: Tuple[ColumnClash, ...]
     columns_out: Tuple[str, ...]
+    #: What the two sides are called in the sentences: files, or tables.
+    what: str = "file"
+    #: Left keys matched by several right rows: (key, how many), the worst
+    #: first. Filled by the database join report; empty for files.
+    fan_out_examples: Tuple[Tuple[str, int], ...] = ()
 
     @property
     def matched(self) -> bool:
@@ -556,7 +561,7 @@ class MergeReport:
                               f"{self.right.file} = {nl * nr} combined rows"
                               for k, nl, nr in self.many_to_many_examples)
             return (f"Some {_display(self.on)} values appear more than once in "
-                    f"both files ({shown}; {self.many_to_many_keys:,} like "
+                    f"both {self.what}s ({shown}; {self.many_to_many_keys:,} like "
                     f"this). That usually means one more column is needed to "
                     f"tell rows apart -- a session or a time point. Pass "
                     f"allow_many_to_many=True to combine every pair anyway.")
@@ -597,12 +602,13 @@ class MergeReport:
                        f"{right.file} and will repeat once per match: "
                        f"{self.rows_out[how]:,} rows out of {left.rows:,}.")
         for clash in self.clashes:
+            both = f"both {self.what}s"
             if clash.agrees:
-                out.append(f"{clash.name} is in both files and agrees on every "
+                out.append(f"{clash.name} is in {both} and agrees on every "
                            f"matched row, so it's kept once.")
             else:
                 k, a, b = clash.example or ("", "", "")
-                out.append(f"{clash.name} is in both files and differs on "
+                out.append(f"{clash.name} is in {both} and differs on "
                            f"{clash.disagreements:,} matched rows (e.g. {k}: "
                            f"{a!r} vs {b!r}); both are kept, as "
                            f"{' and '.join(clash.output_names)}.")
@@ -781,11 +787,13 @@ class _MergeEngine:
         examples = tuple(_display(json.loads(raw)) for raw, _o in con.execute(
             f"SELECT raw, MIN(ord) {unmatched_sql} GROUP BY k ORDER BY MIN(ord) "
             f"LIMIT {_EXAMPLES}"))
+        n_collisions = one(f"SELECT COUNT(*) FROM (SELECT kl FROM {table} WHERE kl IS NOT "
+                           f"NULL GROUP BY kl HAVING COUNT(DISTINCT k) > 1)")
         collisions = [kl for (kl,) in con.execute(
             f"SELECT kl FROM {table} WHERE kl IS NOT NULL GROUP BY kl "
-            f"HAVING COUNT(DISTINCT k) > 1 ORDER BY MIN(ord)")]
+            f"HAVING COUNT(DISTINCT k) > 1 ORDER BY MIN(ord) LIMIT 3")]
         collision_examples = []
-        for kl in collisions[:3]:
+        for kl in collisions:
             pair = [_display(json.loads(raw)) for raw, _o in con.execute(
                 f"SELECT raw, MIN(ord) FROM {table} WHERE kl = ? GROUP BY k "
                 f"ORDER BY MIN(ord) LIMIT 2", (kl,))]
@@ -801,7 +809,7 @@ class _MergeEngine:
                                 f"WHERE k IS NOT NULL GROUP BY k HAVING COUNT(*) > 1)"),
             rows_matched=matched, rows_unmatched=unmatched,
             unmatched_keys=unmatched_keys, unmatched_examples=examples,
-            loose_collisions=len(collisions),
+            loose_collisions=int(n_collisions or 0),
             loose_collision_examples=tuple(collision_examples),
             mangled_ids=self.mangled[side],
             key_samples=tuple(self.samples[side]))
@@ -818,12 +826,14 @@ class _MergeEngine:
         rows_out = {"inner": inner,
                     "left": inner + (left.rows - left.rows_matched)}
         rows_out["outer"] = rows_out["left"] + (right.rows - right.rows_matched)
-        m2m = list(con.execute(
-            "SELECT a.k, a.raw, a.n, b.n FROM "
-            "(SELECT k, raw, COUNT(*) AS n, MIN(ord) AS o FROM L WHERE k IS NOT NULL "
-            " GROUP BY k HAVING n > 1) AS a JOIN "
-            "(SELECT k, COUNT(*) AS n FROM R WHERE k IS NOT NULL GROUP BY k "
-            " HAVING n > 1) AS b ON a.k = b.k ORDER BY a.n * b.n DESC, a.o"))
+        m2m_sql = ("SELECT a.k, a.raw, a.n, b.n FROM "
+                   "(SELECT k, raw, COUNT(*) AS n, MIN(ord) AS o FROM L WHERE k IS NOT NULL "
+                   " GROUP BY k HAVING n > 1) AS a JOIN "
+                   "(SELECT k, COUNT(*) AS n FROM R WHERE k IS NOT NULL GROUP BY k "
+                   " HAVING n > 1) AS b ON a.k = b.k")
+        # a count and the three worst, not a row per repeating key
+        n_m2m = self._one(f"SELECT COUNT(*) FROM ({m2m_sql})")
+        m2m = list(con.execute(m2m_sql + " ORDER BY a.n * b.n DESC, a.o LIMIT 3"))
         left_multi = self._one(
             "SELECT COUNT(*) FROM (SELECT k FROM L WHERE k IN (SELECT k FROM R "
             "WHERE k IS NOT NULL) GROUP BY k HAVING COUNT(*) > 1)")
@@ -856,9 +866,9 @@ class _MergeEngine:
         self._report = MergeReport(
             left=left, right=right, on=tuple(self.on), right_on=tuple(self.right_on),
             key_match=self.key_match, relationship=relationship,
-            many_to_many_keys=len(m2m),
+            many_to_many_keys=int(n_m2m or 0),
             many_to_many_examples=tuple(
-                (_display(json.loads(raw)), nl, nr) for _k, raw, nl, nr in m2m[:3]),
+                (_display(json.loads(raw)), nl, nr) for _k, raw, nl, nr in m2m),
             rows_out=rows_out, loose_extra_matches=loose_extra,
             loose_examples=tuple(loose_examples), clashes=clashes,
             columns_out=columns_out)

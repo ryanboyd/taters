@@ -683,7 +683,10 @@ def test_default_probes_are_a_fixed_list_of_content_words_within_the_vocabulary(
     because the probes were the corpus's most frequent words. The default is
     now a fixed dozen common content words -- readable on the options screen,
     replaceable there -- taken in order and skipping any the model never
-    learned. No stoplist decides anything; the list is the whole rule.
+    learned. No stoplist decides anything as long as one of them is there;
+    the list is the whole rule. Only a model that knows none of them falls
+    back to its most frequent content words, so a synthetic or specialized
+    corpus still gets a neighbors table and clouds.
     """
     vocabulary = ["the", "and", "that", "with", "potato", "work", "was", "for",
                   "money", "love", "2019", "..."]
@@ -692,9 +695,15 @@ def test_default_probes_are_a_fixed_list_of_content_words_within_the_vocabulary(
     assert not {"the", "and", "that", "with", "was", "for"} & set(picked)
     # asked for by name, anything goes -- verbatim, function words included
     assert wv._probe_words("the, potato", vocabulary) == ["the", "potato"]
-    # and a model that learned none of the defaults gets no default probes,
-    # rather than a fallback that would bring the function words back
-    assert wv._probe_words("", ["the", "and", "zork"]) == []
+    # a model that learned none of the defaults falls back to its most
+    # frequent words that are not stop words (ranked by count when it has
+    # counts, vocabulary order when it does not), never the function words
+    assert wv._probe_words("", ["the", "and", "zork"]) == ["zork"]
+    assert wv._probe_words("", ["zork", "the", "blorp", "42", "..."], [5, 900, 50, 80, 70]) \
+        == ["blorp", "zork"], "by count, and a number or punctuation is not a word"
+    assert len(wv._probe_words("", [f"w{i}" for i in range(40)])) == len(wv.DEFAULT_PROBES)
+    assert wv._probe_note("", ["zork"]).startswith("None of the usual probe words")
+    assert wv._probe_note("", ["work", "zork"]) == "" and wv._probe_note("the", ["the"]) == ""
 
 
 @needs_gensim
@@ -721,3 +730,24 @@ def test_training_does_not_lemmatize_unless_asked_and_strips_nothing(tmp_path):
     # the shared variable is untouched for the steps that want lemmas
     freq = compose(["ngram_frequencies"], name="y", source="csv", input_path="t.csv")
     assert freq["meta"]["variables"]["lemmatize"]["default"] is True
+
+
+def test_named_probes_the_model_knows_none_of_get_frequent_words_beside_them():
+    """
+    A pipeline passes the default probe list *by name*, so a corpus with
+    none of those words used to get an empty neighbors table and no clouds
+    even though the fallback existed. Named probes stay (an unknown one is
+    a blank row, which is the honest answer), and when the model knows none
+    of them the frequent content words stand in beside them, with the note.
+    """
+    vocabulary = ["potato", "gravy", "the", "butter", "and", "fluffy"]
+    counts = [50, 40, 100, 30, 90, 20]
+    named = "time, people, work"
+    picked = wv._probe_words(named, vocabulary, counts)
+    assert picked[:3] == ["time", "people", "work"]
+    assert picked[3:] == ["potato", "gravy", "butter", "fluffy"], \
+        "the most frequent content words, stop words left out"
+    assert "most frequent content words stand in" in wv._probe_note(named, picked)
+    # one known name is enough: nothing stands in, nothing is said
+    picked = wv._probe_words("time, potato", vocabulary, counts)
+    assert picked == ["time", "potato"] and wv._probe_note("time, potato", picked) == ""

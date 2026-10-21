@@ -562,24 +562,53 @@ def stream_counts(csv_path, *, encoding: str, skip_cols: int,
     identifier columns.
 
     A generator, so callers that need several passes hand ``fit_lda`` a
-    ``lambda: stream_counts(...)`` rather than the iterator itself.
+    ``lambda: stream_counts(...)`` rather than the iterator itself. The
+    matrix may be a file or a table in a database; either way it comes
+    through in blocks and never sits in memory whole.
     """
-    import csv as _csv
-    from pathlib import Path
-
     import numpy as np
 
+    from ..helpers import tables
+
     block: List[List[str]] = []
-    with Path(csv_path).open("r", newline="", encoding=encoding) as f:
-        reader = _csv.reader(f)
-        next(reader, None)                              # the header is the caller's
-        for row in reader:
-            block.append(row[skip_cols:])
-            if len(block) >= chunk_rows:
-                yield np.asarray(block, dtype=np.float64)
-                block = []
+    # positional cells, not dicts: a dict per row of five thousand terms is
+    # most of the work, and the header is the caller's to check anyway
+    for row in tables.read_cells(csv_path, encoding=encoding):
+        block.append(row[skip_cols:])
+        if len(block) >= chunk_rows:
+            yield np.asarray(block, dtype=np.float64)
+            block = []
     if block:
         yield np.asarray(block, dtype=np.float64)
+
+
+def stream_moments(csv_path, *, encoding: str, skip_cols: int, on_progress=None,
+                   message: str = "measuring the matrix"):
+    """
+    One pass over a document-term matrix: n, per-column sums, and X^T X for
+    the columns after the first ``skip_cols``.
+
+    The same arithmetic as :func:`taters.stats.pca.stream_moments`, over
+    :func:`stream_counts` so a matrix in a database is measured the same way
+    as a file. Same block size, same block-wise accumulation, same numbers.
+    """
+    import numpy as np
+
+    from ..helpers import tables
+    from ..helpers.progress import Ticker
+
+    sums = cross = None
+    n = 0
+    ticker = Ticker(on_progress, tables.count(csv_path, encoding=encoding))
+    for block in stream_counts(csv_path, encoding=encoding, skip_cols=skip_cols):
+        if sums is None:
+            sums = np.zeros(block.shape[1], dtype=np.float64)
+            cross = np.zeros((block.shape[1], block.shape[1]), dtype=np.float64)
+        sums += block.sum(axis=0)
+        cross += block.T @ block
+        n += block.shape[0]
+        ticker.tick(block.shape[0], message=message)
+    return n, sums, cross
 
 
 def read_matrix(csv_path, *, encoding: str, skip_cols: int):
@@ -613,11 +642,9 @@ def check_matrix_agrees(dtm_csv, columns, *, encoding: str) -> None:
     started building its own matrix. Reading one line is nothing next to a
     silently wrong model.
     """
-    import csv as _csv
-    from pathlib import Path
+    from ..helpers import tables
 
-    with Path(dtm_csv).open("r", newline="", encoding=encoding) as fh:
-        header = next(_csv.reader(fh), [])
+    header = tables.columns_of(dtm_csv, encoding=encoding)
     want = ["text_id", "token_count", *columns]
     if header != want:
         raise ValueError(
@@ -1000,6 +1027,66 @@ def _write_k_report(path, *, rows, words, rule: str, metric: str, engine: str,
         fh.write("\n".join(lines) + "\n")
 
 
+def matrix_dir_of(out_ref):
+    """
+    Where a model keeps the matrix it builds for itself: ``<stem>_matrix``
+    beside its features table.
+
+    A folder beside a file; a logical prefix beside a database table
+    (``.../topic_model_lda_matrix/dtm``). Derived from the output's *stem*,
+    never from its folder: a fixed-name sibling is the same place for every
+    step that writes into one folder, which is how three topic models once
+    built over each other's matrix.
+    """
+    from ..helpers import tables
+
+    ref = tables.parse_ref(out_ref)
+    return ref.sibling(f"{ref.stem}_matrix", suffix="")
+
+
+def matrix_refs(out_dir):
+    """
+    The two tables of a model's matrix folder, ``(freq_list, dtm)``.
+
+    ``out_dir`` is a folder path or a database prefix from
+    :func:`matrix_dir_of`; the tables go beside each other under it either
+    way, so somebody reading a topic model can see which vocabulary the
+    topics came out of.
+    """
+    from ..helpers import tables
+
+    folder = tables.parse_ref(out_dir)
+    if folder.is_db:
+        return (tables.TableRef(profile=folder.profile,
+                                logical=f"{folder.logical}/freq_list"),
+                tables.TableRef(profile=folder.profile,
+                                logical=f"{folder.logical}/dtm"))
+    folder.path.mkdir(parents=True, exist_ok=True)
+    return (tables.TableRef(folder.path / "freq_list.csv"),
+            tables.TableRef(folder.path / "dtm.csv"))
+
+
+def local_file(given, out_ref, name: str):
+    """
+    Where a thing that is not rows goes: the model JSON, a chart, a report.
+
+    ``given`` when the caller named it -- a path as it is, and a ``db://``
+    address (what a template renders for a database run) mapped under the
+    run's ``db_local/`` folder, because a database holds tables and this is
+    not one. Otherwise ``name`` beside the features: next to the file, or in
+    the table's local folder.
+    """
+    from pathlib import Path
+
+    from ..helpers import tables
+
+    if given:
+        ref = tables.parse_ref(given)
+        return ref.path if not ref.is_db else ref.local_dir() / ref.name
+    ref = tables.parse_ref(out_ref)
+    return Path(ref.local_dir()) / name
+
+
 def build_matrix(*, analysis_ready, out_dir, weighting: str, matrix_rounding: int,
                  text_settings: dict, ngram_settings: dict, vocab_settings: dict,
                  overwrite_existing: bool, workers, on_progress, encoding: str):
@@ -1020,25 +1107,26 @@ def build_matrix(*, analysis_ready, out_dir, weighting: str, matrix_rounding: in
     Returns
     -------
     (freq_list_csv, dtm_csv, terms, columns, vocab)
-        The two files, the vocabulary in matrix-column order, the column names
-        (which differ from ``terms`` only when POS tags are in play), and the
+        The two tables (paths for files, refs for database tables), the
+        vocabulary in matrix-column order, the column names (which differ
+        from ``terms`` only when POS tags are in play), and the
         frequency-list rows behind them -- ``idf`` among them, which a model
         needs to recreate a tf-idf matrix later.
     """
-    from pathlib import Path
-
+    from ..helpers import tables
     from .analyze_ngram_frequencies import analyze_ngram_frequencies
     from .build_doc_term_matrix import _load_vocabulary, build_doc_term_matrix
     from .ngram_prep import tags_of, words_of
 
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # a folder on disk or a prefix in the database, whichever the features
+    # are headed for; the two tables sit side by side under it either way
+    freq_ref, dtm_ref = matrix_refs(out_dir)
 
     if on_progress is not None:
         from ..helpers.progress import announce
         announce(on_progress, "counting the vocabulary")
     freq_list_csv = analyze_ngram_frequencies(
-        analysis_csv=analysis_ready, out_features_csv=out_dir / "freq_list.csv",
+        analysis_csv=analysis_ready, out_features_csv=freq_ref,
         overwrite_existing=overwrite_existing, workers=workers,
         on_progress=on_progress, encoding=encoding,
         **ngram_settings, **text_settings)
@@ -1046,20 +1134,23 @@ def build_matrix(*, analysis_ready, out_dir, weighting: str, matrix_rounding: in
     if on_progress is not None:
         from ..helpers.progress import announce
         announce(on_progress, "building the matrix")
-    dtm_csv = Path(build_doc_term_matrix(
-        freq_list_csv=freq_list_csv, analysis_csv=analysis_ready,
-        out_features_csv=out_dir / "dtm.csv",
+    # the provenance decorator records the vocabulary by content from the
+    # name it is handed, so it gets the address as text -- what a pipeline
+    # template hands it -- rather than the ref object
+    dtm_csv = build_doc_term_matrix(
+        freq_list_csv=str(freq_list_csv), analysis_csv=analysis_ready,
+        out_features_csv=dtm_ref,
         overwrite_existing=overwrite_existing, workers=workers,
         on_progress=on_progress, encoding=encoding,
         weighting=weighting, rounding=matrix_rounding,
-        **vocab_settings, **text_settings))
+        **vocab_settings, **text_settings)
 
     vocab = _load_vocabulary(
-        Path(freq_list_csv), encoding=encoding,
+        freq_list_csv, encoding=encoding,
         pos_tagged=text_settings.get("pos_tagged", False), **vocab_settings)
     terms = sorted(vocab, key=lambda g: (-vocab[g]["frequency"],
                                          words_of(g), tags_of(g)))
     from .build_doc_term_matrix import column_names
     columns = column_names(terms, text_settings.get("pos_tagged", False))
     check_matrix_agrees(dtm_csv, columns, encoding=encoding)
-    return Path(freq_list_csv), dtm_csv, terms, columns, vocab
+    return tables.handle(freq_list_csv), tables.handle(dtm_csv), terms, columns, vocab

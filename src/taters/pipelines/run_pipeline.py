@@ -241,7 +241,7 @@ def _json_safe(obj: Any) -> Any:
         booleans, `None`, lists, and dicts). Any unknown objects fall
         through unchanged (letting `json` raise if it still cannot serialize).
     """
-    if isinstance(obj, Path):
+    if isinstance(obj, Path) or type(obj).__name__ == "TableRef":
         return str(obj)
     if is_dataclass(obj):
         return _json_safe(asdict(obj))
@@ -250,11 +250,64 @@ def _json_safe(obj: Any) -> Any:
     if isinstance(obj, dict):
         return {k: _json_safe(v) for k, v in obj.items()}
     if hasattr(obj, "__dict__"):
+        # a driver connection or a database session has a password somewhere
+        # in its attributes; it is named, never walked
+        root = type(obj).__module__.split(".")[0]
+        if root in ("pymysql", "psycopg", "sqlite3") or type(obj).__name__ == "Session":
+            return f"<{type(obj).__name__}>"
         try:
             return _json_safe(vars(obj))
         except Exception:
             pass
     return obj
+
+
+def _db_preflight(vars_ctx: Dict[str, Any], say) -> None:
+    """
+    Log in to every database this run touches and check its tables exist.
+
+    The source spec is resolved against the catalog, so a dropped table or
+    column is reported with the name it had when the pipeline was made; the
+    destination's account is probed for the right to make tables. Nothing
+    here costs more than a few catalog queries.
+    """
+    names = []
+    connection = str(vars_ctx.get("connection") or "")
+    if connection:
+        names.append(connection)
+    root = str(vars_ctx.get("results_root") or "")
+    if root.startswith("db://"):
+        names.append(root[len("db://"):].split("/", 1)[0])
+    if not names:
+        return
+    from ..helpers import db, sources, tables
+
+    for name in dict.fromkeys(names):
+        try:
+            profile = db.get_profile(name)
+        except KeyError as e:
+            raise ValueError(f"this pipeline reads a database connection called "
+                             f"{name!r}, which is not saved on this machine. Add it "
+                             f"under Settings > Database connections.") from e
+        # the password: from the environment, this session, or not at all
+        db.password_for(profile)
+        if name == connection and vars_ctx.get("source"):
+            spec = sources.coerce(vars_ctx["source"], connection=connection)
+            session = tables._session(tables.parse_ref(f"db://{name}/x"))
+            try:
+                sources.resolve_columns(spec, session)
+            except ValueError as e:
+                raise ValueError(f"{e} (it was there when this pipeline was made). "
+                                 f"Nothing was measured. If it was renamed, make the "
+                                 f"pipeline again with the new name.") from None
+        if root.startswith(f"db://{name}/"):
+            probe = db.probe(profile)
+            if not probe.can_write:
+                raise ValueError(f"the results are to go to {name}, but "
+                                 f"{profile.user or 'this account'} cannot create tables "
+                                 f"there. Pick another destination, or ask whoever "
+                                 f"manages the database to grant CREATE.")
+    say(f"[pipeline] database connection(s) checked: {', '.join(dict.fromkeys(names))}")
 
 
 # ============== Discovery ==============
@@ -962,7 +1015,9 @@ def _materialize_assets(func: Any, rendered: Dict[str, Any],
             f"the model file {model_path.name} could not be read for the "
             f"word lists and fitted files this step needs: {e}") from None
     out = rendered.get("out_features_csv")
-    root = (Path(str(out)).parent if out else Path.cwd()) / "assets"
+    # a table in a database has no folder; its word lists go under the run
+    root = (Path(str(out)).parent if out and not str(out).startswith("db:")
+            else Path.cwd()) / "assets"
     bound = dict(rendered)
     for param, names in (spec.get("take") or {}).items():
         have = {e.get("name"): e for e in carried.get(param) or []}
@@ -1340,6 +1395,12 @@ def _run_preset(
     # came in by.
     workers = _run_wide_workers(workers, vars_ctx)
     vars_ctx["workers"] = workers
+
+    # a run that reads from or writes to a database needs its passwords and
+    # its tables *now*: a missing password or a table somebody renamed since
+    # the pipeline was made is found here, before any step runs, not at
+    # step seven of a ten-hour run
+    _db_preflight(vars_ctx, say)
 
     has_item_steps = any((step.get("scope", "item") == "item") for step in steps)
 

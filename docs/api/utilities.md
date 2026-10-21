@@ -24,6 +24,24 @@
       show_source: true
       show_root_heading: true
 
+::: taters.helpers.tables
+    options:
+      members_order: alphabetical
+      show_source: true
+      show_root_heading: true
+
+::: taters.helpers.sources
+    options:
+      members_order: alphabetical
+      show_source: true
+      show_root_heading: true
+
+::: taters.helpers.db
+    options:
+      members_order: alphabetical
+      show_source: true
+      show_root_heading: true
+
 ::: taters.helpers.feature_average
     options:
       members_order: alphabetical

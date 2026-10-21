@@ -565,7 +565,7 @@ def test_the_intermediate_table_stays_inside_the_run(source):
     for step in preset["steps"]:
         with_ = step["with"]
         if "csv_path" in with_ or "txt_dir" in with_:
-            assert with_.get("gathered_csv") == "gathered/texts.csv", step["call"]
+            assert with_.get("gathered_csv") == "{{var:results_root}}gathered/texts.csv", step["call"]
             assert not Path(with_["gathered_csv"]).is_absolute()
 
 

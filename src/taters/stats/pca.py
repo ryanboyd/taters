@@ -35,13 +35,13 @@ is a bookkeeping convention, not a disagreement.)
 
 from __future__ import annotations
 
-import csv
 import json
 from pathlib import Path
 from typing import Callable, List, Literal, Optional, Tuple, Union
 
+from ..helpers import tables
 from ..helpers.atomic import atomic_write
-from ..helpers.progress import Ticker, announce, count_rows
+from ..helpers.progress import Ticker, announce
 from ..helpers.cliargs import CliSpec
 from ._common import taters_version
 
@@ -192,7 +192,7 @@ def varimax(loadings, gamma: float = 1.0, q: int = 2000, tol: float = 1e-13,
     return loadings @ R, R
 
 
-def stream_moments(csv_path: Path, *, encoding: str, skip_cols: int,
+def stream_moments(csv_path, *, encoding: str, skip_cols: int,
                    on_progress=None,
                    message: str = "measuring the table") -> Tuple[int, "object", "object"]:
     """
@@ -200,6 +200,8 @@ def stream_moments(csv_path: Path, *, encoding: str, skip_cols: int,
     after the first ``skip_cols``. Rows are accumulated in chunks so the
     cross-product is a handful of BLAS calls per chunk rather than an outer
     product per row -- same numbers, a large constant factor faster.
+    ``csv_path`` is a file or a table in a database (a packed one reads
+    back as the same cells).
     """
     import numpy as np
 
@@ -220,16 +222,16 @@ def stream_moments(csv_path: Path, *, encoding: str, skip_cols: int,
         n += block.shape[0]
         chunk.clear()
 
-    ticker = Ticker(on_progress, count_rows(csv_path, on_progress=on_progress))
-    with Path(csv_path).open("r", newline="", encoding=encoding) as f:
-        reader = csv.reader(f)
-        next(reader)                                    # skip the header; caller's job
-        for row in reader:
-            ticker.tick(message=message)
-            chunk.append(row[skip_cols:])
-            if len(chunk) >= _CHUNK_ROWS:
-                _flush()
-        _flush()
+    source = tables.parse_ref(csv_path)
+    ticker = Ticker(on_progress, tables.count(source, encoding=encoding,
+                                              on_progress=on_progress))
+    # the header is the caller's job; the cells come in header order
+    for row in tables.read_cells(source, encoding=encoding):
+        ticker.tick(message=message)
+        chunk.append(row[skip_cols:])
+        if len(chunk) >= _CHUNK_ROWS:
+            _flush()
+    _flush()
     return n, sums, cross
 
 
@@ -399,11 +401,6 @@ def project_row(cells, kept, mu, sigma, projection, rounding: int) -> list:
 # the generic tool: reduce any old feature table
 # ---------------------------------------------------------------------------
 
-def _read_header(path: Path, encoding: str) -> List[str]:
-    with path.open("r", newline="", encoding=encoding) as f:
-        return next(csv.reader(f))
-
-
 def fit_pca_csv(
     input_csv: PathLike,
     *,
@@ -469,31 +466,33 @@ def fit_pca_csv(
     Path
         ``out_scores_csv``.
     """
-    input_csv = Path(input_csv)
-    if not input_csv.exists():
+    input_csv = tables.parse_ref(input_csv)
+    if not tables.exists(input_csv):
         raise FileNotFoundError(f"input_csv not found: {input_csv}")
     if start_col < 1:
         raise ValueError(f"start_col is 1-based; got {start_col}")
 
+    # the three tables land beside the input, in the same file folder or the
+    # same database; the model json is not rows, so for a database input it
+    # goes to the input's local folder on disk
     stem = input_csv.stem
-    scores_path = Path(out_scores_csv) if out_scores_csv else \
-        input_csv.with_name(f"{stem}_pca_scores.csv")
+    scores_path = tables.parse_ref(out_scores_csv) if out_scores_csv else \
+        input_csv.sibling(f"{stem}_pca_scores")
     model_path = Path(out_model_json) if out_model_json else \
-        input_csv.with_name(f"{stem}_pca_model.json")
-    loadings_path = Path(out_loadings_csv) if out_loadings_csv else \
-        input_csv.with_name(f"{stem}_pca_loadings.csv")
-    eigen_path = Path(out_eigenvalues_csv) if out_eigenvalues_csv else \
-        input_csv.with_name(f"{stem}_pca_eigenvalues.csv")
-    scores_path.parent.mkdir(parents=True, exist_ok=True)
+        input_csv.local_dir() / f"{stem}_pca_model.json"
+    loadings_path = tables.parse_ref(out_loadings_csv) if out_loadings_csv else \
+        input_csv.sibling(f"{stem}_pca_loadings")
+    eigen_path = tables.parse_ref(out_eigenvalues_csv) if out_eigenvalues_csv else \
+        input_csv.sibling(f"{stem}_pca_eigenvalues")
 
     from ._common import reusable
 
     if reusable(scores_path, input_csv, overwrite_existing=overwrite_existing,
                 verbose=True, what="the PCA scores"):
         print("PCA scores output file already exists; returning existing file.")
-        return scores_path
+        return tables.handle(scores_path)
 
-    header = _read_header(input_csv, encoding)
+    header = tables.columns_of(input_csv, encoding=encoding)
     if start_col > len(header):
         raise ValueError(f"start_col={start_col} but {input_csv} has only "
                          f"{len(header)} column(s).")
@@ -524,15 +523,16 @@ def fit_pca_csv(
             f"and were left out: {', '.join(dropped[:8])}"
             f"{'…' if len(dropped) > 8 else ''}")
 
-    with atomic_write(loadings_path, newline="", encoding=encoding) as f:
-        writer = csv.writer(f)
-        writer.writerow(["feature", *comp_names])
+    with tables.write_table(loadings_path, ["feature", *comp_names], encoding=encoding,
+                            hints={"feature": "text", **{c: "float" for c in comp_names}}
+                            ) as writer:
         for i, j in enumerate(kept_list):
             writer.writerow([features[j],
                              *(round(float(v), rounding) for v in loadings[i])])
-    with atomic_write(eigen_path, newline="", encoding=encoding) as f:
-        writer = csv.writer(f)
-        writer.writerow(["component", "eigenvalue", "pct_variance"])
+    with tables.write_table(eigen_path, ["component", "eigenvalue", "pct_variance"],
+                            encoding=encoding,
+                            hints={"component": "text", "eigenvalue": "float",
+                                   "pct_variance": "float"}) as writer:
         for name, e, p in zip(comp_names, eig, pct):
             writer.writerow([name, round(float(e), rounding),
                              round(float(p), rounding)])
@@ -560,22 +560,22 @@ def fit_pca_csv(
                   "eigenvalues": eig.tolist(),
                   "pct_variance": pct.tolist()},
     }
+    model_path.parent.mkdir(parents=True, exist_ok=True)
     with atomic_write(model_path, encoding="utf-8") as f:
         json.dump(model, f, indent=1)
 
+    # second pass: the same cells, now scored. the ids are whatever came
+    # before start_col, so they're text as far as a database is concerned
     ticker = Ticker(on_progress, n)
-    with input_csv.open("r", newline="", encoding=encoding) as f, \
-            atomic_write(scores_path, newline="", encoding=encoding) as out:
-        reader = csv.reader(f)
-        next(reader)
-        writer = csv.writer(out)
-        writer.writerow([*id_names, *comp_names])
-        for row in reader:
+    with tables.write_table(scores_path, [*id_names, *comp_names], encoding=encoding,
+                            hints={**{c: "text" for c in id_names},
+                                   **{c: "float" for c in comp_names}}) as writer:
+        for row in tables.read_cells(input_csv, encoding=encoding):
             ticker.tick(message="scoring components")
             writer.writerow([*row[:start_col - 1],
                              *project_row(row[start_col - 1:], kept, mu,
                                           sigma, projection, rounding)])
-    return scores_path
+    return tables.handle(scores_path)
 
 
 def load_pca_model(model_json: PathLike) -> dict:
@@ -645,12 +645,11 @@ def apply_pca_csv(
     projection = np.asarray(fit["projection"], dtype=np.float64)
     comp_names = list(fit["components"])
 
-    input_csv = Path(input_csv)
-    if not input_csv.exists():
+    input_csv = tables.parse_ref(input_csv)
+    if not tables.exists(input_csv):
         raise FileNotFoundError(f"input_csv not found: {input_csv}")
-    scores_path = Path(out_scores_csv) if out_scores_csv else \
-        input_csv.with_name(f"{input_csv.stem}_pca_scores.csv")
-    scores_path.parent.mkdir(parents=True, exist_ok=True)
+    scores_path = tables.parse_ref(out_scores_csv) if out_scores_csv else \
+        input_csv.sibling(f"{input_csv.stem}_pca_scores")
     from ._common import reusable
 
     if reusable(scores_path, input_csv, model_json,
@@ -659,7 +658,7 @@ def apply_pca_csv(
         print("PCA scores output file already exists; returning existing file.")
         return scores_path
 
-    header = _read_header(input_csv, encoding)
+    header = tables.columns_of(input_csv, encoding=encoding)
     positions = {name: i for i, name in enumerate(header)}
     missing = [f for f in features if f not in positions]
     if missing:
@@ -671,20 +670,17 @@ def apply_pca_csv(
     feature_pos = [positions[f] for f in features]
     id_pos = [i for i, name in enumerate(header) if name not in set(features)]
 
-    ticker = Ticker(on_progress, count_rows(input_csv, on_progress=on_progress))
-    with input_csv.open("r", newline="", encoding=encoding) as f, \
-            atomic_write(scores_path, newline="", encoding=encoding) as out:
-        reader = csv.reader(f)
-        next(reader)
-        writer = csv.writer(out)
-        writer.writerow([*(header[i] for i in id_pos), *comp_names])
-        for row in reader:
+    ticker = Ticker(on_progress, tables.count(input_csv, encoding=encoding,
+                                              on_progress=on_progress))
+    with tables.write_table(scores_path, [*(header[i] for i in id_pos), *comp_names],
+                            encoding=encoding) as writer:
+        for row in tables.read_cells(input_csv, encoding=encoding):
             ticker.tick(message="scoring components")
             cells = [row[i] for i in feature_pos]
             writer.writerow([*(row[i] for i in id_pos),
                              *project_row(cells, kept, mu, sigma, projection,
                                           rounding)])
-    return scores_path
+    return tables.handle(scores_path)
 
 
 # --- CLI ---------------------------------------------------------------------

@@ -347,6 +347,9 @@ _MEDIA_ROW_ID = ("source", "speaker", "start_time")
 # there the path is a run-time argument (--root_dir), not a preset variable.
 _INPUT_VAR = {"txt_dir": "input_dir", "csv": "input_csv"}
 
+#: The sources with columns of their own: a spreadsheet or a database table.
+TABULAR = ("csv", "db")
+
 
 def _suffixed(path: str, level_id: str) -> str:
     """`features/readability.csv` -> `features/readability_by-utterance.csv`."""
@@ -384,7 +387,7 @@ def _level_for(source: str, level: Optional[str],
     so a caller that passes `group_by` and no level gets what it plainly meant
     rather than having its argument silently ignored.
     """
-    if level is None and source == "csv" and group_by:
+    if level is None and source in TABULAR and group_by:
         return "group"
     return level
 
@@ -424,7 +427,17 @@ def _bind_source(
     # them), so we use the caller's `group_by` instead.
     keys = list(group_by) if spec.group_by is None else list(spec.group_by)
 
-    if source == "csv" and recipe.keys_like_metadata:
+    if source == "db":
+        # the catalog's tabular recipes name the spreadsheet var; on a
+        # database the same step reads the source spec, and there is no
+        # separator to pass
+        for key, value in list(step["with"].items()):
+            if value == "{{var:input_csv}}":
+                step["with"][key] = "{{var:source}}"
+            elif value == "{{var:csv_delimiter}}":
+                del step["with"][key]
+
+    if source in TABULAR and recipe.keys_like_metadata:
         # a table that joins on text_id has to build it EXACTLY the way the
         # text gather does, or the join finds nothing: same group keys when
         # rows get combined, same id columns otherwise. we're copying
@@ -664,6 +677,9 @@ def compose(
     feature_levels: Sequence[Sequence[str]] = (),
     row_filters: Sequence[Sequence[Any]] = (),
     model_plans: Sequence[Any] = (),
+    source_spec: Optional[Dict[str, Any]] = None,
+    connection: str = "",
+    results_root: str = "",
 ) -> dict:
     """
     Build a complete preset dict from a set of chosen features.
@@ -776,12 +792,25 @@ def compose(
     var_specs = _collect_vars(steps)
     for key, spec in SOURCE_VARS[source].items():
         var_specs.setdefault(key, dict(spec))
-    if input_path is not None and source != "media":
+    if input_path is not None and source in _INPUT_VAR:
         var_specs[_INPUT_VAR[source]]["default"] = input_path
     if source == "csv":
         # the caller sniffs this from the file itself, because the extension
         # is only a hint: plenty of tab-separated files are named .csv or .txt.
         var_specs["csv_delimiter"]["default"] = delimiter
+    if source == "db":
+        var_specs["connection"]["default"] = connection
+        var_specs["source"]["default"] = dict(source_spec or {})
+    if source != "media":
+        # anything in, anything out: the tables go where this says, and the
+        # feature folder follows it, so one knob moves every output. media
+        # runs stay on disk, since ffmpeg and Whisper need files
+        root = str(results_root or "")
+        if root and not root.endswith("/"):
+            root += "/"
+        var_specs["results_root"]["default"] = root
+        if root and "features_dir" in var_specs:
+            var_specs["features_dir"]["default"] = root + "features"
     for key, value in (var_values or {}).items():
         if key in var_specs:
             var_specs[key]["default"] = value
@@ -846,9 +875,9 @@ def compose(
     # step of its own; every text analyzer then reads what it wrote.
     pre_gather = None
     keep = [list(f) for f in (row_filters or ())]
-    if source == "csv" and keep:
+    if source in TABULAR and keep:
         pre_gather = _pre_gather_step(
-            text_cols=text_cols, id_cols=id_cols, text_mode=text_mode,
+            source=source, text_cols=text_cols, id_cols=id_cols, text_mode=text_mode,
             group_by=group_by, row_filters=keep,
             # whatever the analyzers pass through, plus whatever the
             # averaging will need to group by, has to survive the gather
@@ -916,7 +945,7 @@ def _wire_controls(steps, model_plans, *, source, overrides, var_values):
         return steps
     models = ", ".join(sorted(p.model for p in model_plans if p is not None
                               and getattr(p, "controls", ())))
-    if source != "csv":
+    if source not in TABULAR:
         raise ComposeError(
             f"{models} was fitted with control column(s) "
             f"{', '.join(needed)}, which come from a spreadsheet's own "
@@ -949,8 +978,8 @@ def _by_dir(keys: Sequence[str]) -> str:
 _GATHERED = "gathered_texts"
 
 
-def _pre_gather_step(*, text_cols, id_cols, text_mode, group_by, row_filters,
-                     carry) -> dict:
+def _pre_gather_step(*, source, text_cols, id_cols, text_mode, group_by,
+                     row_filters, carry) -> dict:
     """
     The text gather, as its own visible step, so rows can be left out first.
 
@@ -970,15 +999,16 @@ def _pre_gather_step(*, text_cols, id_cols, text_mode, group_by, row_filters,
         "call": "potato.helpers.csv_to_analysis_ready_csv",
         "save_as": _GATHERED,
         "with": {
-            "csv_path": "{{var:input_csv}}",
-            "out_csv": "gathered/texts.csv",
+            "csv_path": "{{var:input_csv}}" if source == "csv" else "{{var:source}}",
+            "out_csv": "{{var:results_root}}gathered/texts.csv",
             "text_cols": list(text_cols),
             "mode": text_mode,
-            "delimiter": "{{var:csv_delimiter}}",
             "row_filters": [list(f) for f in row_filters],
             "overwrite_existing": "{{var:overwrite_existing}}",
         },
     }
+    if source == "csv":
+        step["with"]["delimiter"] = "{{var:csv_delimiter}}"
     if carry:
         step["with"]["carry_cols"] = list(carry)
     if group_by:
@@ -1024,7 +1054,7 @@ def _splice_averaging(built, steps, feature_levels, *, source, text_cols,
     compares records by.
     """
     levels = [tuple(str(c) for c in lv) for lv in (feature_levels or ()) if lv]
-    if not levels or source != "csv":
+    if not levels or source not in TABULAR:
         return built
     tables = feature_tables(steps, source, level, group_by, picked=picked)
     if not tables:
@@ -1063,10 +1093,10 @@ def _splice_averaging(built, steps, feature_levels, *, source, text_cols,
         "call": "potato.helpers.csv_to_analysis_ready_csv",
         "save_as": keys_art,
         "with": {
-            "csv_path": "{{var:input_csv}}",
-            "out_csv": "gathered/row_group_keys.csv",
+            "csv_path": "{{var:input_csv}}" if source == "csv" else "{{var:source}}",
+            "out_csv": "{{var:results_root}}gathered/row_group_keys.csv",
             "text_cols": [],
-            "delimiter": "{{var:csv_delimiter}}",
+            **({"delimiter": "{{var:csv_delimiter}}"} if source == "csv" else {}),
             "carry_cols": sorted({c for lv in levels for c in lv}),
             "overwrite_existing": "{{var:overwrite_existing}}",
             **placing,
@@ -1510,6 +1540,8 @@ def _inputs_meta(source: str, file_type: str, input_path: Optional[str]) -> Dict
         return {"text files": f"{input_path or '<a folder>'}/*.txt"}
     if source == "csv":
         return {"spreadsheet": input_path or "<a .csv file>"}
+    if source == "db":
+        return {"database": "the connection and tables named in vars"}
     return {"file type": f"{file_type} files"}
 
 

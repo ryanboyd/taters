@@ -29,11 +29,10 @@ get its own row.
 """
 from __future__ import annotations
 
-import csv
 from pathlib import Path
 from typing import Any, Callable, Dict, Literal, Optional, Sequence, Union
 
-from ..helpers.atomic import atomic_write
+from ..helpers import tables
 from ..helpers.cliargs import CliSpec
 from ..helpers.doc_text import DOCUMENT_PATTERN
 from ..helpers.feature_columns import ColumnSpec
@@ -270,21 +269,15 @@ def analyze_sentiment_vader(
         overwrite_existing=overwrite_existing, on_progress=on_progress,
         workers=workers)
 
-    if out_features_csv is None:
-        out_features_csv = (Path.cwd() / "features" / "sentiment_vader"
-                            / analysis_ready.name)
-    out_features_csv = Path(out_features_csv)
-    out_features_csv.parent.mkdir(parents=True, exist_ok=True)
-
-    if not overwrite_existing and out_features_csv.is_file():
-        print("VADER output file already exists; returning existing file: "
-              f"{out_features_csv}")
-        return out_features_csv
+    out_ref = tables.output_ref(out_features_csv, source=analysis_ready,
+                                default=("features", "sentiment_vader"))
+    if not overwrite_existing and tables.exists(out_ref):
+        print(f"sentiment_vader output already exists; returning existing: {out_ref}")
+        return tables.handle(out_ref)
 
     # the gatherer writes the analysis-ready table with commas whatever the
     # source used, so `delimiter` stops here and is NOT passed on
-    with analysis_ready.open("r", newline="", encoding=encoding) as fin:
-        header_fields = csv.DictReader(fin).fieldnames or []
+    header_fields = tables.columns_of(analysis_ready, encoding=encoding)
     if "text_id" not in header_fields or "text" not in header_fields:
         raise ValueError(
             f"Expected columns 'text_id' and 'text' in {analysis_ready}; "
@@ -294,7 +287,7 @@ def analyze_sentiment_vader(
 
     passthrough_cols = resolve_passthrough_columns(
         header_fields, pass_through_cols=pass_through_cols, id_cols=id_cols,
-        group_by=group_by, analysis_ready=analysis_ready)
+        group_by=group_by, analysis_ready=str(analysis_ready))
     fieldnames = ["text_id", *passthrough_cols, *METRICS]
 
     # one analyzer for the inline path; the workers build their own in the
@@ -304,9 +297,7 @@ def analyze_sentiment_vader(
     from ..helpers.parallel_map import pool_workers
     from ..helpers.row_map import map_text_rows
 
-    with atomic_write(out_features_csv, newline="", encoding=encoding) as fout:
-        writer = csv.DictWriter(fout, fieldnames=fieldnames)
-        writer.writeheader()
+    with tables.write_table(out_ref, fieldnames, encoding=encoding) as writer:
         for row, values in map_text_rows(
                 analysis_ready, encoding=encoding,
                 workers=lambda n_rows: pool_workers(workers, n_rows),
@@ -322,7 +313,7 @@ def analyze_sentiment_vader(
                 **dict(zip(METRICS, values)),
             }
             writer.writerow(out_row)
-    return out_features_csv
+    return tables.handle(out_ref)
 
 
 # ---------------------------------------------------------------------------

@@ -110,8 +110,11 @@ def balanced_folds(y, n_folds: int, seed: int):
 def output_folders(table_csv: PathLike, out_dir: Optional[PathLike],
                    out_models_dir: Optional[PathLike]) -> Tuple[Path, Path, Path]:
     """``(table_csv, results folder, models folder)``, the folder created."""
-    table_csv = Path(table_csv)
-    folder = Path(out_dir) if out_dir else table_csv.parent
+    from ..helpers.tables import parse_ref
+
+    table_csv = parse_ref(table_csv)
+    folder = Path(out_dir) if out_dir else (
+        table_csv.path.parent if not table_csv.is_db else Path.cwd() / "stats_results")
     models_dir = Path(out_models_dir) if out_models_dir else folder / "models"
     folder.mkdir(parents=True, exist_ok=True)
     return table_csv, folder, models_dir
@@ -133,12 +136,11 @@ def source_sets(table_csv: Path, feature_cols: Sequence[str]):
     use. ``None`` without a sidecar or with fewer than two tables -- then
     there is nothing to combine.
     """
-    import json
+    from ..helpers.tables import read_sidecar
 
-    sidecar = Path(table_csv).with_name(Path(table_csv).stem + "_sets.json")
-    if not sidecar.is_file():
+    payload = read_sidecar(table_csv, "sets")
+    if not payload:
         return None
-    payload = json.loads(sidecar.read_text(encoding="utf-8"))
     allowed = set(feature_cols)
     sets = {}
     for name, cols in (payload.get("sets") or {}).items():
@@ -690,10 +692,15 @@ def prepare_apply(*, model_json: PathLike, load: Callable[[Path], dict],
     """
     from ._common import read_str_csv
 
+    from ..helpers.tables import handle, parse_ref
+
     model = load(one_model_path(model_json))
-    input_csv = Path(input_csv)
-    out_path = Path(out_csv) if out_csv else input_csv.with_name(
-        input_csv.stem + default_suffix)
+    # a Path for a file (every caller that ever read one keeps working), a
+    # ref for a table in a database
+    in_ref = parse_ref(input_csv)
+    input_csv = handle(in_ref)
+    out_path = handle(parse_ref(out_csv) if out_csv else in_ref.sibling(
+        in_ref.stem + default_suffix))
     if reusable(out_path, input_csv, model_json,
                 overwrite_existing=overwrite_existing, verbose=verbose,
                 what="the predictions"):
@@ -702,8 +709,22 @@ def prepare_apply(*, model_json: PathLike, load: Callable[[Path], dict],
                   f"{out_path}")
         return out_path
     announce(on_progress, "reading the table to score")
-    table = read_str_csv(input_csv, encoding=encoding)
     predictors = model["predictors"]
+    # with ids named, only the columns the model and the ids need come in:
+    # a 768-column embeddings table scored by a ridge on six of them is
+    # read as six. without ids every other column is carried, so all of it
+    columns = None
+    if id_cols is not None:
+        from ..helpers.tables import columns_of
+
+        need = set(predictors) | {str(c) for c in id_cols}
+        for r in list(model.get("reductions") or []) + ([model["reduction"]]
+                                                        if model.get("reduction") else []):
+            need |= set(r.get("features") or [])
+        need |= {str(e.get("column")) for e in (model.get("controls") or [])
+                 if isinstance(e, dict) and e.get("column")}
+        columns = [c for c in columns_of(input_csv, encoding=encoding) if c in need]
+    table = read_str_csv(input_csv, encoding=encoding, columns=columns)
     design, inputs, input_names = score_design(table, model, predictors,
                                                input_csv, verbose)
     not_ids = set(predictors) | set(input_names)
@@ -723,13 +744,17 @@ def write_predictions(inputs: ApplyInputs, columns: Dict[str, list],
     announce(on_progress, "writing the predictions")
     table = inputs.table
     header = inputs.id_cols + list(columns)
-    rows = []
-    for i in range(len(table)):
-        row = [table[c].iloc[i] for c in inputs.id_cols]
-        row += ["" if columns[c][i] is None else columns[c][i]
-                for c in columns]
-        rows.append(row)
-    _write_csv(inputs.out_path, header, rows, encoding)
+    from ..helpers.tables import write_table
+
+    # row by row: the ids straight out of the frame, the predictions beside
+    # them, nothing assembled into a second copy of the table first
+    ids = table[inputs.id_cols].itertuples(index=False, name=None) if inputs.id_cols \
+        else (() for _ in range(len(table)))
+    names = list(columns)
+    with write_table(inputs.out_path, header, encoding=encoding) as w:
+        for i, id_cells in enumerate(ids):
+            w.writerow([*id_cells, *("" if columns[c][i] is None else columns[c][i]
+                                     for c in names)])
     unscored = [i for i in range(len(table))
                 if any(columns[c][i] is None for c in columns)]
     entries = _blame(inputs, unscored)
@@ -740,7 +765,7 @@ def write_predictions(inputs: ApplyInputs, columns: Dict[str, list],
             print(f"[{tag}] rows left unscored for want of a predictor: "
                   f"{short}; which predictors, and how often, is in "
                   f"{unscored_path(inputs.out_path).name}")
-        print(f"[{tag}] scored {len(rows)} row(s) -> {inputs.out_path}")
+        print(f"[{tag}] scored {len(table)} row(s) -> {inputs.out_path}")
     return inputs.out_path
 
 
@@ -748,6 +773,15 @@ def unscored_path(out_path: PathLike) -> Path:
     """``model_scores.csv`` -> ``model_scores_unscored.csv``."""
     p = Path(out_path)
     return p.with_name(f"{p.stem}_unscored.csv")
+
+
+def _is_db(out_path: PathLike) -> bool:
+    from ..helpers.tables import parse_ref
+
+    try:
+        return parse_ref(out_path).is_db
+    except (TypeError, ValueError):
+        return False
 
 
 def _blame(inputs: ApplyInputs, unscored: Sequence[int]) -> list:
@@ -784,6 +818,17 @@ def write_unscored(out_path: PathLike, entries: Sequence[tuple], *,
     signal. The scoring step adds rows lost in the join (missing from a
     feature table altogether) under their own reason.
     """
+    if _is_db(out_path):
+        # a scores table in a database keeps its accounting beside it in
+        # the sidecar store, the way a file keeps a small CSV beside it
+        from ..helpers.tables import delete_sidecar, write_sidecar
+
+        if not entries:
+            delete_sidecar(out_path, "unscored")
+            return None
+        write_sidecar(out_path, "unscored",
+                      {"entries": [[r, d, int(n)] for r, d, n in entries]})
+        return None
     path = unscored_path(out_path)
     if not entries:
         path.unlink(missing_ok=True)
@@ -797,6 +842,11 @@ def read_unscored(out_path: PathLike, *, encoding: str) -> list:
     """The entries :func:`write_unscored` wrote, or nothing."""
     import csv
 
+    if _is_db(out_path):
+        from ..helpers.tables import read_sidecar
+
+        doc = read_sidecar(out_path, "unscored") or {}
+        return [(str(r), str(d), int(n)) for r, d, n in (doc.get("entries") or [])]
     path = unscored_path(out_path)
     if not path.is_file():
         return []

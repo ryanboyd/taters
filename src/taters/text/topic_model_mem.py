@@ -46,11 +46,11 @@ shared table made that look like a pairing.
 
 from __future__ import annotations
 
-import csv
 import json
 from pathlib import Path
 from typing import Callable, List, Literal, Optional, Sequence, Union
 
+from ..helpers import tables
 from ..helpers.atomic import atomic_write
 from ..helpers.doc_text import DOCUMENT_PATTERN
 from ..helpers.progress import Ticker, announce
@@ -58,7 +58,7 @@ from ..helpers.model_spec import one_model_path
 from ..helpers.provenance import TEXT_GRAIN, TEXT_INPUT, records_settings
 from ..helpers.text_gather import (resolve_analysis_ready)
 from ..stats.pca import (_axes_at, _decompose, _retain_count,
-                         project_row, stream_moments, warn_if_wide)
+                         project_row, warn_if_wide)
 from .build_doc_term_matrix import (
     _load_vocabulary,
     column_names,
@@ -390,24 +390,24 @@ def topic_model_mem(
         overwrite_existing=overwrite_existing, on_progress=on_progress,
         workers=workers)
 
-    if out_features_csv is None:
-        out_features_csv = (Path.cwd() / "features" / "topic_model_mem"
-                            / analysis_ready.name)
-    out_features_csv = Path(out_features_csv)
-    out_features_csv.parent.mkdir(parents=True, exist_ok=True)
-    stem = out_features_csv.stem
-    model_path = Path(out_model_json) if out_model_json else \
-        out_features_csv.with_name(f"{stem}_model.json")
-    loadings_path = Path(out_loadings_csv) if out_loadings_csv else \
-        out_features_csv.with_name(f"{stem}_loadings.csv")
-    eigen_path = Path(out_eigenvalues_csv) if out_eigenvalues_csv else \
-        out_features_csv.with_name(f"{stem}_eigenvalues.csv")
-    variance_path = Path(out_theme_variance_csv) if out_theme_variance_csv else \
-        out_features_csv.with_name(f"{stem}_theme_variance.csv")
+    # a file beside the run, or a table in the database the text came from;
+    # see helpers.tables for the one rule. the three small tables go wherever
+    # the features go; the model is not rows, so it stays on disk either way
+    # -- beside a file, under db_local/ for a table
+    out_ref = tables.output_ref(out_features_csv, source=analysis_ready,
+                                default=("features", "topic_model_mem"))
+    stem = out_ref.stem
+    model_path = _topics.local_file(out_model_json, out_ref, f"{stem}_model.json")
+    loadings_ref = tables.parse_ref(out_loadings_csv) if out_loadings_csv else \
+        out_ref.sibling(f"{stem}_loadings")
+    eigen_ref = tables.parse_ref(out_eigenvalues_csv) if out_eigenvalues_csv else \
+        out_ref.sibling(f"{stem}_eigenvalues")
+    variance_ref = tables.parse_ref(out_theme_variance_csv) if out_theme_variance_csv \
+        else out_ref.sibling(f"{stem}_theme_variance")
 
-    if not overwrite_existing and out_features_csv.is_file():
-        print("MEM theme scores output file already exists; returning existing file.")
-        return out_features_csv
+    if not overwrite_existing and tables.exists(out_ref):
+        print("MEM theme scores output already exists; returning existing.")
+        return tables.handle(out_ref)
 
     # 1) build this model's own frequency list and matrix.
     #
@@ -435,8 +435,7 @@ def topic_model_mem(
     # it up and modeled the wrong corpus. Deriving from the stem makes both
     # impossible rather than merely wired-around -- and it is the idiom the
     # rest of the codebase already uses for companion files.
-    matrix_dir = out_features_csv.with_name(f"{stem}_matrix")
-    matrix_dir.mkdir(parents=True, exist_ok=True)
+    freq_ref, dtm_ref = _topics.matrix_refs(_topics.matrix_dir_of(out_ref))
 
     from .analyze_ngram_frequencies import analyze_ngram_frequencies
     from .build_doc_term_matrix import build_doc_term_matrix
@@ -449,7 +448,7 @@ def topic_model_mem(
     announce(on_progress, "counting the vocabulary")
     freq_list_csv = analyze_ngram_frequencies(
         analysis_csv=analysis_ready,
-        out_features_csv=matrix_dir / "freq_list.csv",
+        out_features_csv=freq_ref,
         overwrite_existing=overwrite_existing, workers=workers,
         on_progress=on_progress, encoding=encoding,
         ngram_n=ngram_n, stoplist_paths=stoplist_paths,
@@ -458,19 +457,22 @@ def topic_model_mem(
         **text_settings)
 
     announce(on_progress, "building the matrix")
-    dtm_csv = Path(build_doc_term_matrix(
-        freq_list_csv=freq_list_csv, analysis_csv=analysis_ready,
-        out_features_csv=matrix_dir / "dtm.csv",
+    # the provenance decorator records the vocabulary by content from the
+    # name it is handed, so it gets the address as text -- what a pipeline
+    # template hands it -- rather than the ref object
+    dtm_csv = build_doc_term_matrix(
+        freq_list_csv=str(freq_list_csv), analysis_csv=analysis_ready,
+        out_features_csv=dtm_ref,
         overwrite_existing=overwrite_existing, workers=workers,
         on_progress=on_progress, encoding=encoding,
         weighting=weighting, rounding=matrix_rounding,
         vocab_min_freq=vocab_min_freq, vocab_min_obs_pct=vocab_min_obs_pct,
         vocab_rule=vocab_rule, vocab_top_n=vocab_top_n,
         vocab_rank_by=vocab_rank_by,
-        **text_settings))
+        **text_settings)
 
     vocab = _load_vocabulary(
-        Path(freq_list_csv), encoding=encoding, pos_tagged=pos_tagged,
+        freq_list_csv, encoding=encoding, pos_tagged=pos_tagged,
         vocab_rule=vocab_rule,
         vocab_min_freq=vocab_min_freq, vocab_min_obs_pct=vocab_min_obs_pct,
         vocab_top_n=vocab_top_n, vocab_rank_by=vocab_rank_by,
@@ -482,9 +484,9 @@ def topic_model_mem(
 
     # 2) one streaming pass to get the moments, then we find the axes in memory
     warn_if_wide(len(terms))
-    n, sums, cross = stream_moments(dtm_csv, encoding=encoding, skip_cols=2,
-                                    on_progress=on_progress,
-                                    message="measuring the matrix")
+    n, sums, cross = _topics.stream_moments(dtm_csv, encoding=encoding, skip_cols=2,
+                                            on_progress=on_progress,
+                                            message="measuring the matrix")
     if n < 3:
         raise ValueError(f"Only {n} document(s) in {dtm_csv}; MEM needs a corpus.")
     announce(on_progress, "extracting themes")
@@ -513,7 +515,7 @@ def topic_model_mem(
             k_values=k_values, fit=fit_at, terms=terms, batches=batches,
             engine="mem", rule=k_selection, metric=coherence_metric,
             top_terms=top_terms, rounding=rounding,
-            out_stem=out_features_csv.with_name(f"{stem}_k_selection"),
+            out_stem=_topics.local_file(None, out_ref, f"{stem}_k_selection"),
             encoding=encoding, on_progress=on_progress)
         retention = {"rule": k_selection, "metric": coherence_metric,
                      "n_components": int(n_components)}
@@ -538,10 +540,10 @@ def topic_model_mem(
 
     # 3) the loadings and eigenvalue tables (small, so we do them in memory)
     kept_terms = [terms[j] for j in kept.tolist()]
-    with atomic_write(loadings_path, newline="", encoding=encoding) as f:
-        writer = csv.writer(f)
-        head = ["term", "pos", *theme_names] if pos_tagged else ["term", *theme_names]
-        writer.writerow(head)
+    head = ["term", "pos", *theme_names] if pos_tagged else ["term", *theme_names]
+    hints = {"term": "text", "pos": "text", **{t: "float" for t in theme_names}}
+    with tables.write_table(loadings_ref, head, encoding=encoding,
+                            hints=hints) as writer:
         for i, gram in enumerate(kept_terms):
             row = [words_of(gram)]
             if pos_tagged:
@@ -559,9 +561,11 @@ def topic_model_mem(
     # signal by. Every rank, not just the kept ones -- seeing where the curve
     # crosses the chance line is the whole reason to look at it.
     thresholds = list(retention.get("thresholds") or [])
-    with atomic_write(eigen_path, newline="", encoding=encoding) as f:
-        writer = csv.writer(f)
-        writer.writerow(["rank", "eigenvalue", "chance_threshold", "kept"])
+    with tables.write_table(eigen_ref, ["rank", "eigenvalue", "chance_threshold", "kept"],
+                            encoding=encoding,
+                            hints={"rank": "int", "eigenvalue": "float",
+                                   "chance_threshold": "float", "kept": "text"}
+                            ) as writer:
         for i, value in enumerate(eigvals):
             writer.writerow([
                 i + 1, round(float(value), rounding),
@@ -573,9 +577,10 @@ def topic_model_mem(
     # loadings, which is the same quantity *before* rotation and deliberately
     # redistributed by it -- which is why this column is much flatter than the
     # spectrum, and why reading it as a scree curve looks like broken math.
-    with atomic_write(variance_path, newline="", encoding=encoding) as f:
-        writer = csv.writer(f)
-        writer.writerow(["theme", "variance", "pct_variance"])
+    with tables.write_table(variance_ref, ["theme", "variance", "pct_variance"],
+                            encoding=encoding,
+                            hints={"theme": "text", "variance": "float",
+                                   "pct_variance": "float"}) as writer:
         for name, eig, p_ in zip(theme_names, theme_eig, pct):
             writer.writerow([name, round(float(eig), rounding),
                              round(float(p_), rounding)])
@@ -619,18 +624,18 @@ def topic_model_mem(
     # 5) lastly, a second streaming pass: we score every document through the
     #    shared projection helper (the very same one apply uses)
     ticker = Ticker(on_progress, n)
-    with dtm_csv.open("r", newline="", encoding=encoding) as f, \
-            atomic_write(out_features_csv, newline="", encoding=encoding) as out:
-        reader = csv.reader(f)
-        next(reader)
-        writer = csv.writer(out)
-        writer.writerow(["text_id", "token_count", *theme_names])
-        for row in reader:
+    # positional cells in, a typed table out: the matrix and the scores can
+    # each be a file or a database table, and neither is ever held whole
+    score_hints = {"text_id": "text", "token_count": "int",
+                   **{t: "float" for t in theme_names}}
+    with tables.write_table(out_ref, ["text_id", "token_count", *theme_names],
+                            encoding=encoding, hints=score_hints) as writer:
+        for row in tables.read_cells(dtm_csv, encoding=encoding):
             ticker.tick(message="scoring themes")
             writer.writerow(_theme_row(row[0], row[1], row[2:], kept, mu,
                                        sigma, projection, rounding))
 
-    return out_features_csv
+    return tables.handle(out_ref)
 
 
 # ---------------------------------------------------------------------------
@@ -818,17 +823,16 @@ def apply_mem_model(
         overwrite_existing=overwrite_existing, on_progress=on_progress,
         workers=workers)
 
+    # `_applied`, so that fitting and applying with the defaults do not
+    # write to one table -- and so their matrix folders, derived from this
+    # stem, can never be the same one
+    out_ref = tables.output_ref(out_features_csv, source=analysis_ready,
+                                default=("features", "topic_model_mem"))
     if out_features_csv is None:
-        # `_applied`, so that fitting and applying with the defaults do not
-        # write to one file -- and so their matrix folders, derived from this
-        # stem, can never be the same one.
-        out_features_csv = (Path.cwd() / "features" / "topic_model_mem"
-                            / f"{analysis_ready.stem}_applied{analysis_ready.suffix}")
-    out_features_csv = Path(out_features_csv)
-    out_features_csv.parent.mkdir(parents=True, exist_ok=True)
-    if not overwrite_existing and out_features_csv.is_file():
-        print("MEM theme scores output file already exists; returning existing file.")
-        return out_features_csv
+        out_ref = out_ref.sibling(f"{out_ref.stem}_applied")
+    if not overwrite_existing and tables.exists(out_ref):
+        print("MEM theme scores output already exists; returning existing.")
+        return tables.handle(out_ref)
 
     # 2) now we rebuild the instrument from the model, exactly as it was trained
     if text_cfg["engine"] == "stanza":
@@ -869,9 +873,10 @@ def apply_mem_model(
                        tokenizer=text_cfg["tokenizer"],
                        stanza_lang=text_cfg["stanza_lang"], device=device,
                        keep_punctuation=keep_punctuation)
-    with atomic_write(out_features_csv, newline="", encoding=encoding) as out:
-        writer = csv.writer(out)
-        writer.writerow(["text_id", "token_count", *theme_names])
+    hints = {"text_id": "text", "token_count": "int",
+             **{t: "float" for t in theme_names}}
+    with tables.write_table(out_ref, ["text_id", "token_count", *theme_names],
+                            encoding=encoding, hints=hints) as writer:
         for row, (n_tokens, cells) in map_text_rows(
                 analysis_ready, encoding=encoding,
                 workers=lambda n_rows: pooled_text_workers(
@@ -890,7 +895,7 @@ def apply_mem_model(
                                        cells, kept, mu, sigma, projection,
                                        rounding))
 
-    return out_features_csv
+    return tables.handle(out_ref)
 
 
 # --- CLI ---------------------------------------------------------------------

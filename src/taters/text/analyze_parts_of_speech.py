@@ -22,8 +22,9 @@ from __future__ import annotations
 import csv
 from collections import Counter
 from pathlib import Path
-from typing import Callable, Dict, List, Literal, Optional, Sequence, Union
+from typing import Callable, Dict, Literal, Optional, Sequence, Union
 
+from ..helpers import tables
 from ..helpers.atomic import atomic_write
 from ..helpers.progress import announce
 from ..helpers.doc_text import DOCUMENT_PATTERN
@@ -227,14 +228,11 @@ def analyze_parts_of_speech(
         overwrite_existing=overwrite_existing, on_progress=on_progress,
         workers=workers)
 
-    if out_features_csv is None:
-        out_features_csv = Path.cwd() / "features" / "pos" / analysis_ready.name
-    out_features_csv = Path(out_features_csv)
-    out_features_csv.parent.mkdir(parents=True, exist_ok=True)
-
-    if not overwrite_existing and out_features_csv.is_file():
-        print("POS features output file already exists; returning existing file.")
-        return out_features_csv
+    out_ref = tables.output_ref(out_features_csv, source=analysis_ready,
+                                default=("features", "pos"))
+    if not overwrite_existing and tables.exists(out_ref):
+        print(f"pos output already exists; returning existing: {out_ref}")
+        return tables.handle(out_ref)
 
     if engine == "stanza":
         announce(on_progress, "loading the stanza pipeline (first use "
@@ -245,11 +243,16 @@ def analyze_parts_of_speech(
 
 
     # 2) one pooled pass: tag and count, with results in file order and one
-    #    live sub-bar per document in flight. we hold the rows in memory
-    #    afterwards because the column set is the union of every sequence any
-    #    document produced -- we can't know that until we've read the last
-    #    document. stanza tagging stays single-process (see
+    #    live sub-bar per document in flight. the column set is the union of
+    #    every sequence any document produced, which we can't know until the
+    #    last document -- so each document's counts go to a scratch file as
+    #    they arrive (a line of JSON each) and only the union of keys stays
+    #    in memory. holding every Counter used to cost gigabytes on a big
+    #    corpus. stanza tagging stays single-process (see
     #    `pooled_text_workers`); NLTK pools just fine
+    import json
+    import tempfile
+
     from ..helpers.row_map import map_text_rows
     from .ngram_prep import pooled_text_workers
 
@@ -258,60 +261,85 @@ def analyze_parts_of_speech(
     # map_text_rows can't do for us
     from ..helpers.row_map import resolve_passthrough_columns
 
-    with analysis_ready.open("r", newline="", encoding=encoding) as f:
-        fields = csv.DictReader(f).fieldnames or []
+    fields = tables.columns_of(analysis_ready, encoding=encoding)
     passthrough = resolve_passthrough_columns(
         fields, id_cols=id_cols, group_by=group_by,
-        analysis_ready=analysis_ready)
+        analysis_ready=str(analysis_ready))
 
     tag_args = dict(engine=engine, tokenizer=tokenizer, tagset=tagset,
                     stanza_lang=stanza_lang, device=device)
-    docs: List[tuple] = []       # (text_id, meta, token_count, Counter)
-    tagged_rows: List[tuple] = []
-    for row, (n_tags, counts, tagged_text) in map_text_rows(
-            analysis_ready, encoding=encoding,
-            workers=lambda n_rows: pooled_text_workers(
-                workers, n_rows, engine=engine, tokenizer=tokenizer,
-                lemmatize=False, pos_tagged=True),
-            message="tagging documents", on_progress=on_progress,
-            inline_fn=lambda pair: _tag_counts(
-                tag, sngram_n, tagged_text_csv is not None, pair[1]),
-            pool_fn=_tags_in_worker,
-            initializer=_init_tag_worker,
-            initargs=(tag_args, sngram_n, tagged_text_csv is not None)):
-        meta = {c: str(row.get(c, "") or "") for c in passthrough}
-        docs.append((str(row.get("text_id", "") or ""), meta, n_tags, counts))
+    seen_keys: set = set()
+    n_docs = 0
+    spill = tempfile.NamedTemporaryFile("w+", encoding="utf-8", suffix=".jsonl",
+                                        prefix="pos_counts_", delete=False)
+    tagged_out = None
+    try:
         if tagged_text_csv is not None:
-            tagged_rows.append((str(row.get("text_id", "") or ""), tagged_text))
+            # the tagged text is a copy of the corpus; it is written as it
+            # arrives rather than remembered until the end
+            tagged_text_csv = Path(tagged_text_csv)
+            tagged_text_csv.parent.mkdir(parents=True, exist_ok=True)
+            tagged_out = atomic_write(tagged_text_csv, newline="", encoding=encoding)
+            tagged_fh = tagged_out.__enter__()
+            tagged_writer = csv.writer(tagged_fh)
+            tagged_writer.writerow(["text_id", "tagged_text"])
+        for row, (n_tags, counts, tagged_text) in map_text_rows(
+                analysis_ready, encoding=encoding,
+                workers=lambda n_rows: pooled_text_workers(
+                    workers, n_rows, engine=engine, tokenizer=tokenizer,
+                    lemmatize=False, pos_tagged=True),
+                message="tagging documents", on_progress=on_progress,
+                inline_fn=lambda pair: _tag_counts(
+                    tag, sngram_n, tagged_text_csv is not None, pair[1]),
+                pool_fn=_tags_in_worker,
+                initializer=_init_tag_worker,
+                initargs=(tag_args, sngram_n, tagged_text_csv is not None)):
+            text_id = str(row.get("text_id", "") or "")
+            meta = {c: str(row.get(c, "") or "") for c in passthrough}
+            seen_keys.update(counts)
+            spill.write(json.dumps([text_id, meta, n_tags,
+                                    [[n, gram, c] for (n, gram), c in counts.items()]],
+                                   ensure_ascii=False) + "\n")
+            n_docs += 1
+            if tagged_out is not None:
+                tagged_writer.writerow([text_id, tagged_text])
+        if tagged_out is not None:
+            tagged_out.__exit__(None, None, None)
+            tagged_out = None
+        spill.flush()
 
-    # 3) the column plan: orders ascending, alphabetical within an order
-    seen = sorted({key for *_ , counts in docs for key in counts})
-    columns = [(n, gram, "pos_" + gram.replace(" ", "_")) for n, gram in seen]
+        # 3) the column plan: orders ascending, alphabetical within an order
+        seen = sorted(seen_keys)
+        columns = [(n, gram, "pos_" + gram.replace(" ", "_")) for n, gram in seen]
+        at = {(n, gram): i for i, (n, gram, _name) in enumerate(columns)}
 
-    with atomic_write(out_features_csv, newline="", encoding=encoding) as f:
-        writer = csv.writer(f)
-        writer.writerow(["text_id", *passthrough, "token_count",
-                         *(name for *_ , name in columns)])
-        for text_id, meta, token_count, counts in docs:
-            cells = []
-            for n, gram, _name in columns:
-                value = counts.get((n, gram), 0)
-                if relative_freq:
-                    windows = max(token_count - n + 1, 0)
-                    value = round(value / windows, rounding) if windows else 0
-                cells.append(value)
-            writer.writerow([text_id, *(meta[c] for c in passthrough),
-                             token_count, *cells])
+        # 4) the second pass reads the scratch back, one document at a time
+        spill.seek(0)
+        with tables.write_table(out_ref, ["text_id", *passthrough, "token_count",
+                                          *(name for *_ , name in columns)],
+                                encoding=encoding) as writer:
+            for line in spill:
+                text_id, meta, token_count, pairs = json.loads(line)
+                cells: list = [0] * len(columns)
+                for n, gram, value in pairs:
+                    if relative_freq:
+                        windows = max(token_count - n + 1, 0)
+                        value = round(value / windows, rounding) if windows else 0
+                    cells[at[(n, gram)]] = value
+                writer.writerow([text_id, *(meta[c] for c in passthrough),
+                                 token_count, *cells])
+    except BaseException:
+        if tagged_out is not None:
+            try:
+                tagged_out.__exit__(RuntimeError, RuntimeError("abandoned"), None)
+            except Exception:
+                pass
+        raise
+    finally:
+        spill.close()
+        Path(spill.name).unlink(missing_ok=True)
 
-    if tagged_text_csv is not None:
-        tagged_text_csv = Path(tagged_text_csv)
-        tagged_text_csv.parent.mkdir(parents=True, exist_ok=True)
-        with atomic_write(tagged_text_csv, newline="", encoding=encoding) as f:
-            writer = csv.writer(f)
-            writer.writerow(["text_id", "tagged_text"])
-            writer.writerows(tagged_rows)
-
-    return out_features_csv
+    return tables.handle(out_ref)
 
 
 # --- CLI ---------------------------------------------------------------------

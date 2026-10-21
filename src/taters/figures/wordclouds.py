@@ -34,13 +34,13 @@ keeps.
 """
 from __future__ import annotations
 
-import csv
 import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
+from ..helpers import tables
 from ..helpers.cliargs import CliSpec
 from ..helpers.model_spec import slug
 from ..helpers.progress import announce
@@ -120,9 +120,22 @@ class CloudSpec:
 # reading the tables in
 # ---------------------------------------------------------------------------
 
-def _rows(path: Path, encoding: str) -> List[Row]:
-    with Path(path).open("r", encoding=encoding, newline="") as fh:
-        return list(csv.DictReader(fh))
+def _rows(path, encoding: str) -> List[Row]:
+    # a finished results table, a file or a table in a database. these are
+    # small (one row per term, per feature, per probe), so a list is fine
+    return list(tables.read_rows(path, encoding=encoding))
+
+
+def _local_folder(given, default: Path) -> Path:
+    """Where the pictures go: the folder named, or ``default``.
+
+    A ``db://`` address (what a template renders on a database run) is a
+    folder of PNGs, not a table, so it lands under the run's ``db_local/``.
+    """
+    if not given:
+        return Path(default)
+    ref = tables.parse_ref(given)
+    return ref.path if not ref.is_db else ref.local_dir() / ref.name
 
 
 def _num(value: Optional[str]) -> Optional[float]:
@@ -845,15 +858,30 @@ def _section_md(specs: Sequence[CloudSpec], skipped: str = "") -> str:
     return "\n".join(lines)
 
 
-def _sidecar(table_csv: Path) -> Tuple[Optional[Dict[str, List[str]]], Dict[str, str]]:
-    """The assemble step's sets and the source file of each, when written."""
-    sidecar = table_csv.with_name(table_csv.stem + "_sets.json")
-    if not sidecar.is_file():
+def _sidecar(table_csv) -> Tuple[Optional[Dict[str, List[str]]], Dict[str, str]]:
+    """The assemble step's sets and the source file of each, when written --
+    beside a file, or in the database beside the table."""
+    payload = tables.read_sidecar(table_csv, "sets")
+    if not payload:
         return None, {}
-    payload = json.loads(sidecar.read_text(encoding="utf-8"))
     sets = {str(k): [str(c) for c in v] for k, v in (payload.get("sets") or {}).items()}
     sources = {str(k): str(v) for k, v in (payload.get("sources") or {}).items()}
     return sets, sources
+
+
+def _analysis_table(stats_dir: Path):
+    """The analysis table the assemble step wrote: named in its manifest
+    (a file, or a table in a database), else the file beside the stats."""
+    manifest = stats_dir / "assemble_manifest.json"
+    try:
+        named = json.loads(manifest.read_text(encoding="utf-8")).get("table")
+    except (OSError, ValueError):
+        named = None
+    if named:
+        ref = tables.parse_ref(str(named))
+        if tables.exists(ref):
+            return ref
+    return tables.parse_ref(stats_dir / "analysis_table.csv")
 
 
 def _components_by_set(stats_dir: Path, encoding: str) -> Dict[str, List[str]]:
@@ -867,35 +895,41 @@ def _components_by_set(stats_dir: Path, encoding: str) -> Dict[str, List[str]]:
 
 
 def _theme_loadings_for(set_name: str, cols: Sequence[str], sources: Dict[str, str],
-                        stats_dir: Path, encoding: str) -> Optional[Path]:
+                        stats_dir: Path, encoding: str):
     """
     The loadings table that says what this set's features are made of, when
     the set is a model's themes.
 
-    The topic model writes ``<stem>_loadings.csv`` beside its features CSV,
-    whose path the assemble sidecar records. That path is taken as written
-    first, then looked for under the pipeline's folder -- a sidecar written
-    on Windows and read from WSL records a path that does not resolve, and
-    the file is right there under ``features/``. A candidate counts when it
-    has a ``term`` column and a column for one of the set's features.
+    The topic model writes ``<stem>_loadings`` beside its features table --
+    a file beside a file, a database table beside a database table -- and
+    the assemble sidecar records the features table's address. That address
+    is taken as written first, then the loadings are looked for under the
+    pipeline's folder -- a sidecar written on Windows and read from WSL
+    records a path that does not resolve, and the file is right there under
+    ``features/``. A candidate counts when it has a ``term`` column and a
+    column for one of the set's features. Returns a path for a file, a ref
+    for a database table.
     """
-    candidates: List[Path] = []
+    candidates: list = []
     src = sources.get(set_name)
     if src:
-        p = Path(src.replace("\\", "/"))
-        candidates.append(p.with_name(p.stem + "_loadings.csv"))
-    candidates += sorted(stats_dir.parent.rglob(f"{set_name}_loadings.csv"))
-    wanted = {_label(c, set_name) for c in cols}
-    for path in candidates:
         try:
-            if not path.is_file():
+            p = tables.parse_ref(src.replace("\\", "/"))
+            candidates.append(p.sibling(p.stem + "_loadings"))
+        except (TypeError, ValueError):
+            pass
+    candidates += [tables.parse_ref(p)
+                   for p in sorted(stats_dir.parent.rglob(f"{set_name}_loadings.csv"))]
+    wanted = {_label(c, set_name) for c in cols}
+    for ref in candidates:
+        try:
+            if not tables.exists(ref):
                 continue
-            with path.open("r", encoding=encoding, newline="") as fh:
-                header = next(csv.reader(fh), [])
-        except OSError:
+            header = tables.columns_of(ref, encoding=encoding)
+        except (OSError, ValueError):
             continue
         if "term" in header and wanted & set(header):
-            return path
+            return tables.handle(ref)
     return None
 
 
@@ -976,8 +1010,9 @@ def stats_wordclouds(
         return root
 
     announce(on_progress, "choosing the words for each cloud")
-    table_csv = stats_dir / "analysis_table.csv"
-    sets, sources = _sidecar(table_csv) if table_csv.is_file() else (None, {})
+    table_csv = _analysis_table(stats_dir)
+    have_table = tables.exists(table_csv)
+    sets, sources = _sidecar(table_csv) if have_table else (None, {})
     components = _components_by_set(stats_dir, encoding)
     allowed = _feature_filter(sets, components)
 
@@ -1002,9 +1037,9 @@ def stats_wordclouds(
     p = stats_dir / "classifier_coefficients.csv"
     if p.is_file():
         take(p, clouds_for_classifier(_rows(p, encoding), allowed))
-    loadings_cache: Dict[str, Optional[Path]] = {}
+    loadings_cache: Dict[str, Optional[object]] = {}
 
-    def theme_loadings(fs: str) -> Optional[Path]:
+    def theme_loadings(fs: str):
         """Where this set's term-by-topic loadings live, looked up once."""
         if fs not in loadings_cache:
             loadings_cache[fs] = _theme_loadings_for(
@@ -1035,7 +1070,7 @@ def stats_wordclouds(
             for spec in made:
                 spec.inputs = [p, path]
             specs.extend(made)
-    if sets and group_col and table_csv.is_file():
+    if sets and group_col and have_table:
         take(table_csv, clouds_for_frequencies_by_group(
             _rows(table_csv, encoding), sets, group_col=group_col,
             max_words=max_words))
@@ -1067,8 +1102,7 @@ def stats_wordclouds(
                 _rows(path, encoding), named, analysis=analysis,
                 folder=folder_root, set_name=fs, top_words=component_words)
             for s in made:
-                s.inputs = [path] + [t for t in (stats_dir / "analysis_table.csv",)
-                                     if t.is_file()]
+                s.inputs = [path] + ([table_csv] if have_table else [])
             specs.extend(made)
 
     drawn, reused = _draw_all(specs, root, max_words=max_words,
@@ -1118,9 +1152,9 @@ def theme_wordclouds(
     Path
         The output folder; it also holds an ``index.md`` listing the themes.
     """
-    loadings_csv = Path(loadings_csv)
-    folder = Path(out_dir) if out_dir else (
-        loadings_csv.parent / FIGURES_DIR / "topic_model_mem")
+    loadings_csv = tables.parse_ref(loadings_csv)
+    folder = _local_folder(out_dir, loadings_csv.local_dir() / FIGURES_DIR
+                           / "topic_model_mem")
     if not enabled:
         if verbose:
             print("[figures] theme word clouds are off for this run.")
@@ -1132,9 +1166,8 @@ def theme_wordclouds(
         return folder
 
     shares: Dict[str, float] = {}
-    eigen = loadings_csv.with_name(
-        loadings_csv.name.replace("_loadings", "_eigenvalues"))
-    if eigen != loadings_csv and eigen.is_file():
+    eigen = loadings_csv.sibling(loadings_csv.stem.replace("_loadings", "_eigenvalues"))
+    if eigen != loadings_csv and tables.exists(eigen):
         for r in _rows(eigen, encoding):
             v = _num(r.get("pct_variance"))
             if v is not None:
@@ -1193,9 +1226,9 @@ def frequency_wordclouds(
     Path
         The output folder holding ``top_words.png``.
     """
-    freq_csv = Path(freq_csv)
-    folder = Path(out_dir) if out_dir else (
-        freq_csv.parent / FIGURES_DIR / "ngram_frequencies")
+    freq_csv = tables.parse_ref(freq_csv)
+    folder = _local_folder(out_dir, freq_csv.local_dir() / FIGURES_DIR
+                           / "ngram_frequencies")
     if not enabled:
         if verbose:
             print("[figures] the frequency word cloud is off for this run.")
@@ -1249,9 +1282,9 @@ def neighbor_wordclouds(
     Path
         The output folder; it also holds an ``index.md`` listing the probes.
     """
-    neighbors_csv = Path(neighbors_csv)
-    folder = Path(out_dir) if out_dir else (
-        neighbors_csv.parent.parent / FIGURES_DIR / "word_vectors")
+    neighbors_csv = tables.parse_ref(neighbors_csv)
+    folder = _local_folder(out_dir, neighbors_csv.local_dir().parent / FIGURES_DIR
+                           / "word_vectors")
     if not enabled:
         if verbose:
             print("[figures] neighbor word clouds are off for this run.")

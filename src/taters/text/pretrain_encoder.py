@@ -286,19 +286,19 @@ def pretrain_encoder(
         out_model_json.with_name(out_model_json.stem + "_report.md")
     out_model_json.parent.mkdir(parents=True, exist_ok=True)
 
-    import csv
+    from ..helpers import tables
 
-    from ..helpers.csvio import widen_csv_field_limit
-
-    widen_csv_field_limit()
+    # the whole corpus does sit in RAM here, on purpose: the loop below
+    # shuffles it every epoch and the tokenizer/heldout split want all of it.
+    # what we don't hold is the rest of the table -- just the id and the text
     ids: List[str] = []
     texts: List[str] = []
-    with analysis_ready.open("r", newline="", encoding=encoding) as fh:
-        for row in csv.DictReader(fh, delimiter=delimiter):
-            text = (row.get("text") or "").strip()
-            if text:
-                ids.append(str(row.get("text_id", "")))
-                texts.append(text)
+    for row in tables.read_rows(analysis_ready, encoding=encoding, delimiter=delimiter,
+                                columns=["text_id", "text"]):
+        text = (row.get("text") or "").strip()
+        if text:
+            ids.append(str(row.get("text_id", "")))
+            texts.append(text)
     if len(texts) < 2:
         raise ValueError(
             f"only {len(texts)} text(s) with words in them; pretraining an encoder "

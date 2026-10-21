@@ -463,8 +463,14 @@ def analyze_group_differences(
 
     import numpy as np
 
-    table_csv = Path(table_csv)
-    folder = Path(out_dir) if out_dir else table_csv.parent
+    from ..helpers.tables import parse_ref
+
+    # the analysis table may be a file or a table in a database; the
+    # results of this step are bookkeeping and go beside it on disk, or
+    # under `out_dir`
+    table_csv = parse_ref(table_csv)
+    folder = Path(out_dir) if out_dir else (
+        table_csv.path.parent if not table_csv.is_db else Path.cwd() / "stats_results")
     folder.mkdir(parents=True, exist_ok=True)
     main_path = folder / "group_differences.csv"
     pair_path = folder / "group_differences_pairwise.csv"

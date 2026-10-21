@@ -36,13 +36,12 @@ never to the counts the statistics are computed from.
 
 from __future__ import annotations
 
-import csv
 import math
 from pathlib import Path
 from typing import (Callable, Dict, List, Literal, NamedTuple, Optional,
                     Sequence, Tuple, Union)
 
-from ..helpers.atomic import atomic_write
+from ..helpers import tables
 from ..helpers.parallel_map import ordered_parallel_map
 from ..helpers.progress import FlightReporter, announce, count_rows
 from ..helpers.spill_counter import SpillCounter
@@ -416,14 +415,14 @@ def analyze_ngram_frequencies(
         overwrite_existing=overwrite_existing, on_progress=on_progress,
         workers=workers)
 
-    if out_features_csv is None:
-        out_features_csv = Path.cwd() / "features" / "ngram_frequencies" / analysis_ready.name
-    out_features_csv = Path(out_features_csv)
-    out_features_csv.parent.mkdir(parents=True, exist_ok=True)
+    # a file beside the run, or a table in the database the text came from;
+    # see helpers.tables for the one rule
+    out_ref = tables.output_ref(out_features_csv, source=analysis_ready,
+                                default=("features", "ngram_frequencies"))
 
-    if not overwrite_existing and out_features_csv.is_file():
-        print("N-gram frequency output file already exists; returning existing file.")
-        return out_features_csv
+    if not overwrite_existing and tables.exists(out_ref):
+        print("N-gram frequency output already exists; returning existing.")
+        return tables.handle(out_ref)
 
     if engine == "stanza" and (lemmatize or pos_tagged or tokenizer == "stanza"):
         # building the stanza pipeline might download its model, so we name
@@ -465,36 +464,38 @@ def analyze_ngram_frequencies(
                            stanza_lang=stanza_lang, device=device,
                            keep_punctuation=keep_punctuation)
         reporter = FlightReporter(on_progress, total_rows, "counting n-grams")
-        with analysis_ready.open("r", newline="", encoding=encoding) as f:
-            reader = csv.DictReader(f)
-            fields = reader.fieldnames or []
-            if "text_id" not in fields or "text" not in fields:
-                raise ValueError(
-                    f"Expected columns 'text_id' and 'text' in {analysis_ready}; found {fields}"
-                )
+        fields = tables.columns_of(analysis_ready, encoding=encoding)
+        if "text_id" not in fields or "text" not in fields:
+            raise ValueError(
+                f"Expected columns 'text_id' and 'text' in {analysis_ready}; found {fields}"
+            )
 
-            def pairs():
-                for row in reader:
-                    yield (str(row.get("text_id", "") or ""),
-                           str(row.get("text", "") or ""))
+        def pairs():
+            # streamed, whether the text sits in a file or a database table.
+            # one row at a time is the whole point: the counter is the only
+            # thing that grows here
+            for row in tables.read_rows(analysis_ready, encoding=encoding,
+                                        columns=["text_id", "text"]):
+                yield (str(row.get("text_id", "") or ""),
+                       str(row.get("text", "") or ""))
 
-            for result in ordered_parallel_map(
-                    lambda pair: _doc_grams(stream, pair[1], ngram_n,
-                                            min_token_count),
-                    pairs(),
-                    workers=count_workers,
-                    pool_fn=_grams_in_worker,
-                    initializer=_init_gram_worker,
-                    initargs=(stream_args, ngram_n, min_token_count),
-                    on_start=lambda pair: reporter.start(pair[0]),
-                    on_finish=lambda pair: reporter.finish(pair[0])):
-                reporter.consumed()
-                if result is None:
-                    continue
-                n_tokens, doc_counts = result
-                n_docs += 1
-                total_tokens += n_tokens
-                counter.add_doc(doc_counts)
+        for result in ordered_parallel_map(
+                lambda pair: _doc_grams(stream, pair[1], ngram_n,
+                                        min_token_count),
+                pairs(),
+                workers=count_workers,
+                pool_fn=_grams_in_worker,
+                initializer=_init_gram_worker,
+                initargs=(stream_args, ngram_n, min_token_count),
+                on_start=lambda pair: reporter.start(pair[0]),
+                on_finish=lambda pair: reporter.finish(pair[0])):
+            reporter.consumed()
+            if result is None:
+                continue
+            n_tokens, doc_counts = result
+            n_docs += 1
+            total_tokens += n_tokens
+            counter.add_doc(doc_counts)
 
         if n_docs == 0:
             raise ValueError(
@@ -523,9 +524,14 @@ def analyze_ngram_frequencies(
     # "felt (VBD)" at the same frequency land in the same order every run
     kept.sort(key=lambda row: (-row[2], words_of(row[0]), tags_of(row[0])))
 
-    with atomic_write(out_features_csv, newline="", encoding=encoding) as f:
-        writer = csv.writer(f)
-        writer.writerow(header_for(pos_tagged))
+    # the list is a table like any other: a file beside the run, or a table in
+    # the database. the types are known up front, so a database never has to
+    # guess them from the cells
+    hints = {"rank": "int", "ngram": "text", "pos": "text", "phrase_length": "int",
+             "frequency": "int", "documents": "int", "obs_pct": "float",
+             "idf": "float", "npmi": "float", "logdice": "float"}
+    with tables.write_table(out_ref, header_for(pos_tagged), encoding=encoding,
+                            hints=hints) as writer:
         for rank, (gram, n, freq, docs, obs_pct, npmi, logdice) in enumerate(kept, 1):
             row = [
                 rank, words_of(gram), n, freq, docs,
@@ -538,7 +544,7 @@ def analyze_ngram_frequencies(
                 row.insert(2, tags_of(gram))
             writer.writerow(row)
 
-    return out_features_csv
+    return tables.handle(out_ref)
 
 
 # --- CLI ---------------------------------------------------------------------

@@ -43,6 +43,7 @@ import shutil
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Union
 
+from .helpers import tables
 from .helpers.model_spec import (MODEL_WORK_DIR, ModelInfo, describe,
                                  one_model_path, slug)
 from .helpers.cliargs import CliSpec
@@ -122,8 +123,9 @@ def score_with_model(
         (rename one under Settings → Manage saved models).
     feature_csvs
         The feature tables this run produced, joined on ``key_cols`` to find
-        the columns a ridge or classifier was fitted on. Ignored by a model
-        that works from text.
+        the columns a ridge or classifier was fitted on. Files, or tables in
+        a database (``db://<connection>/<table>``). Ignored by a model that
+        works from text.
     metadata_csv
         A table keyed like the feature tables that carries the spreadsheet's
         own columns -- needed only by a model fitted with controls, whose
@@ -156,8 +158,10 @@ def score_with_model(
         analysis-ready table. Exactly one applies; a model that reads
         features ignores all four.
     out_csv
-        Where the scores go. With one model, its scores; default
-        ``features/model_scores/<model name>.csv``. With several, the
+        Where the scores go: a file, or a table in a database. With one
+        model, its scores; default ``features/model_scores/<model name>.csv``
+        (beside feature tables in a database, ``taters/features/model_scores/
+        <model name>`` in the same database). With several, the
         **merged** table -- an outer join of every model's scores on
         ``key_cols``, every score column prefixed ``<model name>__`` so
         two models predicting the same outcome cannot collide -- default
@@ -189,7 +193,8 @@ def score_with_model(
     Returns
     -------
     pathlib.Path
-        The scores: one row per text, with the model's own output columns.
+        The scores: one row per text, with the model's own output columns
+        (the ref, when they are a table in a database).
         A row the model could not score is blank rather than absent, so the
         table still joins back to everything else.
 
@@ -207,18 +212,17 @@ def score_with_model(
     several = len(infos) > 1
     if not several:
         info = infos[0]
-        out_path = Path(out_csv) if out_csv else (
-            Path("features") / "model_scores" / f"{slug(info.name)}.csv")
-        tables = _tables_for(info, feature_csvs)
+        out_ref = _default_out(out_csv, feature_csvs, "model_scores", slug(info.name))
+        chosen = _tables_for(info, feature_csvs)
         # gate first, *then* check whether the scores already exist. if we
         # did it the other way around, a stale scores file sitting next to a
         # feature table that somebody re-measured with different settings
         # would sail right through, and that's exactly how this bites people
         # in real life (re-running a results folder after tweaking something)
-        _check_provenance(info, tables, unverified_ok=unverified_ok,
+        _check_provenance(info, chosen, unverified_ok=unverified_ok,
                           allow_unrecorded=allow_unrecorded, verbose=verbose)
         return _score_one(
-            info, tables, out_path, metadata_csv=metadata_csv, key_cols=key_cols,
+            info, chosen, out_ref, metadata_csv=metadata_csv, key_cols=key_cols,
             keep_inputs=keep_inputs, overwrite_existing=overwrite_existing,
             on_progress=on_progress, verbose=verbose, encoding=encoding,
             rounding=rounding, workers=workers, device=device,
@@ -234,19 +238,18 @@ def score_with_model(
     # before we score anything, because nobody wants a five-model run to
     # die on model #4 after chewing through the first three. so we pick each
     # model's tables, check them all, and complain about everything at once
-    merged_path = Path(out_csv) if out_csv else Path("features") / "model_scores.csv"
-    per_dir = merged_path.parent / merged_path.stem
+    merged_ref = _default_out(out_csv, feature_csvs, "model_scores")
     chosen_tables = []
     problems = []
     for info in infos:
         try:
-            tables = _tables_for(info, feature_csvs)
-            _check_provenance(info, tables, unverified_ok=unverified_ok,
+            chosen = _tables_for(info, feature_csvs)
+            _check_provenance(info, chosen, unverified_ok=unverified_ok,
                               allow_unrecorded=allow_unrecorded, verbose=verbose)
         except ValueError as e:
             problems.append(str(e))
-            tables = []
-        chosen_tables.append(tables)
+            chosen = []
+        chosen_tables.append(chosen)
     if problems:
         if len(problems) == 1:
             raise ValueError(problems[0])
@@ -261,28 +264,56 @@ def score_with_model(
         num_buckets=num_buckets, max_open_bucket_files=max_open_bucket_files,
         tmp_root=tmp_root, recursive=recursive, pattern=pattern, id_from=id_from,
         include_source_path=include_source_path)
+    # each model's own table lives under the merged one's name: a folder
+    # `<stem>/` beside a file, a logical `<stem>/` under a database table
     per_paths = []
-    for info, tables in zip(infos, chosen_tables):
-        per_path = per_dir / f"{slug(info.name)}.csv"
+    for info, chosen in zip(infos, chosen_tables):
+        per_ref = _under(merged_ref, merged_ref.stem, slug(info.name))
         per_paths.append(_score_one(
-            info, tables, per_path, metadata_csv=metadata_csv, key_cols=key_cols,
+            info, chosen, per_ref, metadata_csv=metadata_csv, key_cols=key_cols,
             keep_inputs=keep_inputs, overwrite_existing=overwrite_existing,
             on_progress=on_progress, verbose=verbose, encoding=encoding,
             rounding=rounding, workers=workers, device=device,
             text_input=text_input))
 
-    merged_path.parent.mkdir(parents=True, exist_ok=True)
-    if reusable(merged_path, *per_paths, *(i.path for i in infos),
+    if reusable(merged_ref, *per_paths, *(i.path for i in infos),
                 overwrite_existing=overwrite_existing, verbose=verbose,
                 what="the merged model scores"):
-        return merged_path
+        return tables.handle(merged_ref)
     announce(on_progress, f"merging the scores of {len(infos)} models")
-    _merge_scores(infos, per_paths, merged_path, key_cols=key_cols, encoding=encoding)
-    _merge_unscored(infos, per_paths, merged_path, encoding=encoding)
+    _merge_scores(infos, per_paths, merged_ref, key_cols=key_cols, encoding=encoding)
+    _merge_unscored(infos, per_paths, merged_ref, encoding=encoding)
     if verbose:
-        print(f"[score] {len(infos)} models scored; each in {per_dir}, all in "
-              f"{merged_path} with columns prefixed by the model's name")
-    return merged_path
+        print(f"[score] {len(infos)} models scored; each under "
+              f"{_under(merged_ref, merged_ref.stem, '')}, all in "
+              f"{merged_ref} with columns prefixed by the model's name")
+    return tables.handle(merged_ref)
+
+
+def _default_out(out_csv, feature_csvs, *parts: str) -> tables.TableRef:
+    """
+    Where the scores go when nobody said: ``features/<parts...>.csv`` under
+    the run folder -- or, when the feature tables live in a database and
+    the output was left to us, the same place in that database, under
+    ``taters/features/``. Anything in, anything out, only when asked.
+    """
+    if out_csv:
+        return tables.parse_ref(out_csv)
+    first = next((tables.parse_ref(p) for p in (feature_csvs or ()) if str(p).strip()),
+                 None)
+    if first is not None and first.is_db:
+        return tables.TableRef(profile=first.profile,
+                               logical="/".join(["taters", "features", *parts]))
+    return tables.TableRef(Path("features").joinpath(*parts[:-1]) / f"{parts[-1]}.csv")
+
+
+def _under(ref: tables.TableRef, folder: str, stem: str) -> tables.TableRef:
+    """``<ref's folder>/<folder>/<stem>``: a file beside a file, a
+    database table beside a database table."""
+    if ref.is_db:
+        logical = "/".join(p for p in [*ref.parts[:-1], folder, stem] if p)
+        return tables.TableRef(profile=ref.profile, logical=logical)
+    return tables.TableRef(ref.path.parent / folder / (f"{stem}.csv" if stem else ""))
 
 
 def _models(model_json) -> List[ModelInfo]:
@@ -325,10 +356,10 @@ def _models(model_json) -> List[ModelInfo]:
     return list(unique.values())
 
 
-def _owner_of(path: Path) -> Optional[str]:
+def _owner_of(path) -> Optional[str]:
     """The slug of the model a private feature table was measured for, from
     its place under ``model_inputs/<slug>/``; None for a shared table."""
-    parts = list(Path(path).parts)
+    parts = list(tables.parse_ref(path).parts)
     if MODEL_WORK_DIR in parts:
         at = parts.index(MODEL_WORK_DIR)
         if at + 1 < len(parts) - 1:
@@ -336,7 +367,7 @@ def _owner_of(path: Path) -> Optional[str]:
     return None
 
 
-def _tables_for(info: ModelInfo, feature_csvs) -> List[Path]:
+def _tables_for(info: ModelInfo, feature_csvs) -> List[tables.TableRef]:
     """
     The feature tables *this* model reads, out of everything the run made.
 
@@ -351,12 +382,12 @@ def _tables_for(info: ModelInfo, feature_csvs) -> List[Path]:
     model with no record of its tables (scored under ``allow_unrecorded``)
     gets the shared tables alone.
     """
-    paths = [Path(p) for p in (feature_csvs or ()) if str(p).strip()]
+    paths = [tables.parse_ref(p) for p in (feature_csvs or ()) if str(p).strip()]
     mine = slug(info.name)
     expected = set(info.provenance or {}) | set(info.needs_tables or ())
     if not expected:
         return [p for p in paths if _owner_of(p) is None]
-    chosen: Dict[str, Path] = {}
+    chosen: Dict[str, tables.TableRef] = {}
     for stem in expected:
         own = [p for p in paths if p.stem == stem and _owner_of(p) == mine]
         shared = [p for p in paths if p.stem == stem and _owner_of(p) is None]
@@ -375,91 +406,133 @@ def _tables_for(info: ModelInfo, feature_csvs) -> List[Path]:
     return list(chosen.values()) + extras
 
 
-def _score_one(info: ModelInfo, tables, out_path: Path, *, metadata_csv, key_cols,
-               keep_inputs, overwrite_existing, on_progress, verbose, encoding,
-               rounding, workers, device, text_input) -> Path:
-    """One model to one file: the resume check, then the dispatch by what
+def _score_one(info: ModelInfo, chosen, out_ref: tables.TableRef, *, metadata_csv,
+               key_cols, keep_inputs, overwrite_existing, on_progress, verbose,
+               encoding, rounding, workers, device, text_input):
+    """One model to one table: the resume check, then the dispatch by what
     the model reads. The gate has already run."""
     from .helpers.progress import announce
     from .stats._common import reusable
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    if reusable(out_path, *list(tables or ()), metadata_csv, info.path,
+    if reusable(out_ref, *list(chosen or ()), metadata_csv, info.path,
                 overwrite_existing=overwrite_existing, verbose=verbose,
                 what="the model scores"):
         if verbose:
             print(f"Model scores already exist; returning existing file: "
-                  f"{out_path}")
-        return out_path
+                  f"{out_ref}")
+        return tables.handle(out_ref)
     if verbose:
         print(f"[score] {info.display()} -> {len(info.outputs)} output(s): "
               f"{_few(info.outputs)}")
     announce(on_progress, f"scoring with {info.name}")
     if info.needs == "text":
         return _score_text(
-            info, out_path=out_path, overwrite_existing=overwrite_existing,
+            info, out_ref=out_ref, overwrite_existing=overwrite_existing,
             on_progress=on_progress, verbose=verbose, encoding=encoding,
             rounding=rounding, workers=workers, device=device,
             text_input=text_input)
-    return _score_features(info, feature_csvs=tables, metadata_csv=metadata_csv,
-                           out_path=out_path, key_cols=key_cols,
+    return _score_features(info, feature_csvs=chosen, metadata_csv=metadata_csv,
+                           out_ref=out_ref, key_cols=key_cols,
                            keep_inputs=keep_inputs,
                            overwrite_existing=overwrite_existing,
                            on_progress=on_progress, verbose=verbose,
                            encoding=encoding, rounding=rounding)
 
 
-def _merge_scores(infos: Sequence[ModelInfo], per_paths: Sequence[Path],
-                  merged: Path, *, key_cols, encoding: str) -> None:
+def _merge_scores(infos: Sequence[ModelInfo], per_paths: Sequence[PathLike],
+                  merged: PathLike, *, key_cols, encoding: str) -> None:
     """
     One table from every model's: an outer join on the key columns, rows
     in the first model's order (then any the others alone have), every
     score column prefixed ``<model name>__``.
 
-    Written with ``csv`` directly, not through the statistics' assembler:
-    that one drops columns that are not numbers, and a classifier's
-    predicted class is a word. The dictionary analyzer's convention for
-    many-in-one (``<dictionary>__<column>``), so a table's columns say
-    where each came from without anyone remembering.
+    Written row by row, not through the statistics' assembler: that one
+    drops columns that are not numbers, and a classifier's predicted class
+    is a word. The dictionary analyzer's convention for many-in-one
+    (``<dictionary>__<column>``), so a table's columns say where each came
+    from without anyone remembering.
+
+    The per-model tables are nearly always the same rows in the same order
+    -- each is the inner join of the run's feature tables on one key, and
+    the models read the same tables -- so the merge is a lockstep walk down
+    all of them at once, holding one row from each. Only when the keys do
+    not line up (two models reading different tables, one of which lost
+    rows) does it fall back to indexing the rows by key; those are score
+    tables, a few numbers per row, never text.
     """
-    import csv
-
-    from .helpers.atomic import atomic_write
-
     keys = [str(k) for k in key_cols]
+    refs = [tables.parse_ref(p) for p in per_paths]
     header: List[str] = list(keys)
-    order: List[tuple] = []
-    rows: Dict[tuple, Dict[str, str]] = {}
-    for info, path in zip(infos, per_paths):
+    prefixes: List[str] = []
+    fields_of: List[List[str]] = []
+    for info, ref in zip(infos, refs):
         prefix = f"{slug(info.name)}__"
-        with Path(path).open("r", newline="", encoding=encoding) as fh:
-            reader = csv.DictReader(fh)
-            fields = reader.fieldnames or []
-            present_keys = [k for k in keys if k in fields]
+        fields = [c for c in tables.columns_of(ref, encoding=encoding) if c not in keys]
+        header += [prefix + c for c in fields]
+        prefixes.append(prefix)
+        fields_of.append(fields)
+    hints = {k: "text" for k in keys}
+
+    def _key(row: Dict[str, str]) -> tuple:
+        return tuple(row.get(k, "") for k in keys)
+
+    if _aligned(refs, keys, encoding=encoding):
+        with tables.write_table(merged, header, encoding=encoding, hints=hints) as writer:
+            readers = [tables.read_rows(ref, encoding=encoding) for ref in refs]
+            for rows in zip(*readers):
+                key = _key(rows[0])
+                out = dict(zip(keys, key))
+                for row, prefix, fields in zip(rows, prefixes, fields_of):
+                    if _key(row) != key:
+                        raise RuntimeError(
+                            f"the per-model score tables stopped lining up at "
+                            f"{key!r} after they were checked; was one rewritten "
+                            f"during the merge?")
+                    for col in fields:
+                        out[prefix + col] = row.get(col, "")
+                writer.writerow(out)
+        return
+
+    order: List[tuple] = []
+    rows_by_key: Dict[tuple, Dict[str, str]] = {}
+    for ref, prefix, fields in zip(refs, prefixes, fields_of):
+        for row in tables.read_rows(ref, encoding=encoding):
+            key = _key(row)
+            if key not in rows_by_key:
+                rows_by_key[key] = dict(zip(keys, key))
+                order.append(key)
             for col in fields:
-                if col not in keys:
-                    header.append(prefix + col)
-            for row in reader:
-                key = tuple(row.get(k, "") for k in present_keys) + tuple(
-                    "" for k in keys if k not in present_keys)
-                if key not in rows:
-                    rows[key] = dict(zip(keys, key))
-                    order.append(key)
-                for col in fields:
-                    if col not in keys:
-                        rows[key][prefix + col] = row.get(col, "")
-    with atomic_write(merged, mode="w", newline="", encoding=encoding) as out:
-        writer = csv.writer(out)
-        writer.writerow(header)
+                rows_by_key[key][prefix + col] = row.get(col, "")
+    with tables.write_table(merged, header, encoding=encoding, hints=hints) as writer:
         for key in order:
-            writer.writerow([rows[key].get(col, "") for col in header])
+            writer.writerow(rows_by_key[key])
 
 
-def _merge_unscored(infos: Sequence[ModelInfo], per_paths: Sequence[Path],
-                    merged: Path, *, encoding: str) -> None:
+def _aligned(refs: Sequence[tables.TableRef], keys: Sequence[str], *,
+             encoding: str) -> bool:
+    """Whether every table has the same keys in the same order -- read
+    from the key columns alone, so the check costs a scan and no memory."""
+    from itertools import zip_longest
+
+    if len(refs) < 2:
+        return True
+    readers = [tables.read_rows(ref, columns=keys, encoding=encoding) for ref in refs]
+    for rows in zip_longest(*readers):
+        if any(r is None for r in rows):
+            return False
+        first = tuple(rows[0].get(k, "") for k in keys)
+        if any(tuple(r.get(k, "") for k in keys) != first for r in rows[1:]):
+            return False
+    return True
+
+
+def _merge_unscored(infos: Sequence[ModelInfo], per_paths: Sequence[PathLike],
+                    merged: PathLike, *, encoding: str) -> None:
     """The per-model unscored-row accountings as one file with a leading
     ``model`` column -- written only when something went unscored, removed
-    otherwise, as the single-model file is."""
+    otherwise, as the single-model file is. Beside a database table it is
+    the ``unscored`` sidecar, with the model as the first column of each
+    entry."""
     import csv
 
     from .helpers.atomic import atomic_write
@@ -469,7 +542,16 @@ def _merge_unscored(infos: Sequence[ModelInfo], per_paths: Sequence[Path],
     for info, path in zip(infos, per_paths):
         for reason, detail, n in read_unscored(path, encoding=encoding):
             entries.append((slug(info.name), reason, detail, n))
-    target = unscored_path(merged)
+    merged_ref = tables.parse_ref(merged)
+    if merged_ref.is_db:
+        if not entries:
+            tables.delete_sidecar(merged_ref, "unscored")
+            return
+        tables.write_sidecar(merged_ref, "unscored", {
+            "columns": ["model", "reason", "detail", "rows"],
+            "entries": [[m, r, d, int(n)] for m, r, d, n in entries]})
+        return
+    target = unscored_path(merged_ref.path)
     if not entries:
         target.unlink(missing_ok=True)
         return
@@ -480,9 +562,9 @@ def _merge_unscored(infos: Sequence[ModelInfo], per_paths: Sequence[Path],
             writer.writerow([model, reason, detail, str(n)])
 
 
-def _score_text(info: ModelInfo, *, out_path, overwrite_existing,
+def _score_text(info: ModelInfo, *, out_ref, overwrite_existing,
                 on_progress, verbose, encoding, rounding, workers, device,
-                text_input) -> Path:
+                text_input):
     """
     A model that reads text: hand it the text and let it do its own reading.
 
@@ -506,15 +588,15 @@ def _score_text(info: ModelInfo, *, out_path, overwrite_existing,
     if text_input.get("pattern"):
         kwargs["pattern"] = text_input["pattern"]
     return scorer(info.type_id)(
-        model_json=str(info.path), out_features_csv=out_path,
+        model_json=str(info.path), out_features_csv=tables.handle(out_ref),
         overwrite_existing=overwrite_existing, on_progress=on_progress,
         workers=workers or 0, device=device, encoding=encoding,
         rounding=rounding, **kwargs)
 
 
 def _score_features(info: ModelInfo, *, feature_csvs, metadata_csv,
-                    out_path, key_cols, keep_inputs, overwrite_existing,
-                    on_progress, verbose, encoding, rounding) -> Path:
+                    out_ref, key_cols, keep_inputs, overwrite_existing,
+                    on_progress, verbose, encoding, rounding):
     """
     A model that reads features: join what this run made, then score.
 
@@ -524,7 +606,7 @@ def _score_features(info: ModelInfo, *, feature_csvs, metadata_csv,
     """
     from .stats.assemble import assemble_analysis_table
 
-    paths = [Path(p) for p in feature_csvs if str(p).strip()]
+    paths = [tables.parse_ref(p) for p in feature_csvs if str(p).strip()]
     if not paths:
         raise ValueError(
             f"{info.display()} scores feature columns, and this run has no "
@@ -532,7 +614,13 @@ def _score_features(info: ModelInfo, *, feature_csvs, metadata_csv,
             + f" It needs {len(info.inputs)} column(s): "
               f"{_few(info.inputs)}.")
 
-    work = out_path.parent / f"{out_path.stem}_inputs"
+    # the join's work: its manifest is a small json and lives on disk either
+    # way (beside a file, under db_local/ for a database table); the joined
+    # table itself goes wherever the scores go, so a database run leaves no
+    # stray CSV behind
+    work = out_ref.local_dir() / f"{out_ref.stem}_inputs"
+    work_table = tables.TableRef(work / "scoring_table.csv") if not out_ref.is_db \
+        else _under(out_ref, f"{out_ref.stem}_inputs", "scoring_table")
     # a categorical control shows up as the words the researcher typed, so
     # we have to tell the join to keep them. otherwise they'd get dropped as
     # "non-numeric", and a model fitted with `gender` could never be scored
@@ -561,7 +649,7 @@ def _score_features(info: ModelInfo, *, feature_csvs, metadata_csv,
             metadata_cols=[c for c in controls if c not in from_features]
             if metadata_csv else (),
             text_cols=carry, out_dir=work,
-            out_csv=work / "scoring_table.csv",
+            out_csv=work_table,
             overwrite_existing=True, on_progress=on_progress,
             verbose=False, encoding=encoding)
         lost = _report_join(work, verbose=verbose)
@@ -579,32 +667,31 @@ def _score_features(info: ModelInfo, *, feature_csvs, metadata_csv,
         # -- we once had a scores file carrying `vocd_50` and `gender` as if
         # they were identifiers.
         scored = apply_fn(
-            model_json=str(info.path), input_csv=table, out_csv=out_path,
+            model_json=str(info.path), input_csv=table, out_csv=tables.handle(out_ref),
             overwrite_existing=True, on_progress=on_progress,
             verbose=verbose, encoding=encoding, rounding=rounding,
             id_cols=list(key_cols))
-        _account_for_join(out_path, lost, encoding=encoding)
+        _account_for_join(out_ref, lost, encoding=encoding)
     finally:
         if not keep_inputs:
             shutil.rmtree(work, ignore_errors=True)
+            if out_ref.is_db:
+                tables.delete_table(work_table)
     return scored
 
 
 def _columns_of(paths, *, encoding: str) -> set:
     """Every column name across these tables, by their headers alone."""
-    import csv
-
     have: set = set()
     for path in paths:
         try:
-            with Path(path).open("r", encoding=encoding, newline="") as fh:
-                have.update(next(csv.reader(fh), []))
-        except OSError:
+            have.update(tables.columns_of(path, encoding=encoding))
+        except (OSError, FileNotFoundError):
             continue
     return have
 
 
-def _check_inputs(info: ModelInfo, table: Path, *, encoding: str) -> None:
+def _check_inputs(info: ModelInfo, table, *, encoding: str) -> None:
     """
     Name the missing columns before the scoring does, and say what to do.
 
@@ -613,10 +700,7 @@ def _check_inputs(info: ModelInfo, table: Path, *, encoding: str) -> None:
     it is a feature step that was not selected. Controls are excluded from
     the check because the scoring rebuilds those from the source columns.
     """
-    import csv
-
-    with Path(table).open("r", encoding=encoding, newline="") as fh:
-        have = set(next(csv.reader(fh), []))
+    have = set(tables.columns_of(table, encoding=encoding))
     controls = {str(e.get("column")) for e in _control_spec(info)}
     from_controls = {name for name in info.inputs
                      if name.split("=")[0] in controls}
@@ -677,7 +761,7 @@ def _check_provenance(info: ModelInfo, feature_csvs, *, unverified_ok,
 
     actual = {}
     for path in feature_csvs:
-        path = Path(path)
+        path = tables.parse_ref(path)
         # the same shape the model stored at fit time, from the same
         # function. we used to hand-build a copy here, and it left out the
         # chain digest -- so the one comparison that notices differently
@@ -768,7 +852,7 @@ def _report_join(work: Path, *, verbose: bool) -> list:
     return lost
 
 
-def _account_for_join(out_path: Path, lost, *, encoding: str) -> None:
+def _account_for_join(out_path, lost, *, encoding: str) -> None:
     """
     Add the rows the join lost to the scorer's unscored-row accounting.
 

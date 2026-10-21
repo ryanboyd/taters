@@ -245,6 +245,9 @@ class Prompter(Protocol):
               headers: Sequence[str]) -> None: ...
     def text(self, question: str, *, default: str = "") -> str: ...
     def path(self, question: str, *, default: str = "") -> str: ...
+    #: typed with dots, and never written to the session log, the run log or
+    #: anywhere else: a password lives in memory until Taters closes
+    def secret(self, question: str) -> str: ...
     def confirm(self, question: str, *, default: bool = True) -> bool: ...
     # `navigate` and `breadcrumb` are here for the file browsers. on enter, we
     # show `navigate` the pointed value and it either hands back a replacement
@@ -287,7 +290,10 @@ class Prompter(Protocol):
     # a running count while something is read. yields a callback the reader
     # calls with the number done so far; renderers with nowhere to draw it
     # ignore the count and just say the work is happening.
-    def scanning(self, label: str, *, unit: str = "rows"): ...
+    def scanning(self, label: str, *, unit: str = "rows"):
+        """A spinner for a wait of unknown length; yields a callback that takes
+        a count so far (an int) or the name of the step underway (a str)."""
+        ...
 
     # progress reporting. renderers with nowhere to put it (the plain
     # questionary one, the scripted one) just ignore it, so the wizard can call
@@ -486,8 +492,13 @@ class QuestionaryPrompter:
         with bar:
             task = bar.add_task(label, total=None)
 
-            def seen(count: int) -> None:
-                bar.update(task, description=f"{label} — {count:,} {unit}")
+            def seen(value) -> None:
+                # a count climbs; a sentence says which step this is now.
+                # either way the line never just sits there
+                if isinstance(value, str):
+                    bar.update(task, description=f"{label} — {value}")
+                else:
+                    bar.update(task, description=f"{label} — {value:,} {unit}")
 
             yield seen
 
@@ -622,6 +633,12 @@ class QuestionaryPrompter:
         # is the single biggest quality-of-life win in the whole wizard.
         return self._log_answer("ask", question, self._ask(
             self._q.path(question, default=default, style=self._style)))
+
+    def secret(self, question: str) -> str:
+        # the question is logged, the answer is not. a password in the
+        # session log would sit on disk beside the pipeline forever
+        self._log_answer("ask", question, "********")
+        return str(self._ask(self._q.password(question, style=self._style)))
 
     def confirm(self, question: str, *, default: bool = True) -> bool:
         return self._log_answer("ask", question, self._ask(
@@ -843,10 +860,17 @@ class ScriptedPrompter:
 
     @contextmanager
     def scanning(self, label: str, *, unit: str = "rows"):
-        """Recorded, so a test can see the file was read out loud."""
+        """Recorded, so a test can see the file was read out loud -- and
+        each step a long wait names, as ``<label> — <step>`` lines."""
         self.output.append(label)
         self.scanned: List[int] = getattr(self, "scanned", [])
-        yield self.scanned.append
+
+        def seen(value) -> None:
+            if isinstance(value, str):
+                self.output.append(f"{label} — {value}")
+            else:
+                self.scanned.append(value)
+        yield seen
 
     def note(self, text: str, *, style: str = "", wrap: bool = True) -> None:
         self.output.append(text)
@@ -866,6 +890,17 @@ class ScriptedPrompter:
 
     def path(self, question: str, *, default: str = "") -> str:
         return self._next("path", question, default)
+
+    def secret(self, question: str) -> str:
+        """The answer is consumed and returned, and recorded nowhere: not in
+        `output`, not in `presented` -- the point of a secret."""
+        self.asked.append(("secret", question))
+        if self._cursor >= len(self.answers):
+            raise AssertionError(f"ScriptedPrompter ran out of answers at question "
+                                 f"{len(self.asked)}: [secret] {question!r}")
+        value = self.answers[self._cursor]
+        self._cursor += 1
+        return str(value)
 
     def confirm(self, question: str, *, default: bool = True) -> bool:
         return self._next("confirm", question, default)

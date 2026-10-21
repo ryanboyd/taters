@@ -71,6 +71,7 @@ nav:
       - Running Analyses: guides/running-analyses.md
       - Statistics: guides/stats.md
       - Utilities & Helpers: guides/utilities.md
+      - Working with a Database: guides/databases.md
       - "Pipelines: All-in-One Analyses": guides/pipelines.md
 
 
