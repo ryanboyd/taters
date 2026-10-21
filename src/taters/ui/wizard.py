@@ -1825,6 +1825,12 @@ class AnalysisSpec:
     #: Recipe ids a filter answer implies -- asking to filter on word count
     #: is asking for the step that counts words.
     extra_features: List[str] = field(default_factory=list)
+    #: Reduce the features to principal components before a prediction
+    #: model is fitted: "off", "all", or the feature sets to reduce. Asked
+    #: at the stage when a wide table (embeddings, a document-term matrix)
+    #: feeds a ridge or a classifier, which is where it decides whether the
+    #: model fits signal or noise; tunable per analysis on the options screen.
+    pca: Any = "off"
     #: Why the stage asked nothing, when it asked nothing. Shown on the rail
     #: so the answer is still there several screens later.
     why_not: str = ""
@@ -2277,6 +2283,16 @@ def _cycler(kinds: Dict[str, str], insp: Inspection,
         # would silently drop the value count off it.
         return _aligned(value, new, columns or [value], counts=counts)
     return cycle
+
+
+#: The analyses that fit a model, where reducing a wide table first is the
+#: difference between a model and a lookup of the training rows.
+_PREDICTION_ANALYSES = frozenset({"stats_ridge_fit", "stats_classify_fit"})
+
+#: Steps whose table is hundreds of columns wide: embeddings and matrices.
+_WIDE_STEPS = frozenset({"transformer_embeddings", "sentence_embeddings",
+                         "gather_transformer_embeddings", "gather_sentence_embeddings",
+                         "doc_term_matrix", "word_vectors_train", "word_vectors_apply"})
 
 
 def ask_analysis(prompter: Prompter, src: SourceSpec,
@@ -2854,6 +2870,35 @@ def ask_analysis(prompter: Prompter, src: SourceSpec,
             default="separate" if spec.per_table else "together")) == "separate"
         return True
 
+    def ask_reduce() -> bool:
+        """
+        Principal components before a prediction model, asked where it
+        matters: a ridge or a classifier over a table hundreds of columns
+        wide. A real session built a ridge over 768 embedding dimensions and
+        went looking for "PCA"; the setting was there, on the options screen
+        under a name that never said PCA. Now it is a question of its own.
+        """
+        if state["stop"] or not any(a in _PREDICTION_ANALYSES for a in spec.analyses):
+            spec.pca = "off"
+            return False
+        feeding = [(r, name) for r, name in tables
+                   if not state["chosen"] or r.id in state["chosen"]]
+        wide = [(r, name) for r, name in feeding if r.id in _WIDE_STEPS]
+        if not wide:
+            spec.pca = "off"
+            return False
+        which = ", ".join(name for _r, name in wide)
+        prompter.reason(
+            f"A model over hundreds of columns ({which}) fits noise as readily as "
+            f"signal. Principal components keep what varies across texts and drop "
+            f"the rest.")
+        current = spec.pca if spec.pca != "off" else (
+            "all" if len(feeding) == len(wide) else [name for _r, name in wide])
+        spec.pca = _pick_pca(prompter, "Reduce the features to principal components (PCA) "
+                                       "before fitting", current,
+                             [(name, r.label) for r, name in feeding])
+        return True
+
     def ask_adjust() -> bool:
         if state["stop"] or not any(
                 "p_adjust" in _recipes.by_id(a).with_ for a in spec.analyses):
@@ -2887,7 +2932,7 @@ def ask_analysis(prompter: Prompter, src: SourceSpec,
     # decides what a row *is*, and those questions read that.
     _ask_in_order([ask_which, ask_averaging, ask_group, ask_outcomes,
                    ask_classes, ask_controls_gate, ask_which_controls,
-                   vet_controls, ask_tables, ask_together, ask_adjust,
+                   vet_controls, ask_tables, ask_together, ask_reduce, ask_adjust,
                    ask_row_filters])
     return spec
 
@@ -2991,6 +3036,8 @@ def apply_analysis(spec: AnalysisSpec, src: SourceSpec,
         carry += [c for c in spec.control_cols
                   if c not in carry and c != GROUP_SIZE_COL]
 
+    if spec.pca and spec.pca != "off":
+        var_values["stats_pca"] = spec.pca
     if carry:
         var_values["stats_meta_carry"] = carry
     if agg:

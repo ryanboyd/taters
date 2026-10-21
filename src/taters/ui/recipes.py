@@ -745,7 +745,10 @@ SETTING_LABELS: Dict[str, str] = {
     "joiner": "text joiner",
     "pattern": "which files to read",
     "weighting": "how cells are counted",
-    "pca": "reduce to components",
+    "pca": "PCA — reduce to principal components",
+    "pca_components": "PCA: how many components",
+    "pca_rotation": "PCA: rotate the components (varimax)",
+    "pca_retain": "PCA: how the count is chosen",
     "zscore": "standardize predictors",
     "stratify": "balance the folds",
     "pooling": "how tokens become one vector",
@@ -1302,9 +1305,10 @@ _STATS_CONTROL_VAR: Dict[str, dict] = {
 _STATS_PCA_VARS: Dict[str, dict] = {
     "stats_pca": {
         "default": "off",
-        "desc": "Analyze components instead of the raw measures: off, all "
-                "(reduce every feature set), or the name(s) of the feature "
-                "sets to reduce. Naming some is the useful case -- a hundred "
+        "desc": "Principal components (PCA): analyze components instead of "
+                "the raw measures. off, all (reduce every feature set), or "
+                "the name(s) of the feature sets to reduce. Naming some is "
+                "the useful case -- 768 embedding dimensions or a hundred "
                 "dictionary categories are worth reducing and eight "
                 "readability indices are not.",
     },

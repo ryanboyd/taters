@@ -249,6 +249,17 @@ which makes coefficients comparable to each other (each is per standard
 deviation); turn it off and they stay in the features' own units, where a
 coefficient on `char_count` and one on `ttr` are not remotely comparable.
 
+Two R² columns come out of the same out-of-fold predictions, scored two
+ways. `cv_r2` pools them: every row's held-out prediction against its
+observed value, one R² over the lot, and the number to report. `cv_r2_folds`
+scores each fold's held-out rows on their own and averages the folds; it
+usually sits a little lower, because a small fold's own mean soaks up part
+of the signal, and `cv_r2_folds_se` beside it is the standard error of that
+mean across folds — the uncertainty to read `cv_r2` against. Far apart, or
+with a large standard error, the folds disagree and the pooled number is
+being carried by some of them. `cv_r` and `cv_r_folds` are the same pair for
+the correlation.
+
 A ranking is an invitation, so read the spread beside it. The report's
 feature-set comparison carries the standard error of each score across folds,
 and a gap smaller than roughly twice those is not a difference between

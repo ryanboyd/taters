@@ -175,6 +175,7 @@ class Harness:
             True, ["age", "gender"],        # gender holds words, so labels already
             ["readability", "lexical_richness", "cohesion", "parts_of_speech",
              "doc_term_matrix", "topic_model_mem"], "together",
+            "off",                          # the matrix feeds a ridge: PCA? not here
             "fdr_bh",
             True, ["generated"], [wc], ">=", "20",
             ":done", "Flow A", "save",
@@ -654,6 +655,7 @@ class Harness:
             ["word_vectors_train"], "row",
             ["stats_ridge_fit"], False, ["openness"],
             False,                  # no controls
+            "off",                  # a wide table feeds a ridge: PCA? not here
             False,                  # no row filter (one set, so no set question/FDR)
             ":done", "Flow V3", "save",
         ])

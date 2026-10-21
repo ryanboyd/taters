@@ -315,9 +315,12 @@ control list follows from it.
 ## Changing options
 
 A setting that only matters under another setting is shown only then, and
-indented under it: the PCA component count and rotation appear under `pca`
-once you turn it on, the Stanza language under `engine` once you choose
-Stanza. The rule is written once per setting in the catalog, one evaluator
+indented under it: the PCA component count and rotation appear under *PCA —
+reduce to principal components* once you turn it on, the Stanza language
+under `engine` once you choose Stanza. (PCA is also asked outright at the
+statistics stage when a wide table, such as embeddings or a document-term
+matrix, feeds a prediction model, since that is where it decides whether the
+model learns signal or noise.) The rule is written once per setting in the catalog, one evaluator
 applies it to every menu (a step's own and the shared section alike), and it
 fails open — a gate the app cannot read shows the row. A value you set while
 a row was visible is kept when the row hides and is there again when it

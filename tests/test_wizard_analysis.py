@@ -1005,6 +1005,7 @@ def test_a_document_term_matrix_can_carry_the_statistics(tmp_path, study_csv):
         ["doc_term_matrix"], "row",
         ["stats_ridge_fit"], False, ["openness"],
         False,  # no control variables
+        "off",  # a matrix feeding a ridge: reduce to components? not here
         False,  # no filters
         ":done", "Study", "save",
     ])
@@ -2464,3 +2465,60 @@ def test_groups_that_are_all_the_same_size_are_nothing_to_hold_constant(
 
     assert {c.value for c in offered} == {"conv", "speaker"}
     assert "group_count" not in {c.value for c in offered}
+
+
+def _wide_sheet(tmp_path):
+    import random
+
+    rng = random.Random(5)
+    sheet = tmp_path / "study.csv"
+    with sheet.open("w", encoding="utf-8") as fh:
+        fh.write("pid,openness,text\n")
+        for i in range(30):
+            words = " ".join(rng.choice(["potato", "gravy", "butter", "fluffy"]) for _ in range(12))
+            fh.write(f"p{i},{rng.gauss(3, 1):.3f},{words}\n")
+    return sheet
+
+
+def test_a_ridge_over_embeddings_is_asked_about_pca_at_the_stage(tmp_path):
+    """From a real session: a ridge over 768 embedding dimensions, and no
+    "PCA" anywhere in the questions -- the setting lived on the options
+    screen under a name that never said PCA. Now it is asked where it
+    matters, and written into the preset as the shared setting."""
+    from taters.ui import wizard as wiz
+    from taters.ui.browse import _TYPE
+    from taters.ui.prompts import ScriptedPrompter
+
+    sheet = _wide_sheet(tmp_path)
+    p = ScriptedPrompter([
+        "csv", _TYPE, str(sheet), ["text"], True, ["pid"],
+        ["transformer_embeddings"], "row", "distilroberta-base",
+        ["stats_ridge_fit"], ["openness"],
+        "all",                            # reduce to principal components: all
+        False,                            # ignore any rows? no
+        ":done",                          # the options screen: nothing to change
+        "Kodis", "save",
+    ])
+    result = wiz.run_wizard(p, cwd=tmp_path)
+    asked = [q for _k, q in p.asked]
+    assert "Reduce the features to principal components (PCA) before fitting:" in asked
+    assert "Principal components keep what varies" in " ".join(p.reasons)
+    assert result.preset["vars"]["stats_pca"] == "all"
+    pca_step = next(s for s in result.preset["steps"] if s["call"].endswith("fit_ridge_csv"))
+    assert pca_step["with"]["pca"] == "{{var:stats_pca}}", "the ridge reads the shared setting"
+
+
+def test_a_ridge_over_narrow_features_is_not_asked_about_pca(tmp_path):
+    from taters.ui import wizard as wiz
+    from taters.ui.browse import _TYPE
+    from taters.ui.prompts import ScriptedPrompter
+
+    sheet = _wide_sheet(tmp_path)
+    p = ScriptedPrompter([
+        "csv", _TYPE, str(sheet), ["text"], True, ["pid"],
+        ["readability"], "row",
+        ["stats_ridge_fit"], ["openness"], False, ":done", "Study", "save",
+    ])
+    result = wiz.run_wizard(p, cwd=tmp_path)
+    assert not any("principal components" in q for _k, q in p.asked)
+    assert "stats_pca" not in result.preset["vars"] or result.preset["vars"]["stats_pca"] == "off"
