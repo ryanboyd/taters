@@ -282,6 +282,7 @@ def _db_preflight(vars_ctx: Dict[str, Any], say) -> None:
         return
     from ..helpers import db, sources, tables
 
+    dest = tables.parse_ref(root + "x") if root.startswith("db://") else None
     for name in dict.fromkeys(names):
         try:
             profile = db.get_profile(name)
@@ -293,17 +294,18 @@ def _db_preflight(vars_ctx: Dict[str, Any], say) -> None:
         db.password_for(profile)
         if name == connection and vars_ctx.get("source"):
             spec = sources.coerce(vars_ctx["source"], connection=connection)
-            session = tables._session(tables.parse_ref(f"db://{name}/x"))
+            session = tables._session(sources.anchor(spec))
             try:
                 sources.resolve_columns(spec, session)
             except ValueError as e:
                 raise ValueError(f"{e} (it was there when this pipeline was made). "
                                  f"Nothing was measured. If it was renamed, make the "
                                  f"pipeline again with the new name.") from None
-        if root.startswith(f"db://{name}/"):
-            probe = db.probe(profile)
+        if dest is not None and dest.profile == name:
+            target = db.for_database(profile, dest.database)
+            probe = db.probe(target)
             if not probe.can_write:
-                raise ValueError(f"the results are to go to {name}, but "
+                raise ValueError(f"the results are to go to {target.where}, but "
                                  f"{profile.user or 'this account'} cannot create tables "
                                  f"there. Pick another destination, or ask whoever "
                                  f"manages the database to grant CREATE.")

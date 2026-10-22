@@ -89,7 +89,9 @@ pytest tests/test_db_live.py
 ```
 
 For the tunnel, an ssh server beside them that can reach both by name
-(`tests/sshd.Dockerfile` builds one from alpine with a key you generate):
+(`tests/sshd.Dockerfile` builds one from alpine with a key you generate; it
+also runs a MariaDB on its local socket where the user `taters` logs in by
+socket authentication, for the no-password path):
 
 ```bash
 ssh-keygen -q -t ed25519 -N "" -f /tmp/taters-ssh-key

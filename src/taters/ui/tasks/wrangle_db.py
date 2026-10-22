@@ -31,59 +31,191 @@ def _in_order(steps):
     _ask_in_order(steps)
 
 
+def _file_stem(table: str) -> str:
+    """A table's name as a file name: separators and dots that could point
+    elsewhere become underscores; the name otherwise stays recognizable."""
+    import re
+
+    stem = re.sub(r"[\\/:*?\"<>|\x00]", "_", str(table)).strip()
+    stem = re.sub(r"^\.+", "_", stem)
+    return stem or "table"
+
+
 def db_out_flow(ctx: TaskContext) -> Optional[Path]:
     """
-    Tables out of a database, step by step: each table as its own
-    spreadsheet, or several joined into one; every column or chosen ones;
-    where the files go. The join path is the run's own column conversation.
+    Tables out of a database, step by step. The plain copy -- each table as
+    its own spreadsheet -- starts from which connection(s), then which
+    database(s) on them, then one screen of their tables arranged under
+    each database, where ticking a database takes every table in it; then
+    every column or chosen ones; then where the files go. The join path is the run's own column conversation, on
+    one database.
     """
     from ..browse import browse_for_folder
+    from ..db_source import login, open_database
     from ..prompts import ask_at_least_one
+    from .db_connections import INSTALL_DRIVERS, add_connection, driver_missing
 
     prompter = ctx.prompter
-    state: Dict[str, Any] = {"picked": None, "shape": "", "names": [], "keep_all": True,
-                             "kept": None, "folder": None, "replace": False,
-                             "chosen": None, "only_tables": None, "base": "", "join": None}
-
-    def ask_connection() -> bool:
-        state["picked"] = pick_connection(prompter, need_write=False)
-        state["tables"] = list_tables(prompter, state["picked"])
-        return True
+    state: Dict[str, Any] = {"shape": "", "conns": [], "logged_by": {}, "dbs": [],
+                             "picked_by": {}, "tables_by": {},
+                             "names": [], "keep_all": True, "kept": {}, "folder": None,
+                             "replace": False,
+                             "picked": None, "chosen": None, "only_tables": None,
+                             "base": "", "join": None}
 
     def ask_shape() -> bool:
         prompter.reason("A plain copy, one spreadsheet per table -- or columns from "
                         "several tables beside each other, matched on an ID they share.")
         state["shape"] = str(prompter.select("What do you want out?", [
             Choice("dump", "Each table as its own spreadsheet",
-                   "One CSV file per table, named after it"),
+                   "One CSV file per table, named after it; from one database or several"),
             Choice("join", "One spreadsheet from several tables, joined",
-                   "Pick columns across tables; the join is worked out for you"),
+                   "Pick columns across one database's tables; the join is worked out for you"),
         ], default=state["shape"] or None))
         return True
 
     # ---- each table as its own file --------------------------------------
+    def ask_connections() -> bool:
+        if state["shape"] != "dump":
+            return False
+        while True:
+            profiles = db.list_profiles()
+            if not profiles:
+                prompter.reason("Taters needs to know where the database server is and "
+                                "how to log in. This is saved for next time; the "
+                                "password is not.")
+                if add_connection(prompter, test=False) is None:
+                    raise GoBack()
+                continue
+            rows = []
+            for pr in profiles:
+                missing = driver_missing(pr.dialect)
+                rows.append(Choice(pr.name, pr.name, pr.label(), checked=pr.name in state["conns"],
+                                   disabled=(f"needs {INSTALL_DRIVERS}" if missing else "")))
+            rows.append(Choice("\x00add", "+ Add a connection…",
+                               "A server and a login, or a database file"))
+            picked = list(ask_at_least_one(prompter, "Which connection(s)?", rows,
+                                           thing="one connection"))
+            if "\x00add" in picked:
+                add_connection(prompter, test=False)
+                state["conns"] = [n for n in picked if n != "\x00add"]
+                continue
+            # log in to each now, so a wrong password is found here and the
+            # databases can be listed on the next screen
+            logged_by: Dict[str, Any] = {}
+            for name in picked:
+                found = state["logged_by"].get(name) or login(prompter, db.get_profile(name))
+                if found is None:
+                    break
+                logged_by[name] = found
+            else:
+                if picked != state["conns"]:
+                    state["dbs"], state["names"], state["kept"] = [], [], {}
+                state["conns"] = picked
+                state["logged_by"] = logged_by
+                return True
+
+    def ask_databases() -> bool:
+        """Which database(s) on each connection: one screen, the databases
+        arranged under their connection, a SQLite file taken as is."""
+        if state["shape"] != "dump":
+            return False
+        rows = []
+        ticked = set(state["dbs"])
+        auto = []
+        for name in state["conns"]:
+            logged = state["logged_by"][name]
+            if logged.profile.dialect == "sqlite":
+                auto.append(f"{name}/main")
+                continue
+            listed = logged.databases
+            if not listed:
+                prompter.note(f"  {name}: this login cannot list any databases; one can "
+                              f"still be typed in.", style="yellow")
+            rows.append(Choice(f"\x00conn:{name}", name, f"every database on {name}",
+                               annotation=f"{len(listed)} databases",
+                               children=tuple(f"{name}/{d}" for d in listed)))
+            for d in listed:
+                rows.append(Choice(f"{name}/{d}", d, checked=f"{name}/{d}" in ticked, depth=1))
+            rows.append(Choice(f"\x00type:{name}", "Type a name…", "One not listed here",
+                               depth=1))
+        if not rows:
+            picked = auto
+        else:
+            if len(state["conns"]) > 1:
+                prompter.reason("Tick a connection to take every database on it, or open "
+                                "it up and tick the ones you want.")
+            picked = [v for v in ask_at_least_one(prompter, "Which database(s)?", rows,
+                                                  thing="one database")
+                      if not v.startswith("\x00conn:")]
+            typed = [v for v in picked if v.startswith("\x00type:")]
+            picked = [v for v in picked if not v.startswith("\x00type:")]
+            for v in typed:
+                name = v.partition(":")[2]
+                d = str(prompter.text(f"Which database on {name}?")).strip()
+                if d:
+                    picked.append(f"{name}/{d}")
+            picked = auto + picked
+        # open each: a database this login cannot read is found here
+        picked_by: Dict[str, Any] = {}
+        for value in picked:
+            name, _, d = value.partition("/")
+            found = state["picked_by"].get(value) or open_database(
+                prompter, state["logged_by"][name], d)
+            if found is None:
+                continue
+            picked_by[value] = found
+        if not picked_by:
+            if not rows:
+                raise GoBack()
+            return ask_databases()
+        if list(picked_by) != state["dbs"]:
+            state["names"], state["kept"] = [], {}
+        state["dbs"] = list(picked_by)
+        state["picked_by"] = picked_by
+        for value, found in picked_by.items():
+            if value not in state["tables_by"]:
+                state["tables_by"][value] = list_tables(prompter, found)
+        return bool(rows)
+
+    def _heading(value: str) -> str:
+        """``study7 on lab`` for a database; the connection's name for a file."""
+        return state["picked_by"][value].label
+
     def ask_tables() -> bool:
         if state["shape"] != "dump":
             return False
-        usable = [t for t in state["tables"] if t.columns]
-        if not usable:
-            prompter.note(f"  {state['picked'].name} has no tables this account can see.",
-                          style="yellow")
-            raise GoBack()
+        rows = []
         ticked = set(state["names"])
-        rows = [Choice("\x00all", f"Every table ({len(usable)})",
-                       "Tick this to take them all",
-                       children=tuple(t.name for t in usable))]
-        rows += [Choice(t.name, t.name + (" (view)" if t.kind == "view" else ""),
-                        (f"text: {', '.join(t.text_columns[:4])}" if t.text_columns
-                         else "no long-text columns"),
-                        checked=t.name in ticked,
-                        annotation=f"{_rows_word(t)}  {len(t.columns)} columns", depth=1)
-                for t in usable]
+        any_table = False
+        for value in state["dbs"]:
+            usable = [t for t in state["tables_by"][value] if t.columns]
+            if not usable:
+                prompter.note(f"  {_heading(value)} has no tables this account can see.",
+                              style="yellow")
+                continue
+            any_table = True
+            rows.append(Choice(f"\x00db:{value}", _heading(value),
+                               f"every table of {_heading(value)}",
+                               annotation=f"{len(usable)} tables",
+                               children=tuple(f"{value}/{t.name}" for t in usable)))
+            width = max(len(t.name) for t in usable)
+            for t in usable:
+                v = f"{value}/{t.name}"
+                rows.append(Choice(v, t.name.ljust(width) + (" (view)" if t.kind == "view" else ""),
+                                   (f"text: {', '.join(t.text_columns[:4])}" if t.text_columns
+                                    else "no long-text columns"),
+                                   checked=v in ticked,
+                                   annotation=f"{_rows_word(t)}  {len(t.columns)} columns",
+                                   depth=1))
+        if not any_table:
+            raise GoBack()
+        prompter.reason("Tick a database to take every table in it, or open it up and "
+                        "tick the tables you want.")
         picked = [v for v in ask_at_least_one(prompter, "Which tables?", rows, thing="one table")
-                  if v != "\x00all"]
+                  if not v.startswith("\x00db:")]
         if picked != state["names"]:
-            state["kept"] = None
+            state["kept"] = {}
         state["names"] = picked
         return True
 
@@ -93,15 +225,54 @@ def db_out_flow(ctx: TaskContext) -> Optional[Path]:
         state["keep_all"] = prompter.confirm("Keep every column of each table?",
                                              default=state["keep_all"])
         if state["keep_all"]:
-            state["kept"] = None
+            state["kept"] = {}
             return True
-        wanted = [t for t in state["tables"] if t.name in state["names"]]
-        before = (state["kept"].values if state["kept"]
-                  else [f"{t.name}.{c.name}" for t in wanted for c in t.columns])
-        state["kept"] = ask_columns(prompter, state["picked"], wanted,
-                                    question="Which columns do you want to keep?",
-                                    checked=before, only_tables=state["names"])
+        # one column screen per database, each with everything ticked: the
+        # work is unticking what you don't want
+        for value in state["dbs"]:
+            mine = [v.rpartition("/")[2] for v in state["names"] if v.startswith(value + "/")]
+            wanted = [t for t in state["tables_by"][value] if t.name in mine]
+            if not wanted:
+                continue
+            before = (state["kept"][value].values if value in state["kept"]
+                      else [f"{t.name}.{c.name}" for t in wanted for c in t.columns])
+            state["kept"][value] = ask_columns(
+                prompter, state["picked_by"][value], wanted,
+                question=(f"Which columns of {_heading(value)}'s tables do you want to keep?"
+                          if len(state["dbs"]) > 1 else "Which columns do you want to keep?"),
+                checked=before, only_tables=mine, ask_tables=False)
         return True
+
+    def _subfolders() -> Dict[str, str]:
+        """A folder per database when there are several: the database's
+        name, or connection-database when two share a name."""
+        if len(state["dbs"]) <= 1:
+            return {v: "" for v in state["dbs"]}
+        out = {}
+        for value in state["dbs"]:
+            name, _, d = value.partition("/")
+            stem = _file_stem(name if d == "main" else d)
+            out[value] = stem
+        counts = {}
+        for stem in out.values():
+            counts[stem] = counts.get(stem, 0) + 1
+        for value, stem in list(out.items()):
+            if counts[stem] > 1:
+                out[value] = f"{value.partition('/')[0]}-{stem}"
+        return out
+
+    def _files() -> Dict[str, Path]:
+        """Where each ticked table goes: ``<table>.csv`` in the folder, or
+        under a folder per database when there are several."""
+        out = {}
+        subs = _subfolders()
+        for value in state["names"]:
+            where, _, table = value.rpartition("/")
+            base = state["folder"] / subs[where] if subs[where] else state["folder"]
+            # a table's name comes from the database, not from the person:
+            # one called "../../something" must not climb out of the folder
+            out[value] = base / f"{_file_stem(table)}.csv"
+        return out
 
     def ask_folder() -> bool:
         if state["shape"] != "dump":
@@ -109,9 +280,9 @@ def db_out_flow(ctx: TaskContext) -> Optional[Path]:
         while True:
             folder = browse_for_folder(prompter, question="Where should the spreadsheets go?",
                                        start=state["folder"] or ctx.cwd)
-            files = [folder / f"{n}.csv" for n in state["names"]]
-            exist = [f.name for f in files if f.exists()]
             state["folder"] = folder
+            files = _files()
+            exist = [f.relative_to(folder).as_posix() for f in files.values() if f.exists()]
             if not exist:
                 state["replace"] = False
                 return True
@@ -123,6 +294,13 @@ def db_out_flow(ctx: TaskContext) -> Optional[Path]:
                 return True
 
     # ---- one spreadsheet, joined -----------------------------------------
+    def ask_connection() -> bool:
+        if state["shape"] != "join":
+            return False
+        state["picked"] = pick_connection(prompter, need_write=False)
+        state["tables"] = list_tables(prompter, state["picked"])
+        return True
+
     def ask_which() -> bool:
         if state["shape"] != "join":
             return False
@@ -170,9 +348,8 @@ def db_out_flow(ctx: TaskContext) -> Optional[Path]:
         state["spec"], state["columns"] = spec, cols
         return True
 
-    _in_order([ask_connection, ask_shape, ask_tables, ask_keep, ask_folder,
-               ask_which, ask_join, ask_out])
-    picked = state["picked"]
+    _in_order([ask_shape, ask_connections, ask_databases, ask_tables, ask_keep, ask_folder,
+               ask_connection, ask_which, ask_join, ask_out])
     if state["shape"] == "join":
         js: JoinState = state["join"]
         result = _with_display(
@@ -182,31 +359,36 @@ def db_out_flow(ctx: TaskContext) -> Optional[Path]:
         return Path(result)
 
     # the dump: one file per table, the read-back first
-    by_name = {t.name: t for t in state["tables"]}
-    kept = state["kept"].by_table if state["kept"] else {}
-    lines = []
-    for n in state["names"]:
-        t = by_name[n]
-        cols = kept.get(n, [c.name for c in t.columns]) if state["kept"] else \
-            [c.name for c in t.columns]
-        lines.append(f"{n}.csv ({_rows_word(t)}, {len(cols)} of {len(t.columns)} columns)"
-                     if state["kept"] else f"{n}.csv ({_rows_word(t)}, {len(cols)} columns)")
-    prompter.note(f"  {len(state['names'])} table(s) → {state['folder']}:", style="cyan")
-    for line in lines:
-        prompter.note(f"      {line}", style="cyan", wrap=False)
-    written = []
-    for n in state["names"]:
-        if state["kept"] and n not in kept:
-            prompter.note(f"  {n}: no columns kept, so no file.", style="dim")
-            continue
-        cols = kept.get(n) if state["kept"] else None
-        out = state["folder"] / f"{n}.csv"
+    files = _files()
+    prompter.note(f"  {len(files)} table(s) → {state['folder']}:", style="cyan")
+    plan = []
+    for value, out in files.items():
+        where, _, table = value.rpartition("/")
+        name, _, database = where.partition("/")
+        info = next(t for t in state["tables_by"][where] if t.name == table)
+        cols = None
+        if state["kept"]:
+            cols = state["kept"].get(where).by_table.get(table) if where in state["kept"] else None
+            if not cols:
+                prompter.note(f"      {out.relative_to(state['folder']).as_posix()}: no columns "
+                              f"kept, so no file.", style="dim")
+                continue
+            words = f"{len(cols)} of {len(info.columns)} columns"
+        else:
+            words = f"{len(info.columns)} columns"
+        prompter.note(f"      {out.relative_to(state['folder']).as_posix()} ({_rows_word(info)}, "
+                      f"{words})", style="cyan", wrap=False)
+        plan.append((name, database, table, out, cols))
+    written = 0
+    for name, database, table, out, cols in plan:
+        out.parent.mkdir(parents=True, exist_ok=True)
         _with_display(
-            prompter, f"wrangle: copy {n} out of {picked.name}", tables.export_table,
-            source={"connection": picked.name, "from": {"table": n}}, out_csv=out,
-            columns=cols, overwrite_existing=state["replace"], verbose=False)
-        written.append(out)
-    prompter.note(f"\n  ✓ Wrote {len(written)} file(s) into {state['folder']}.",
+            prompter, f"wrangle: copy {table} out of {_heading(f'{name}/{database}')}",
+            tables.export_table,
+            source={"connection": name, "database": database, "from": {"table": table}},
+            out_csv=out, columns=cols, overwrite_existing=state["replace"], verbose=False)
+        written += 1
+    prompter.note(f"\n  ✓ Wrote {written} file(s) into {state['folder']}.",
                   style="green", wrap=False)
     prompter.note("  R, Excel, pandas and every Taters spreadsheet flow can read them.",
                   style="dim")
@@ -244,7 +426,7 @@ def db_in_flow(ctx: TaskContext) -> Optional[Path]:
             owned = db.registered(session, name)
             if session.d.table_exists(session, name, picked.profile.schema):
                 if owned is None:
-                    prompter.note(f"  {picked.name} already has a table called {name} "
+                    prompter.note(f"  {picked.label} already has a table called {name} "
                                   f"that Taters did not make.", style="yellow")
                     answer = str(prompter.select("What now?", [
                         Choice("rename", "Pick a different name"),
@@ -289,21 +471,21 @@ def db_in_flow(ctx: TaskContext) -> Optional[Path]:
                   + (f" and {len(numbers) - 6} more" if len(numbers) > 6 else "")
                   + f" are stored as numbers; {rest}." if numbers else "Every column is stored as text.")
         prompter.note(f"  {table.insp.scanned:,} rows × {len(table.columns)} columns → "
-                      f"{state['name']} in {state['picked'].name}. {stored}", style="cyan")
+                      f"{state['name']} in {state['picked'].label}. {stored}", style="cyan")
         if not prompter.confirm("Write it?", default=True):
             raise GoBack()
         return True
 
     _in_order([ask_connection, ask_file, ask_name, ask_key, ask_write])
     table: _Table = state["table"]
-    ref = tables.parse_ref(f"db://{state['picked'].name}/{state['name']}")
+    ref = tables.parse_ref(f"{state['picked'].root}/{state['name']}")
     _with_display(
         prompter, f"wrangle: copy into {state['picked'].name}", tables.import_table,
         csv_path=table.path, out=str(ref), unique_key=state["key"],
         delimiter=table.fmt.delimiter, encoding=table.fmt.encoding,
         overwrite_existing=bool(state.get("replace")), verbose=False)
     n = tables.count(ref)
-    prompter.note(f"\n  ✓ Wrote {n:,} rows into {state['picked'].name}: {state['name']}.",
+    prompter.note(f"\n  ✓ Wrote {n:,} rows into {state['picked'].label}: {state['name']}.",
                   style="green", wrap=False)
     prompter.note("  Runs on this database can use its columns now, from "
                   "\"Which columns do you need?\"", style="dim")

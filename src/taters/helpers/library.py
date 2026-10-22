@@ -914,7 +914,30 @@ def rename(kind: LibraryKind, old: str, new: str) -> Path:
             payload.rename(target)
     _rewrite_payload_names(dest, {s.name: d.name for s, d in pairs
                                   if s.name != d.name})
+    # a model's menus read the name *inside* its file, not the file's name
+    # (see model_spec.describe_encoder): renaming the file alone left the
+    # old name on every screen, which is how one once stayed
+    # "roberta-base-adapted" through three renames
+    _rewrite_doc_name(dest, stem)
     return dest
+
+
+def _rewrite_doc_name(manifest: Path, name: str) -> None:
+    """Set the ``name`` a JSON model manifest carries to the file's new stem,
+    when it carries one; anything that is not such a file is left alone."""
+    if manifest.suffix.lower() != ".json":
+        return
+    try:
+        doc = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(doc, dict) or "name" not in doc or doc.get("name") == name:
+        return
+    from .atomic import atomic_write
+
+    doc["name"] = name
+    with atomic_write(manifest, mode="w", encoding="utf-8") as fh:
+        json.dump(doc, fh, indent=1)
 
 
 def delete(kind: LibraryKind, name: str) -> None:

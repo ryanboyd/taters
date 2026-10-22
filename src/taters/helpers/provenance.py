@@ -348,7 +348,7 @@ def _read_db(ref) -> Optional[dict]:
         return None
     if [c.name for c in live.columns if c.name != db.ROW_COLUMN] != entry.table_columns:
         return None
-    key = (ref.profile, entry.table_name, entry.written_at, entry.n_rows)
+    key = (ref.profile, ref.database, entry.table_name, entry.written_at, entry.n_rows)
     if key not in _VERIFIED:
         try:
             _VERIFIED[key] = db.fingerprint_table(session, entry)
@@ -792,7 +792,8 @@ def _write_db_record(fn, signature, args, kwargs, ref, *, before, skip,
                          record["assets"], record["upstream"]]),
     }
     tables.write_sidecar(ref, "settings", record)
-    _VERIFIED[(ref.profile, entry.table_name, entry.written_at, entry.n_rows)] = \
+    _VERIFIED[(ref.profile, ref.database, entry.table_name, entry.written_at,
+               entry.n_rows)] = \
         entry.fingerprint
 
 
@@ -1089,7 +1090,7 @@ def _upstream(every: Mapping, binding: Sequence[str]) -> List[str]:
                         sources: Iterable[Any] = [ref]
                     else:
                         session = tables._session(ref)
-                        sources = [tables.parse_ref(f"db://{ref.profile}/{e.logical}")
+                        sources = [ref.under(e.logical)
                                    for e in db.registered_under(session, ref.logical)]
                 except Exception:
                     continue

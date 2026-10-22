@@ -1,6 +1,6 @@
 """
-The database conversation: which connection, which columns, and the joins
-that follow from them. Shared by the source stage of the wizard and by
+The database conversation: which connection, which database on it, which
+columns, and the joins that follow from them. Shared by the source stage of the wizard and by
 Wrangle data, so a person learns it once.
 
 One screen lists every column of every table as ``table.column``; the
@@ -24,47 +24,64 @@ from .columns import Inspection
 from .db_columns import DbInspection, inspect_source
 from .prompts import Cancelled, Choice, GoBack, Prompter, ask_at_least_one
 
-__all__ = ["Picked", "pick_connection", "offer_host_key", "list_tables", "Chosen", "ask_columns",
+__all__ = ["Picked", "pick_connection", "login", "pick_database", "open_database",
+           "offer_host_key", "list_tables", "Chosen", "ask_columns",
            "JoinState", "plan_joins", "source_of", "inspection_for", "column_rows",
            "cycle_for", "can_write_here", "qualified"]
 
 _ADD = "\x00add"
 
-#: Past this many columns across the tables, the column screen is narrowed
-#: to the tables the person names first; under it, everything fits on one.
-MANY_COLUMNS = 150
-
 
 @dataclass
 class Picked:
-    """A connection the person chose, logged in and probed."""
+    """A database the person chose: the connection it is on, logged in and
+    probed on that database."""
 
     profile: db.Profile
     session: db.Session
     probe: db.Probe
+    database: str = ""
 
     @property
     def name(self) -> str:
+        """The connection's name."""
         return self.profile.name
+
+    @property
+    def root(self) -> str:
+        """``db://<connection>/<database>``: the address every table in this
+        database starts with."""
+        return f"db://{self.profile.name}/{self.database}"
+
+    @property
+    def label(self) -> str:
+        """``study7 on lab`` for a sentence; just the name for a file."""
+        if self.profile.dialect == "sqlite":
+            return self.profile.name
+        return f"{self.database} on {self.profile.name}"
 
 
 def pick_connection(prompter: Prompter, *, need_write: bool = False,
-                    start: str = "") -> Optional[Picked]:
+                    start: str = "", database: str = "") -> Optional[Picked]:
     """
-    "Which database?", the password if one is needed, and the probe.
+    "Which connection?", the password if one is needed, then "Which
+    database?" from the server's own list, and the probe on that database.
 
-    ``need_write`` is a destination: an account that cannot make tables is
-    turned away with the reason and a way out. A source only has to read,
-    so a read-only account gets one dim sentence and carries on.
+    A connection is a server and a login; the database to use on it is
+    asked here, each time, with the one used last as the default.
+    ``need_write`` is a destination: an account that cannot make tables in
+    that database is turned away with the reason and a way out. A source
+    only has to read, so a read-only account gets one dim sentence and
+    carries on.
     """
     from .tasks.db_connections import INSTALL_DRIVERS, add_connection, driver_missing
 
     while True:
         profiles = db.list_profiles()
         if not profiles:
-            prompter.reason("Taters needs to know where the database is and how to "
-                            "log in. This is saved for next time; the password is not.")
-            profile = add_connection(prompter)
+            prompter.reason("Taters needs to know where the database server is and how "
+                            "to log in. This is saved for next time; the password is not.")
+            profile = add_connection(prompter, test=False)
             if profile is None:
                 raise GoBack()
         else:
@@ -75,28 +92,30 @@ def pick_connection(prompter: Prompter, *, need_write: bool = False,
                                    disabled=(f"needs {INSTALL_DRIVERS}" if missing else "")))
             rows.append(Choice(_ADD, "+ Add a connection…",
                                "A server and a login, or a database file"))
-            picked = str(prompter.select("Which database?", rows,
+            picked = str(prompter.select("Which connection?", rows,
                                          default=start if any(
                                              p.name == start for p in profiles) else None))
             if picked == _ADD:
-                profile = add_connection(prompter)
+                profile = add_connection(prompter, test=False)
                 if profile is None:
                     continue
             else:
                 profile = db.get_profile(picked)
-        found = _connect(prompter, profile)
+        # the database that came with ``start`` is only right on that connection
+        found = _connect(prompter, profile,
+                         database=database if profile.name == start else "")
         if found is None:
             continue
         if need_write and not found.probe.can_write:
             prompter.reason(
-                f"{profile.user or 'This account'} can read {profile.name} but cannot "
+                f"{profile.user or 'This account'} can read {found.label} but cannot "
                 f"create tables there, and this needs to write one. Ask whoever "
                 f"manages the database to grant CREATE"
-                + (f" on {profile.database}" if profile.database else "")
-                + ", or pick a connection that has it.")
-            answer = str(prompter.select(f"{profile.name} can't take new tables. "
+                + (f" on {found.database}" if profile.dialect != "sqlite" else "")
+                + ", or pick a database that has it.")
+            answer = str(prompter.select(f"{found.label} can't take new tables. "
                                          f"What now?", [
-                Choice("again", "Pick a different connection"),
+                Choice("again", "Pick a different database or connection"),
                 Choice("back", "Back"),
             ]))
             found.session.close()
@@ -104,26 +123,31 @@ def pick_connection(prompter: Prompter, *, need_write: bool = False,
                 raise GoBack()
             continue
         if not need_write and not found.probe.can_write:
-            prompter.note(f"  {profile.user or 'This account'} can read {profile.name} "
+            prompter.note(f"  {profile.user or 'This account'} can read {found.label} "
                           f"but cannot create tables there, so the results of a run "
                           f"will go to files, or to another database.", style="dim")
         return found
 
 
-def can_write_here(prompter: Prompter, profile: db.Profile) -> bool:
-    """Whether a connection can take this run's tables, said in words if not."""
-    found = _connect(prompter, profile)
+def can_write_here(prompter: Prompter, profile: db.Profile, *,
+                   database: str = "") -> str:
+    """
+    Which database on this connection can take this run's tables: the one
+    the person picks (``database`` is the default offered), or "" with the
+    reason in words when the account cannot create tables there.
+    """
+    found = _connect(prompter, profile, default=database)
     if found is None:
-        return False
+        return ""
     found.session.close()
     if found.probe.can_write:
-        return True
+        return found.database
     prompter.note(
-        f"  {profile.user or 'This account'} can read {profile.name} but cannot "
+        f"  {profile.user or 'This account'} can read {found.label} but cannot "
         f"create tables there. Ask whoever manages the database to grant CREATE"
-        + (f" on {profile.database}" if profile.database else "")
+        + (f" on {found.database}" if profile.dialect != "sqlite" else "")
         + ", or pick somewhere else for the results.", style="yellow")
-    return False
+    return ""
 
 
 def offer_host_key(prompter: Prompter, exc: db.HostKeyUnknown, *,
@@ -161,8 +185,23 @@ def offer_host_key(prompter: Prompter, exc: db.HostKeyUnknown, *,
     return updated
 
 
-def _connect(prompter: Prompter, profile: db.Profile) -> Optional[Picked]:
-    """Log in (asking for the password once, re-asking once), then probe."""
+@dataclass
+class _Login:
+    """A login that worked: the profile as logged in (a host key accepted
+    on the way changes it), the password that did it, and the server's
+    own list of databases."""
+
+    profile: db.Profile
+    password: Optional[str]
+    databases: List[str]
+
+
+def login(prompter: Prompter, profile: db.Profile) -> Optional[_Login]:
+    """
+    Log in to the server (asking for the password once, re-asking once)
+    and list its databases. Nothing is probed yet: what the account may
+    do is a question about one database, and that is picked next.
+    """
     from .tasks.db_connections import driver_missing
 
     missing = driver_missing(profile.dialect)
@@ -175,11 +214,13 @@ def _connect(prompter: Prompter, profile: db.Profile) -> Optional[Picked]:
     for attempt in range(3):
         try:
             password = db.password_for(profile, ask=prompter.secret)
-            with prompter.scanning(f"Connecting to {profile.name}", unit="checks") as step:
-                probe = db.probe(profile, password, on_step=step)
-            if not probe.select:
-                raise db.DbError("; ".join(probe.notes) or "could not connect")
-            session = db.connect(profile, password)
+            if profile.dialect == "sqlite":
+                return _Login(profile, password, ["main"])
+            server = db.with_fields(profile, database="")
+            with prompter.scanning(f"Connecting to {profile.name}", unit="steps") as step:
+                with db.connect(server, password, on_step=step) as session:
+                    step("Listing the databases")
+                    listed = session.d.list_databases(session)
         except db.HostKeyUnknown as e:
             accepted = offer_host_key(prompter, e)
             if accepted is None:
@@ -213,8 +254,100 @@ def _connect(prompter: Prompter, profile: db.Profile) -> Optional[Picked]:
             return None
         prompter.note(f"  Connected to {profile.name}"
                       + (f" as {profile.user}." if profile.user else "."), style="green")
-        return Picked(profile=profile, session=session, probe=probe)
+        return _Login(profile, password, listed)
     return None
+
+
+_TYPE = "\x00type"
+
+
+def database_rows(logged: _Login, *, checked: Sequence[str] = ()) -> List[Choice]:
+    """One row per database the server listed, plus a way to type one it
+    did not (an account can often use a database it cannot list)."""
+    rows = [Choice(name, name, checked=name in checked) for name in logged.databases]
+    rows.append(Choice(_TYPE, "Type a name…", "One not listed here"))
+    return rows
+
+
+def pick_database(prompter: Prompter, logged: _Login, *, default: str = "") -> str:
+    """
+    "Which database?" on a server the person just logged in to. The one
+    they used last on this connection is the default, and the one they
+    pick now is remembered as the default for next time.
+    """
+    profile = logged.profile
+    if profile.dialect == "sqlite":
+        return "main"
+    default = default or profile.database
+    if not logged.databases:
+        prompter.note(f"  {profile.user or 'This account'} cannot see any database on "
+                      f"{profile.name}; type the name of the one to use.", style="yellow")
+        picked = _TYPE
+    else:
+        picked = str(prompter.select("Which database?", database_rows(logged),
+                                     default=default if default in logged.databases else None))
+    if picked == _TYPE:
+        picked = str(prompter.text("Which database on that server?",
+                                   default=default)).strip()
+        if not picked:
+            raise GoBack()
+    _remember(profile, picked)
+    return picked
+
+
+def _remember(profile: db.Profile, database: str) -> None:
+    """The database picked becomes the connection's default for next time;
+    a connection that is not saved (a trial) is left alone."""
+    if database == profile.database:
+        return
+    try:
+        db.get_profile(profile.name)
+    except KeyError:
+        return
+    try:
+        db.save_profile(db.with_fields(profile, database=database))
+    except Exception:
+        pass
+
+
+def open_database(prompter: Prompter, logged: _Login, database: str) -> Optional[Picked]:
+    """Probe one database on a server the person is logged in to, and
+    open the session the rest of the conversation reads through."""
+    target = db.for_database(logged.profile, database)
+    try:
+        with prompter.scanning(f"Looking at {database} on {target.name}"
+                               if target.dialect != "sqlite"
+                               else f"Connecting to {target.name}", unit="checks") as step:
+            probe = db.probe(target, logged.password, on_step=step)
+        if not probe.select:
+            raise db.DbError("; ".join(probe.notes) or f"could not open {database}")
+        session = db.connect(target, logged.password)
+    except db.DbError as e:
+        prompter.note(f"  {e}", style="yellow")
+        return None
+    if target.dialect == "sqlite":
+        # a server said "Connected" at the login; a file has no login, so
+        # this is where it is first known to open
+        prompter.note(f"  Connected to {target.name}.", style="green")
+    return Picked(profile=target, session=session, probe=probe,
+                  database=db.database_of(target))
+
+
+def _connect(prompter: Prompter, profile: db.Profile, *, database: str = "",
+             default: str = "") -> Optional[Picked]:
+    """Log in, pick the database (``database`` skips the question; ``default``
+    is what the question offers first), then probe it."""
+    logged = login(prompter, profile)
+    if logged is None:
+        return None
+    if profile.dialect == "sqlite":
+        chosen = "main"
+    elif database:
+        chosen = database
+        _remember(logged.profile, chosen)
+    else:
+        chosen = pick_database(prompter, logged, default=default)
+    return open_database(prompter, logged, chosen)
 
 
 # ---------------------------------------------------------------------------
@@ -283,45 +416,74 @@ def _column_help(t: db.TableInfo, c: db.ColumnInfo) -> str:
 
 def ask_columns(prompter: Prompter, picked: Picked, tables: Sequence[db.TableInfo], *,
                 question: str, checked: Sequence[str] = (),
-                only_tables: Optional[List[str]] = None) -> Chosen:
+                only_tables: Optional[List[str]] = None,
+                ask_tables: bool = True) -> Chosen:
     """
-    Every column of every table on one screen, as ``table.column`` under a
-    heading per table, with the declared type beside it and what the
-    catalog knows (the key, a declared link, long text) as its help.
+    Which tables, then which of their columns: the same two steps wherever
+    a database's columns are picked.
 
-    A database with hundreds of columns gets one question first -- which
-    tables are involved -- so the screen stays a screen. ``only_tables``
-    carries that answer across an Esc. Returns what was ticked.
+    The tables sit under the database on one screen -- tick the database to
+    take them all, or open it up and tick some -- and the column screen
+    then shows only those tables, each a heading over its columns laid out
+    as name, table, type. ``only_tables`` carries the first answer across an
+    Esc from the second, which comes back to the tables rather than leaving.
+    Returns what was ticked.
     """
     usable = [t for t in tables if t.rows != 0 and t.columns]
     if not usable:
         prompter.note(f"  {picked.name} has no tables with rows that "
                       f"{picked.profile.user or 'this account'} can see.", style="yellow")
         raise GoBack()
-    total = sum(len(t.columns) for t in usable)
     ticked = set(checked)
-    if total > MANY_COLUMNS:
-        want = set(only_tables or []) or {_split_qualified(v, usable)[0] for v in ticked}
-        rows = [Choice(t.name, t.name + (" (view)" if t.kind == "view" else ""),
-                       (f"text: {', '.join(t.text_columns[:4])}" if t.text_columns
-                        else "no long-text columns"),
-                       checked=t.name in want,
-                       annotation=f"{_rows_word(t)}  {len(t.columns)} columns")
-                for t in sorted(usable, key=lambda t: (0 if t.text_columns else 1,
-                                                       t.name.lower()))]
-        prompter.reason(f"{picked.name} has {total:,} columns across {len(usable)} "
-                        f"tables, so first: which tables hold the ones you need?")
-        names = ask_at_least_one(prompter, "Which tables are involved?", rows,
-                                 thing="one table")
-        usable = [t for t in usable if t.name in set(names)]
+    want = list(only_tables or []) or sorted({_split_qualified(v, usable)[0] for v in ticked})
+    while True:
+        # a caller that has already settled the tables (the dump, which
+        # chose them under their databases) skips straight to the columns
+        names = _ask_tables(prompter, picked, usable, want) if ask_tables else list(want)
+        chosen_tables = [t for t in usable if t.name in set(names)]
+        try:
+            picked_values = _ask_their_columns(prompter, chosen_tables, question, ticked)
+        except GoBack:
+            want = names                   # back to the tables, with this answer kept
+            continue
+        by_table: Dict[str, List[str]] = {}
+        for t in chosen_tables:
+            cols = [c.name for c in t.columns if qualified(t.name, c.name) in set(picked_values)]
+            if cols:
+                by_table[t.name] = cols
+        return Chosen(by_table=by_table)
+
+
+def _ask_tables(prompter: Prompter, picked: Picked, usable: Sequence[db.TableInfo],
+                want: Sequence[str]) -> List[str]:
+    """The tables under their database: tick the database for all of them."""
+    profile = picked.profile
+    rows = [Choice(f"\x00db:{picked.name}", picked.name,
+                   f"every table of {picked.name}"
+                   + (f" ({profile.where})" if profile.dialect != "sqlite" else ""),
+                   annotation=f"{len(usable)} tables",
+                   children=tuple(t.name for t in usable))]
+    width = max(len(t.name) for t in usable)
+    ordered = sorted(usable, key=lambda t: (0 if t.text_columns else 1, t.name.lower()))
+    for t in ordered:
+        rows.append(Choice(t.name, t.name.ljust(width) + (" (view)" if t.kind == "view" else ""),
+                           (f"text: {', '.join(t.text_columns[:4])}" if t.text_columns
+                            else "no long-text columns"),
+                           checked=t.name in set(want),
+                           annotation=f"{_rows_word(t)}  {len(t.columns)} columns", depth=1))
+    prompter.reason("Tick the database to take every table, or open it up and tick the "
+                    "ones that hold what you need.")
+    return [v for v in ask_at_least_one(prompter, "Which tables?", rows, thing="one table")
+            if not v.startswith("\x00db:")]
+
+
+def _ask_their_columns(prompter: Prompter, chosen: Sequence[db.TableInfo], question: str,
+                       ticked: set) -> List[str]:
+    """Every column of the chosen tables on one screen: column, table, type."""
     rows = []
-    # three columns, lined up: the column, the table it is in, its type.
-    # table names have underscores of their own, so a joined-up
-    # "table_column" was unreadable; the value a script sees is still
-    # table.column, the way SQL names it
-    col_w = max(len(c.name) for t in usable for c in t.columns)
-    tab_w = max(len(t.name) for t in usable)
-    for t in usable:
+    col_w = max(len(c.name) for t in chosen for c in t.columns)
+    tab_w = max(len(t.name) for t in chosen)
+    for t in chosen:
         rows.append(Choice(f"\x00table:{t.name}", t.name + (" (view)" if t.kind == "view" else ""),
                            f"every column of {t.name}",
                            annotation=f"{_rows_word(t)}  {len(t.columns)} columns",
@@ -332,14 +494,8 @@ def ask_columns(prompter: Prompter, picked: Picked, tables: Sequence[db.TableInf
                                checked=name in ticked,
                                annotation=f"{t.name.ljust(tab_w)}  {c.type.lower() or '?'}",
                                depth=1))
-    picked_values = [v for v in ask_at_least_one(prompter, question, rows, thing="one column")
-                     if not v.startswith("\x00table:")]
-    by_table: Dict[str, List[str]] = {}
-    for t in usable:
-        cols = [c.name for c in t.columns if qualified(t.name, c.name) in set(picked_values)]
-        if cols:
-            by_table[t.name] = cols
-    return Chosen(by_table=by_table)
+    return [v for v in ask_at_least_one(prompter, question, rows, thing="one column")
+            if not v.startswith("\x00table:")]
 
 
 # ---------------------------------------------------------------------------
@@ -431,7 +587,8 @@ def source_of(state: JoinState, *, upto: Optional[int] = None) -> sources.Source
         joins=tuple(sources.Join(table=j["table"], alias=j["alias"], how="left",
                                  on=tuple(j["on"]))
                     for j in joins),
-        columns=columns, schema=state.picked.profile.schema)
+        columns=columns, schema=state.picked.profile.schema,
+        database=state.picked.database if state.picked.profile.dialect != "sqlite" else "")
 
 
 def inspection_for(prompter: Prompter, state: JoinState,

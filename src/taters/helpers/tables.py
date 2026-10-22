@@ -6,7 +6,7 @@ Everything in Taters that produces or consumes a table used to take a
 ``Path``. A :class:`TableRef` is the one value that replaces it. For a file
 it *is* path-like -- ``open()``, ``Path()`` and ``os.fspath()`` all work, so
 nothing that still thinks in files has to change -- and for a database
-table it is ``db://<connection>/<logical/path>``, which is not path-like on
+table it is ``db://<connection>/<database>/<logical/path>``, which is not path-like on
 purpose: a call site that has not learned about databases fails with a
 ``TypeError`` the moment it is handed one, instead of quietly creating a
 folder called ``db:`` and writing a CSV into it.
@@ -49,21 +49,26 @@ RefLike = Union[str, Path, "TableRef"]
 
 class TableRef:
     """
-    Where a table lives. A file path, or ``db://<connection>/<logical>``.
+    Where a table lives. A file path, or
+    ``db://<connection>/<database>/<logical>``.
 
-    Only the file kind is path-like. ``logical`` is the slash-separated
-    name inside the database (``taters/study7/features/readability``); the
-    physical table name is derived from it by the database layer.
+    Only the file kind is path-like. ``database`` is the database on that
+    connection (``main`` for a SQLite file, which only has the one);
+    ``logical`` is the slash-separated name inside it
+    (``taters/study7/features/readability``); the physical table name is
+    derived from it by the database layer.
     """
 
-    __slots__ = ("_path", "profile", "logical")
+    __slots__ = ("_path", "profile", "database", "logical")
 
     def __init__(self, path: Optional[Path] = None, *, profile: str = "",
-                 logical: str = ""):
-        if path is None and not (profile and logical):
-            raise ValueError("a TableRef is a path, or a connection and a logical name")
+                 database: str = "", logical: str = ""):
+        if path is None and not (profile and database and logical):
+            raise ValueError("a TableRef is a path, or a connection, a database "
+                             "and a logical name")
         self._path = Path(path) if path is not None else None
         self.profile = profile
+        self.database = database
         self.logical = logical.strip("/")
 
     # ---- what kind ------------------------------------------------------
@@ -110,31 +115,46 @@ class TableRef:
             return str(self._path.parent)
         return "/".join(self.parts[:-1])
 
+    @property
+    def root(self) -> str:
+        """``db://<connection>/<database>`` for a database table: the place
+        every table of a run shares. A file's folder."""
+        if self._path is not None:
+            return str(self._path.parent)
+        return f"{DB_SCHEME}{self.profile}/{self.database}"
+
+    def under(self, logical: str) -> "TableRef":
+        """Another table in the same database, by its logical name."""
+        return TableRef(profile=self.profile, database=self.database, logical=logical)
+
     def sibling(self, stem: str, suffix: str = ".csv") -> "TableRef":
         """Another table beside this one: ``features/x.csv`` -> ``features/y.csv``."""
         if self._path is not None:
             return TableRef(self._path.with_name(stem + (suffix if suffix else "")))
-        return TableRef(profile=self.profile, logical="/".join([*self.parts[:-1], stem]))
+        return self.under("/".join([*self.parts[:-1], stem]))
 
     def local_dir(self, work_dir: Optional[Path] = None) -> Path:
         """
         A folder on disk for things that are not rows: a model file, a
         figure, a report fragment beside this table. For a file it is the
         file's folder; for a database table it is ``db_local/<connection>/
-        <logical parent>`` under the work folder.
+        <database>/<logical parent>`` under the work folder.
         """
         if self._path is not None:
             return self._path.parent
         base = Path(work_dir) if work_dir is not None else Path.cwd()
-        return base / "db_local" / self.profile / Path(*self.parts[:-1]) \
-            if len(self.parts) > 1 else base / "db_local" / self.profile
+        # a database name is whatever the server allowed; on disk it is a
+        # folder name, so anything a folder cannot hold becomes _
+        folder = re.sub(r"[^A-Za-z0-9_.-]", "_", self.database)
+        home = base / "db_local" / self.profile / folder
+        return home / Path(*self.parts[:-1]) if len(self.parts) > 1 else home
 
     # ---- plumbing -------------------------------------------------------
 
     def __str__(self) -> str:
         if self._path is not None:
             return str(self._path)
-        return f"{DB_SCHEME}{self.profile}/{self.logical}"
+        return f"{DB_SCHEME}{self.profile}/{self.database}/{self.logical}"
 
     def __repr__(self) -> str:
         return f"TableRef({str(self)!r})"
@@ -181,20 +201,24 @@ def parse_ref(value: RefLike) -> TableRef:
         raise TypeError(f"not a table: {value!r}")
     if text.startswith(DB_SCHEME) or text.startswith("db:/") or text.startswith("db:\\"):
         rest = text[3:].replace("\\", "/").lstrip("/")
-        profile, _, logical = rest.partition("/")
+        profile, _, tail = rest.partition("/")
+        database, _, logical = tail.partition("/")
         if logical.lower().endswith(".csv"):
             logical = logical[:-4]
-        if not profile or not logical:
-            raise ValueError(f"a database table is db://<connection>/<name>, not {text!r}")
-        # the logical name becomes a folder under the run folder for the
-        # things that are not rows, so it cannot be allowed to climb out
+        if not profile or not database or not logical:
+            raise ValueError(f"a database table is db://<connection>/<database>/<name>, "
+                             f"not {text!r}")
+        # the names become folders under the run folder for the things that
+        # are not rows, so none of them can be allowed to climb out
         if not re.match(r"^[a-z][a-z0-9_-]*$", profile):
             raise ValueError(f"{profile!r} is not a connection name (lowercase letters, "
                              f"digits, _ or -)")
+        if database in (".", "..") or re.search(r"[\x00-\x1f]", database):
+            raise ValueError(f"{database!r} is not a database name")
         parts = logical.split("/")
         if any(not seg or seg in (".", "..") for seg in parts):
             raise ValueError(f"a table's name cannot have empty or '..' parts: {text!r}")
-        return TableRef(profile=profile, logical=logical)
+        return TableRef(profile=profile, database=database, logical=logical)
     return TableRef(Path(text))
 
 
@@ -202,12 +226,13 @@ def parse_ref(value: RefLike) -> TableRef:
 # Sessions, held once per connection name for the life of a process
 # ---------------------------------------------------------------------------
 
-_SESSIONS: Dict[Tuple[str, str], Any] = {}
+_SESSIONS: Dict[Tuple[str, str, str], Any] = {}
 
 
 def _session(ref: TableRef, role: str = "read"):
     """
-    The open session for a ref's connection, opened on first use.
+    The open session for a ref's connection and database, opened on first
+    use.
 
     Reads and writes get separate connections (``role``): a gather streams
     its source through an unbuffered cursor while the loader inserts the
@@ -216,10 +241,11 @@ def _session(ref: TableRef, role: str = "read"):
     """
     from . import db
 
-    s = _SESSIONS.get((ref.profile, role))
+    key = (ref.profile, ref.database, role)
+    s = _SESSIONS.get(key)
     if s is None:
-        s = db.session_for(ref.profile)
-        _SESSIONS[(ref.profile, role)] = s
+        s = db.session_for(ref.profile, ref.database)
+        _SESSIONS[key] = s
     return s
 
 
@@ -568,7 +594,7 @@ def output_ref(given: Any, *, source: RefLike, default: Sequence[str]) -> TableR
     Where an analyzer's table goes: what the caller said, or the default
     beside the source. ``default`` is the folder path under the run folder
     (``("features", "readability")``); the table takes the source's name.
-    A database source defaults to the same connection, under
+    A database source defaults to the same database, under
     ``taters/<default...>/<name>``, so anything in gives anything out only
     when somebody asks for it.
     """
@@ -576,8 +602,7 @@ def output_ref(given: Any, *, source: RefLike, default: Sequence[str]) -> TableR
         return parse_ref(given)
     src = parse_ref(source)
     if src.is_db:
-        return TableRef(profile=src.profile,
-                        logical="/".join(["taters", *default, src.stem]))
+        return src.under("/".join(["taters", *default, src.stem]))
     return TableRef(Path.cwd().joinpath(*default) / f"{src.stem}.csv")
 
 
@@ -614,15 +639,17 @@ def delete_table(ref: RefLike) -> bool:
 
 def tables_under(root: RefLike) -> List[TableRef]:
     """Every table Taters wrote under a database root such as
-    ``db://lab/taters/study7/``; nothing for a folder (its files are its own)."""
-    r = parse_ref(str(root).rstrip("/") + "/x")
+    ``db://lab/study7/taters/study7/``; nothing for a folder (its files are
+    its own). A root that is just the database, ``db://lab/study7/``, lists
+    every table Taters made in it."""
+    text = str(root).rstrip("/")
+    r = parse_ref(text + "/x")
     if not r.is_db:
         return []
     from . import db
 
     prefix = "/".join(r.parts[:-1])
-    return [TableRef(profile=r.profile, logical=e.logical)
-            for e in db.registered_under(_session(r), prefix)]
+    return [r.under(e.logical) for e in db.registered_under(_session(r), prefix)]
 
 
 def require_local(ref: RefLike, what: str) -> Path:
@@ -658,7 +685,7 @@ def export_table(
     Parameters
     ----------
     source : str or mapping
-        ``db://<connection>/<table>`` for one table, or a source spec (a base
+        ``db://<connection>/<database>/<table>`` for one table, or a source spec (a base
         table plus joins; see :func:`taters.helpers.sources.render`) for
         several. A plain table name works when ``connection`` is given.
     out_csv : str or Path
@@ -691,8 +718,8 @@ def export_table(
     if profile.export == "forbidden":
         raise db.NotPermitted(f"{profile.name} is marked as not to be copied out of "
                               f"(export: forbidden in its connection settings)")
-    session = db.session_for(spec.connection)
-    with session, sources.guarded(spec, session):
+    session = _session(sources.anchor(spec))
+    with sources.guarded(spec, session):
         sql, params = sources.render(spec, session)
         announce(on_progress, f"reading from {spec.connection}")
         total = session.one(f"SELECT COUNT(*) FROM ({sql}) AS q", params)
@@ -739,7 +766,7 @@ def import_table(
     csv_path : str or Path
         The spreadsheet. Its encoding and separator are detected unless given.
     out : str
-        ``db://<connection>/<table>``.
+        ``db://<connection>/<database>/<table>``.
     unique_key : str, optional
         A column that identifies each row; it becomes the table's key, and a
         repeated value stops the write.
@@ -761,7 +788,7 @@ def import_table(
 
     r = parse_ref(out)
     if not r.is_db:
-        raise ValueError("out names a database table, db://<connection>/<table>")
+        raise ValueError("out names a database table, db://<connection>/<database>/<table>")
     if exists(r) and not overwrite_existing:
         if verbose:
             print(f"[import] {r} exists; leaving it (overwrite_existing=False)")

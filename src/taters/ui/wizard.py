@@ -840,17 +840,18 @@ def _ask_db_source(prompter: Prompter, *,
         id_cols=list(state["id_cols"]), text_mode=state["text_mode"],
         kinds={c: insp.kind(c) for c in insp.columns}, inspection=insp,
         connection=js.picked.name, source_spec=spec.to_dict(), labels=_labels(js),
-        results_root=(f"db://{js.picked.name}/" if js.picked.probe.can_write else ""))
+        results_root=(f"{js.picked.root}/" if js.picked.probe.can_write else ""))
 
 
 def ask_results(prompter: Prompter, src: SourceSpec, title: str = "") -> str:
     """
     "Where should the results go?" -- the one knob behind anything in,
-    anything out. The run folder, or a database connection that can make
-    tables; the source's own location is the default when it qualifies.
-    Returns the results root: "" for the folder, or a database address.
+    anything out. The run folder, or a database (a connection, then which
+    database on it) that can make tables; the source's own database is the
+    default when it qualifies. Returns the results root: "" for the
+    folder, or a database address ``db://<connection>/<database>/<prefix>/``.
     """
-    from ..helpers import db as _db
+    from ..helpers import db as _db, tables
     from .db_source import can_write_here
 
     profiles = _db.list_profiles()
@@ -865,15 +866,20 @@ def ask_results(prompter: Prompter, src: SourceSpec, title: str = "") -> str:
         "Every table this run makes -- the gathered text, each feature table and "
         "the analysis table -- goes there. The report, figures and any fitted "
         "model stay in this folder either way.")
-    default = src.connection if src.results_root.startswith("db://") else ""
+    own = tables.parse_ref(src.results_root + "x") if src.results_root.startswith("db://") \
+        else None
+    default = own.profile if own is not None else ""
     while True:
         picked = str(prompter.select("Where should the results go?", rows, default=default))
         if not picked:
             return ""
-        if picked == src.connection and src.results_root.startswith("db://"):
-            return f"db://{picked}/{prefix}/"      # already known to take tables
-        if can_write_here(prompter, _db.get_profile(picked)):
-            return f"db://{picked}/{prefix}/"
+        # the source's own database is already known to take tables, and
+        # is what the question offers first on that connection
+        database = can_write_here(prompter, _db.get_profile(picked),
+                                  database=own.database if own is not None
+                                  and picked == own.profile else "")
+        if database:
+            return f"db://{picked}/{database}/{prefix}/"
 
 
 def _ids_repeat(path: Path, id_cols: Sequence[str],
@@ -4597,7 +4603,7 @@ def _tables_in(root: str, limit: int = 8) -> List[str]:
         entries = _db.registered_under(session, "/".join(ref.parts[:-1]))
     except Exception as e:
         return [f"\n  Results are in {root}: could not list them ({e})."]
-    where = f" (database {profile.database})" if profile.database else ""
+    where = f" (database {ref.database})" if profile.dialect != "sqlite" else ""
     lines = [f"\n  Results are in {profile.name}{where}:"]
     # the readable path and the name the database knows it by, side by side:
     # the name is the path with every separator flattened to underscores,

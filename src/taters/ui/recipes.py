@@ -995,14 +995,14 @@ _MERGE_SHAPE = ("root_dir", "pattern", "recursive", "aggregate", "group_by",
 # vars that come from the source itself rather than from any one step. we keep
 #: Where every table a run makes goes: "" for the run folder (so a path
 #: like ``gathered/texts.csv`` is exactly what it always was), or a database
-#: address with a trailing slash, ``db://lab/taters/study7/``, so the same
+#: address with a trailing slash, ``db://lab/study7/taters/study7/``, so the same
 #: template lands in the database. Anything in, anything out: this is the
 #: one knob, and the wizard asks it once.
 _RESULTS_ROOT = {
     "results_root": {
         "default": "",
         "desc": "Where the tables this run makes go: blank for this folder, "
-                "or db://<connection>/<prefix>/ for a database.",
+                "or db://<connection>/<database>/<prefix>/ for a database.",
     },
 }
 

@@ -321,7 +321,7 @@ def _offer_to_drop_tables(prompter: Prompter, root: str) -> None:
         return
     name = found[0].profile
     try:
-        where = db.get_profile(name).database
+        where = found[0].database if db.get_profile(name).dialect != "sqlite" else ""
     except Exception:
         where = ""
     prompter.note(f"  Its {len(found)} table(s) in {name}"

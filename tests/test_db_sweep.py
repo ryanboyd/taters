@@ -80,7 +80,7 @@ def test_a_text_step_runs_from_a_table_into_a_table(lab, tmp_path, step):
                                       encoding="utf-8")
     preset = compose([step], source="db",
                      source_spec={"connection": "lab", "from": {"table": "posts", "as": "p"}},
-                     connection="lab", results_root="db://lab/taters/sweep/",
+                     connection="lab", results_root="db://lab/main/taters/sweep/",
                      text_cols=["body"], id_cols=["id"], name="sweep",
                      var_values={"dictionaries_path": str(assets / "cats.dic"),
                                  "norms_path": str(assets / "norms.csv"),
@@ -93,7 +93,7 @@ def test_a_text_step_runs_from_a_table_into_a_table(lab, tmp_path, step):
     assert not manifest["errors"], manifest["errors"]
     assert not (work / "features").exists(), "no row-level table touched the disk"
     assert not (work / "gathered").exists()
-    made = [t for t in tables.tables_under("db://lab/taters/sweep/")
+    made = [t for t in tables.tables_under("db://lab/main/taters/sweep/")
             if t.logical.startswith("taters/sweep/features/")]
     assert made, f"{step} wrote no feature table into the database"
     assert all(tables.count(t) > 0 for t in made)

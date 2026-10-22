@@ -64,7 +64,8 @@ def _slug(text: str) -> str:
 
 
 def add_connection(prompter: Prompter,
-                   existing: Optional[db.Profile] = None) -> Optional[db.Profile]:
+                   existing: Optional[db.Profile] = None, *,
+                   test: bool = True) -> Optional[db.Profile]:
     """
     The questions that make a profile, through `_ask_in_order` so Esc steps
     back one with the earlier answers kept. A server is connected to as soon
@@ -89,6 +90,8 @@ def add_connection(prompter: Prompter,
         "ssh": (existing.ssh_address if existing and existing.ssh_host else ""),
         "ssh_key": existing.ssh_key if existing else "",
         "ssh_hostkey": existing.ssh_hostkey if existing else "",
+        "socket": existing.socket if existing else "",
+        "looked": None,             # what the ssh host's own client would do, once looked
         "databases": None,          # what the server listed, once connected
         "unreached": False,         # saved without a successful connection
     }
@@ -156,7 +159,8 @@ def add_connection(prompter: Prompter,
             ask_ssh_key()
             if state["host"] == "localhost" or not state["host"]:
                 state["host"] = "localhost"
-            ask_db_address()
+            # the address is asked after the look: a socket found there is
+            # the address, and the question would only confuse
             return True
         state["ssh"] = ""
         ask_server_address()
@@ -169,6 +173,7 @@ def add_connection(prompter: Prompter,
                                 default=state["ssh"])).strip()
         if new != state["ssh"]:
             state["ssh_hostkey"] = ""          # a different machine, a different key
+            state["looked"], state["socket"] = None, ""
         state["ssh"] = new
 
     def ask_ssh_key() -> None:
@@ -203,6 +208,107 @@ def add_connection(prompter: Prompter,
             "What is the server's address? (host, or host:port)",
             default=state["host"])).strip() or "localhost"
 
+    def ask_ssh_check() -> bool:
+        """
+        Log in over ssh now, before a single question about the database:
+        if the machine cannot be reached there is nothing to ask yet. Then,
+        with the person's say-so, see how the database's own client logs in
+        there -- a saved login in their ~/.my.cnf or ~/.pgpass, or the
+        database's local socket, which lets the ssh login itself serve.
+        Nothing read here is shown or written down.
+        """
+        if state["dialect"] == "sqlite" or not state["ssh"]:
+            state["looked"] = None
+            return False
+        from ..db_source import offer_host_key
+
+        while True:
+            trial = db.with_fields(_trial(), database="")
+            try:
+                with prompter.scanning(f"Logging in to {trial.ssh_address} over ssh",
+                                       unit="checks"):
+                    code, out, err = db.remote_command(trial, "id -un")
+                if code != 0 and db._host_key_unknown(err):
+                    raise db.HostKeyUnknown(db._ssh_words(err, trial), trial,
+                                            keys=db.host_keys(trial, err))
+                if code != 0:
+                    raise db.DbError(db._ssh_words(err, trial))
+            except db.HostKeyUnknown as e:
+                accepted = offer_host_key(prompter, e, save=False)
+                if accepted is None:
+                    raise _Abandon()
+                state["ssh_hostkey"] = accepted.ssh_hostkey
+                continue
+            except (db.DbError, OSError) as e:
+                prompter.note(f"  {e}", style="yellow")
+                answer = str(prompter.select("Could not log in over ssh. What now?", [
+                    Choice("again", "Try again"),
+                    Choice("ssh", "Change the ssh host", f"Now {state['ssh']}"),
+                    Choice("key", "Change the key file",
+                           f"Now {state['ssh_key'] or 'your usual keys'}"),
+                    Choice("back", f"{glyphs.BACK} Never mind", tone="nav"),
+                ]))
+                if answer == "back":
+                    raise _Abandon()
+                if answer == "ssh":
+                    ask_ssh_host()
+                elif answer == "key":
+                    ask_ssh_key()
+                continue
+            os_user = out.strip().splitlines()[-1].strip() if out.strip() else ""
+            prompter.note(f"  Logged in to {trial.ssh_host}"
+                          + (f" as {os_user}" if os_user else "") + ".", style="green")
+            break
+
+        prompter.reason("On that machine the database may already know you: a login "
+                        "saved in your home folder, or a local socket that trusts your "
+                        "ssh login. Taters can look; it shows and saves nothing it finds.")
+        if not prompter.confirm("Look on the ssh host for how the database logs you in?",
+                                default=True):
+            state["looked"] = None
+            return True
+        with prompter.scanning(f"Looking on {trial.ssh_host}", unit="checks"):
+            hints = db.remote_login_hints(trial)
+        state["looked"] = hints
+        if hints.problem:
+            prompter.note(f"  Could not look: {hints.problem}", style="yellow")
+            return True
+        engine = dict((v, l) for v, l, _h in _KINDS)[state["dialect"]]
+        if hints.password is not None:
+            who = hints.user or state["user"] or hints.os_user
+            prompter.note(f"  Found a saved login for {who} in {hints.source} there. Taters "
+                          f"can read it fresh each session, so the password is never "
+                          f"copied anywhere.", style="green")
+            state["user"] = state["user"] or hints.user
+            if state["password"] in ("ask", "none"):
+                state["password"] = "server"
+        if hints.socket and not uses_plink():
+            prompter.note(f"  {engine} there listens on its local socket "
+                          f"({hints.socket}), where it trusts whoever is logged in. "
+                          f"Taters can connect through it as {hints.os_user or 'you'}, "
+                          f"with no password.", style="green")
+            state["socket"] = hints.socket
+            if hints.password is None:
+                state["user"] = state["user"] or hints.os_user
+                state["password"] = "none"
+        elif hints.socket and uses_plink():
+            prompter.note(f"  {engine} there listens on its local socket, which PuTTY's "
+                          f"plink cannot forward; an OpenSSH key would let Taters use it.",
+                          style="dim")
+        if hints.password is None and not hints.socket:
+            prompter.note("  Nothing saved there; Taters will ask for the password.",
+                          style="dim")
+        return True
+
+    def uses_plink() -> bool:
+        return state["ssh_key"].lower().endswith(".ppk")
+
+    def ask_address_after_look() -> bool:
+        if state["dialect"] == "sqlite" or not state["ssh"] or state["socket"]:
+            return False
+        ask_db_address()
+        return True
+
     def ask_user() -> bool:
         if state["dialect"] == "sqlite":
             return False
@@ -213,11 +319,18 @@ def add_connection(prompter: Prompter,
     def ask_name() -> bool:
         from pathlib import Path
 
+        # the login names the connection -- me-db-lab-edu -- since one
+        # person may well have two accounts on one server, and the database
+        # is not part of it: that is picked each time the connection is used
+        server = (state["ssh"].rpartition("@")[2] if state["ssh"] else state["host"]) \
+            .partition(":")[0]
         suggested = state["name"] or _slug(
             Path(state["path"]).stem if state["dialect"] == "sqlite"
-            else (state["ssh"].rpartition("@")[2] if state["ssh"] else state["host"])
-            .partition(":")[0])
+            else "-".join(w for w in (state["user"], server) if w))
         while True:
+            if state["dialect"] != "sqlite":
+                prompter.reason("A connection is the server and your login on it. Which "
+                                "database to use is asked each time you use it.")
             typed = str(prompter.text("What should Taters call this connection?",
                                       default=suggested)).strip()
             name = _slug(typed)
@@ -235,19 +348,28 @@ def add_connection(prompter: Prompter,
         if state["dialect"] == "sqlite":
             return False
         prompter.reason("Taters never writes passwords to disk.")
+        looked = state["looked"]
+        rows = [
+            Choice("ask", "Ask me each time",
+                   "Typed with dots; kept only until Taters closes"),
+            Choice("env", "From an environment variable",
+                   f"{db.password_env(state['name'])} -- set it in your shell "
+                   f"profile; useful for scripts"),
+        ]
+        if looked is not None and looked.password is not None:
+            rows.append(Choice("server", f"From your saved login on {state['ssh'].rpartition('@')[2]}",
+                               f"Read from {looked.source} there each session; never copied"))
+        rows.append(Choice("none", "No password",
+                           "Socket login on the ssh host, or a server that trusts this "
+                           "computer" if state["socket"] else
+                           "For servers that trust this computer's login"))
         state["password"] = str(prompter.select(
-            "How should Taters get the password?", [
-                Choice("ask", "Ask me each time",
-                       "Typed with dots; kept only until Taters closes"),
-                Choice("env", "From an environment variable",
-                       f"{db.password_env(state['name'])} -- set it in your shell "
-                       f"profile; useful for scripts"),
-                Choice("none", "No password",
-                       "For servers that trust this computer's login"),
-            ], default=state["password"]))
+            "How should Taters get the password?", rows, default=state["password"]))
         return True
 
     def _trial() -> db.Profile:
+        # before the name is asked (the look on the ssh host runs first), a
+        # stand-in name keeps the profile valid; nothing is saved under it
         host, _, port = state["host"].partition(":")
         try:
             port_n = int(port) if port.strip() else 0
@@ -260,7 +382,7 @@ def add_connection(prompter: Prompter,
         except ValueError:
             ssh_port_n = 0
         return db.Profile(
-            name=state["name"], dialect=state["dialect"], host=host.strip(),
+            name=state["name"] or "new", dialect=state["dialect"], host=host.strip(),
             port=port_n, user=state["user"], database=state["database"],
             path=state["path"], password=state["password"],
             schema=existing.schema if existing else "",
@@ -268,7 +390,8 @@ def add_connection(prompter: Prompter,
             ssl_ca=existing.ssl_ca if existing else "",
             export=existing.export if existing else "allowed",
             ssh_host=ssh_host.strip(), ssh_port=ssh_port_n, ssh_user=ssh_user.strip(),
-            ssh_key=state["ssh_key"], ssh_hostkey=state["ssh_hostkey"])
+            ssh_key=state["ssh_key"], ssh_hostkey=state["ssh_hostkey"],
+            socket=state["socket"] if state["ssh"] else "")
 
     def ask_connect() -> bool:
         if state["dialect"] == "sqlite":
@@ -284,9 +407,10 @@ def add_connection(prompter: Prompter,
                 password = None
                 probe = None
                 text = str(e)
-            if password is not None:
+            # "no password" is an answer, not a failure to get one
+            if password is not None or trial.password == "none":
                 reaching = (f"Connecting through ssh {trial.ssh_address} to "
-                            f"{trial.host or 'localhost'}" if trial.tunneled
+                            f"{trial.socket or trial.host or 'localhost'}" if trial.tunneled
                             else f"Connecting to {trial.host}")
                 try:
                     with prompter.scanning(reaching, unit="checks") as step:
@@ -303,10 +427,16 @@ def add_connection(prompter: Prompter,
                     with db.connect(trial, password) as session:
                         state["databases"] = session.d.list_databases(session)
                     enc = {True: "yes", False: "no", None: "unknown"}[probe.encrypted]
+                    n = len(state["databases"])
                     prompter.note(f"  Connected to {trial.host or 'localhost'}"
                                   + (f" through ssh {trial.ssh_address}" if trial.tunneled else "")
                                   + f" as {trial.user} ({probe.version}). Encrypted: "
-                                  + ("yes, by the tunnel." if trial.tunneled else f"{enc}."),
+                                  + ("yes, by the tunnel." if trial.tunneled else f"{enc}.")
+                                  + (f" {n} database(s) this login can see: "
+                                     f"{', '.join(state['databases'][:6])}"
+                                     + (" …" if n > 6 else "") + "." if n else
+                                     " This login cannot list any databases; the one to "
+                                     "use can still be typed in when it is needed."),
                                   style="green")
                     return True
                 text = "; ".join(probe.notes) or "could not connect"
@@ -327,66 +457,37 @@ def add_connection(prompter: Prompter,
                           "Only for a server inside a trusted network: the password "
                           "and the data travel in the clear")] if no_ssl else []),
                 Choice("again", "Try again"),
-                *([Choice("ssh", "Change the ssh host", f"Now {state['ssh']}"),
-                   Choice("key", "Change the key file",
-                          f"Now {state['ssh_key'] or 'your usual keys'}"),
-                   Choice("host", "Change the database's address, as seen from there",
-                          f"Now {state['host']}")]
+                *([Choice("host", "Change the database's address, as seen from there",
+                          f"Now {state['socket'] or state['host']}")]
                   if tunneled else
                   [Choice("host", "Change the server address", f"Now {state['host']}")]),
                 Choice("user", "Change the username", f"Now {state['user']}"),
                 Choice("save", "Save it anyway and sort it out later",
-                       "The database has to be typed in, since the server could not list them"),
+                       "Settings > Database connections > Test it, once it can be reached"),
                 Choice("back", f"{glyphs.BACK} Never mind", tone="nav"),
             ]))
             if answer == "back":
                 raise _Abandon()
             if answer == "plain":
                 state["ssl"] = "off"
-            if answer == "ssh":
-                ask_ssh_host()
-            elif answer == "key":
-                ask_ssh_key()
             if answer == "save":
                 state["unreached"] = True
                 state["databases"] = None
                 return True
             if answer == "host":
-                ask_db_address() if tunneled else ask_server_address()
+                if tunneled:
+                    state["socket"] = ""      # a typed address replaces a found socket
+                    ask_db_address()
+                else:
+                    ask_server_address()
             elif answer == "user":
                 state["user"] = str(prompter.text("Which username?",
                                                   default=state["user"])).strip()
             wrong = 0
 
-    def ask_database() -> bool:
-        if state["dialect"] == "sqlite":
-            return False
-        listed = state["databases"] or []
-        if not listed:
-            if state["databases"] is not None:
-                prompter.note(f"  {state['user']} cannot see any database on "
-                              f"{state['host']}; type the name of the one to use.",
-                              style="yellow")
-            state["database"] = str(prompter.text("Which database on that server?",
-                                                  default=state["database"])).strip()
-            return True
-        rows = [Choice(name, name) for name in listed]
-        rows.append(Choice("\x00type", "Type a name…", "One not listed here"))
-        prompter.reason("One database per connection. To use another on the same "
-                        "server, add a second connection.")
-        picked = str(prompter.select("Which database?", rows,
-                                     default=state["database"] if state["database"] in listed
-                                     else None))
-        if picked == "\x00type":
-            state["database"] = str(prompter.text("Which database on that server?",
-                                                  default=state["database"])).strip()
-        else:
-            state["database"] = picked
-        return True
-
     try:
-        _ask_in_order([ask_kind, ask_where, ask_user, ask_name, ask_password,
-                       ask_connect, ask_database])
+        _ask_in_order([ask_kind, ask_where, ask_ssh_check, ask_address_after_look, ask_user,
+                       ask_name, ask_password, ask_connect])
     except (GoBack, _Abandon):
         return None
 
@@ -398,35 +499,40 @@ def add_connection(prompter: Prompter,
     if state["unreached"]:
         prompter.note(f"  Not tested: {profile.name} could not be reached. Settings > "
                       f"Database connections > Test it, once it can be.", style="dim")
+    elif not test:
+        pass
     elif profile.dialect == "sqlite":
         if prompter.confirm("Test it now?", default=True):
             test_connection(prompter, profile)
     else:
-        # already logged in once above; this is the same login on the chosen
-        # database, and it says what the account may do there
+        # already logged in once above; what the account may do is a
+        # question about one database, so pick one and say
+        prompter.reason("What this login may do differs by database: read one, "
+                        "make tables in another. Pick one to check now; any other "
+                        "is checked when you use it.")
         test_connection(prompter, profile)
     return profile
 
 
 def test_connection(prompter: Prompter, profile: db.Profile) -> db.Probe:
-    """Try the connection and read back what the account can do."""
+    """Log in, pick a database, and read back what the account can do there."""
+    from ..db_source import _connect
+
     missing = driver_missing(profile.dialect)
     if missing:
         prompter.note(f"  {missing.replace('[', chr(92) + '[')}", style="yellow")
         return db.Probe(notes=(missing,))
     try:
-        password = db.password_for(profile, ask=prompter.secret)
-    except db.DbError as e:
-        prompter.note(f"  {e}", style="yellow")
-        return db.Probe(notes=(str(e),))
-    with prompter.scanning(f"Connecting to {profile.name}", unit="checks") as step:
-        result = db.probe(profile, password, on_step=step)
-    if not result.select:
+        found = _connect(prompter, profile)
+    except GoBack:
+        found = None
+    if found is None:
         db.forget_password(profile.name)
-    for i, line in enumerate(result.sentences(profile)):
-        prompter.note(f"  {line}", style="green" if i == 0 and result.select
-                      else ("yellow" if not result.select else "dim"))
-    return result
+        return db.Probe(notes=("could not connect",))
+    found.session.close()
+    for i, line in enumerate(found.probe.sentences(found.profile)):
+        prompter.note(f"  {line}", style="green" if i == 0 else "dim")
+    return found.probe
 
 
 def _run(ctx: TaskContext):

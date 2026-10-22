@@ -48,7 +48,7 @@ def both(tmp_path, monkeypatch):
     con.commit()
     con.close()
     db.save_profile(db.Profile(name="lab", dialect="sqlite", path=str(dbfile)))
-    yield csv_path, "db://lab/study"
+    yield csv_path, "db://lab/main/study"
     tables.close_sessions()
 
 
@@ -73,7 +73,7 @@ def test_a_file_and_a_table_gather_identically(both, tmp_path, kw):
     if "group_by" in kw and "id_cols" not in kw:
         kw = {**kw}
     from_file = _gather(csv_path, tmp_path / "from_file.csv", **kw)
-    from_db = _gather(table, "db://lab/taters/gathered",
+    from_db = _gather(table, "db://lab/main/taters/gathered",
                       **({**kw} if "group_by" not in kw else
                          {**kw}))
     assert tables.columns_of(from_file) == tables.columns_of(from_db)
@@ -84,7 +84,7 @@ def test_a_file_and_a_table_gather_identically(both, tmp_path, kw):
 def test_the_grouped_order_follows_the_table_key(both, tmp_path):
     """Texts are joined in key order, so the result is the same every run."""
     _csv, table = both
-    out = _gather(table, "db://lab/taters/g", text_cols=["text"], group_by=["pid"])
+    out = _gather(table, "db://lab/main/taters/g", text_cols=["text"], group_by=["pid"])
     rows = {r["text_id"]: r for r in tables.read_rows(out)}
     assert rows["p1"]["text"] == "first words second words"
     assert rows["p1"]["group_count"] == "2" and rows["p2"]["group_count"] == "1"
@@ -96,16 +96,16 @@ def test_a_table_without_a_key_needs_id_cols(both, tmp_path):
     s.run("CREATE TABLE nokey AS SELECT pid, text FROM study")
     s.close()
     with pytest.raises(ValueError, match="numbered by its position"):
-        _gather("db://lab/nokey", "db://lab/taters/x", text_cols=["text"])
+        _gather("db://lab/main/nokey", "db://lab/main/taters/x", text_cols=["text"])
     with pytest.raises(ValueError, match="order_by"):
-        _gather("db://lab/nokey", "db://lab/taters/x", text_cols=["text"], group_by=["pid"])
-    out = _gather("db://lab/nokey", "db://lab/taters/y", text_cols=["text"], id_cols=["pid"])
+        _gather("db://lab/main/nokey", "db://lab/main/taters/x", text_cols=["text"], group_by=["pid"])
+    out = _gather("db://lab/main/nokey", "db://lab/main/taters/y", text_cols=["text"], id_cols=["pid"])
     assert tables.count(out) == 4
 
 
 def test_the_base_key_is_the_default_id(both):
     _csv, table = both
-    out = _gather(table, "db://lab/taters/keyed", text_cols=["text"])
+    out = _gather(table, "db://lab/main/taters/keyed", text_cols=["text"])
     assert [r["text_id"] for r in tables.read_rows(out)] == ["1", "2", "3", "5"], \
         "rowid_ is the key; the textless row 4 is left out"
 
@@ -121,13 +121,13 @@ def test_the_gathered_table_carries_a_provenance_record(both):
     from taters.helpers.provenance import read
 
     _csv, table = both
-    out = _gather(table, "db://lab/taters/recorded", text_cols=["text"],
+    out = _gather(table, "db://lab/main/taters/recorded", text_cols=["text"],
                   id_cols=["pid", "session"])
     rec = read(out)
     assert rec and rec["defines_text"] and rec["table"] == "recorded"
     assert rec["output"]["rows"] == 4 and rec["output"]["location"] == str(out)
     # the same call again is handed back and keeps its record
-    again = _gather(table, "db://lab/taters/recorded", text_cols=["text"],
+    again = _gather(table, "db://lab/main/taters/recorded", text_cols=["text"],
                     id_cols=["pid", "session"])
     assert again == out and read(again)
 
@@ -136,10 +136,10 @@ def test_an_analyzer_reads_a_gathered_table_in_the_database(both):
     from taters.text.analyze_readability import analyze_readability
 
     _csv, table = both
-    gathered = _gather(table, "db://lab/taters/texts", text_cols=["text"],
+    gathered = _gather(table, "db://lab/main/taters/texts", text_cols=["text"],
                        id_cols=["pid", "session"])
     out = analyze_readability(analysis_csv=str(gathered),
-                              out_features_csv="db://lab/taters/readability")
+                              out_features_csv="db://lab/main/taters/readability")
     assert tables.exists(out)
     rows = list(tables.read_rows(out))
     assert len(rows) == 4 and rows[0]["text_id"] == "p1 | 1"

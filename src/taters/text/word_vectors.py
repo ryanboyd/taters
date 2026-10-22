@@ -701,7 +701,7 @@ def train_word_vectors(
         of texts, a folder of documents, or a prebuilt analysis-ready CSV.
     out_features_csv : str or Path, optional
         The features -- one row per text -- a file path or a
-        ``db://<connection>/<table>`` ref; default beside the source, under
+        ``db://<connection>/<database>/<table>`` ref; default beside the source, under
         ``features/word_vectors/``.
     out_model_json, out_neighbors_csv, out_report_md : str or Path, optional
         The model file (always a file, with its weights beside it; default

@@ -46,7 +46,7 @@ def lab(tmp_path, monkeypatch):
 def _both(tmp_path, name, header, rows, hints=None):
     """The same rows as a CSV and as a table in ``lab``; returns both refs."""
     path = write_rows(tmp_path / f"{name}.csv", header, rows)
-    ref = f"db://lab/study/{name}"
+    ref = f"db://lab/main/study/{name}"
     with tables.write_table(ref, header, hints=hints) as w:
         w.writerows(rows)
     return path, ref
@@ -93,10 +93,10 @@ def test_a_pca_fits_a_database_table_into_database_tables(lab):
                               out_model_json=lab / "db_pca_model.json")
 
     assert tables.parse_ref(from_db).is_db
-    assert str(from_db) == "db://lab/study/feats_pca_scores"
+    assert str(from_db) == "db://lab/main/study/feats_pca_scores"
     _same_rows(from_file, from_db)
-    _same_rows(lab / "feats_pca_loadings.csv", "db://lab/study/feats_pca_loadings")
-    _same_rows(lab / "feats_pca_eigenvalues.csv", "db://lab/study/feats_pca_eigenvalues")
+    _same_rows(lab / "feats_pca_loadings.csv", "db://lab/main/study/feats_pca_loadings")
+    _same_rows(lab / "feats_pca_eigenvalues.csv", "db://lab/main/study/feats_pca_eigenvalues")
     # the model is not rows; it stays on disk, and reads back the same
     a = json.loads((lab / "file_pca_model.json").read_text(encoding="utf-8"))
     b = json.loads((lab / "db_pca_model.json").read_text(encoding="utf-8"))
@@ -110,7 +110,7 @@ def test_a_pca_fits_a_database_table_into_database_tables(lab):
 
     # applying the saved model to the database table reproduces the scores
     reapplied = pca.apply_pca_csv(lab / "db_pca_model.json", ref,
-                                  out_scores_csv="db://lab/study/reapplied",
+                                  out_scores_csv="db://lab/main/study/reapplied",
                                   overwrite_existing=True)
     _same_rows(reapplied, from_db)
 
@@ -170,20 +170,20 @@ def test_one_model_scores_database_feature_tables_into_a_database_table(lab):
                                  out_csv=lab / "scores.csv",
                                  allow_unrecorded=True, verbose=False)
     from_db = score_with_model(model_json=model, feature_csvs=refs,
-                               out_csv="db://lab/study/scores",
+                               out_csv="db://lab/main/study/scores",
                                allow_unrecorded=True, verbose=False)
     assert tables.parse_ref(from_db).is_db
     assert tables.columns_of(from_db) == ["text_id", "pred_age"]
     _same_rows(from_file, from_db)
     # the joined table the scoring read is not left behind in the database
-    assert not tables.exists("db://lab/study/scores_inputs/scoring_table")
-    assert set(tables.tables_under("db://lab/study/")) == {
-        tables.parse_ref(r) for r in [*refs, "db://lab/study/scores"]}
+    assert not tables.exists("db://lab/main/study/scores_inputs/scoring_table")
+    assert set(tables.tables_under("db://lab/main/study/")) == {
+        tables.parse_ref(r) for r in [*refs, "db://lab/main/study/scores"]}
 
     kept = score_with_model(model_json=model, feature_csvs=refs,
-                            out_csv="db://lab/study/kept", keep_inputs=True,
+                            out_csv="db://lab/main/study/kept", keep_inputs=True,
                             allow_unrecorded=True, verbose=False)
-    assert tables.exists("db://lab/study/kept_inputs/scoring_table")
+    assert tables.exists("db://lab/main/study/kept_inputs/scoring_table")
     assert (tables.parse_ref(kept).local_dir() / "kept_inputs"
             / "assemble_manifest.json").is_file()
 
@@ -193,7 +193,7 @@ def test_the_default_output_lands_in_the_features_database(lab):
     _, refs = _run_features(lab)
     out = score_with_model(model_json=model, feature_csvs=refs,
                            allow_unrecorded=True, verbose=False)
-    assert str(out) == "db://lab/taters/features/model_scores/ridge__lang__age"
+    assert str(out) == "db://lab/main/taters/features/model_scores/ridge__lang__age"
     assert tables.count(out) == 60
 
 
@@ -206,14 +206,14 @@ def test_several_models_merge_into_a_database_table_with_each_beside_it(lab):
                                  out_csv=lab / "all.csv",
                                  allow_unrecorded=True, verbose=False)
     from_db = score_with_model(model_json=[first, second], feature_csvs=refs,
-                               out_csv="db://lab/study/all",
+                               out_csv="db://lab/main/study/all",
                                allow_unrecorded=True, verbose=False)
     assert tables.columns_of(from_db) == ["text_id", "ridge__lang__age__pred_age",
                                           "second__pred_age"]
     _same_rows(from_file, from_db)
-    _same_rows(lab / "all" / "ridge__lang__age.csv", "db://lab/study/all/ridge__lang__age")
-    _same_rows(lab / "all" / "second.csv", "db://lab/study/all/second")
-    assert tables.read_sidecar("db://lab/study/all", "unscored") is None
+    _same_rows(lab / "all" / "ridge__lang__age.csv", "db://lab/main/study/all/ridge__lang__age")
+    _same_rows(lab / "all" / "second.csv", "db://lab/main/study/all/second")
+    assert tables.read_sidecar("db://lab/main/study/all", "unscored") is None
 
 
 def test_per_model_tables_that_do_not_line_up_are_merged_by_key(lab):
@@ -228,15 +228,15 @@ def test_per_model_tables_that_do_not_line_up_are_merged_by_key(lab):
     from taters.stats._fit_common import write_unscored
 
     infos = [describe(_ridge(lab)), describe(_ridge(lab, "second"))]
-    a = "db://lab/study/all/ridge__lang__age"
-    b = "db://lab/study/all/second"
+    a = "db://lab/main/study/all/ridge__lang__age"
+    b = "db://lab/main/study/all/second"
     with tables.write_table(a, ["text_id", "pred_age"]) as w:
         w.writerows([["d2", "1"], ["d1", "2"]])
     with tables.write_table(b, ["text_id", "pred_age"]) as w:
         w.writerows([["d1", "3"], ["d9", "4"]])
     write_unscored(b, [("missing from feature table", "two", 1)], encoding="utf-8-sig")
 
-    merged = "db://lab/study/all"
+    merged = "db://lab/main/study/all"
     _merge_scores(infos, [a, b], merged, key_cols=["text_id"], encoding="utf-8-sig")
     _merge_unscored(infos, [a, b], merged, encoding="utf-8-sig")
     rows = list(tables.read_rows(merged))
@@ -280,7 +280,7 @@ def test_a_feature_table_averages_from_and_into_the_database(lab):
         in_csv=feat_file, out_csv=lab / "by_speaker.csv", keys_csv=keys_file,
         group_by=["conv", "speaker"], verbose=False)
     from_db = average_feature_table(
-        in_csv=feat_ref, out_csv="db://lab/study/by_speaker", keys_csv=keys_ref,
+        in_csv=feat_ref, out_csv="db://lab/main/study/by_speaker", keys_csv=keys_ref,
         group_by=["conv", "speaker"], verbose=False)
     assert tables.parse_ref(from_db).is_db
     assert tables.columns_of(from_db) == ["text_id", "conv", "speaker",
@@ -294,7 +294,7 @@ def test_a_feature_table_averages_from_and_into_the_database(lab):
 
     # the second level reads the first's output straight from the database
     chained = average_feature_table(
-        in_csv=from_db, out_csv="db://lab/study/by_conv", group_by=["conv"],
+        in_csv=from_db, out_csv="db://lab/main/study/by_conv", group_by=["conv"],
         verbose=False)
     by_conv = {r["conv"]: r for r in tables.read_rows(chained)}
     assert float(by_conv["c1"]["words"]) == pytest.approx(1.75)
@@ -324,7 +324,7 @@ def test_a_wide_embeddings_table_aggregates_from_the_database(lab):
                      stats=["mean", "std", "count"], exclude_cols=["text_id", "text"])
     from_file = aggregate_features(root_dir=path, plan=plan, out_csv=lab / "agg.csv",
                                    verbose=False)
-    from_db = aggregate_features(root_dir=ref, plan=plan, out_csv="db://lab/study/agg",
+    from_db = aggregate_features(root_dir=ref, plan=plan, out_csv="db://lab/main/study/agg",
                                  verbose=False)
     assert tables.parse_ref(from_db).is_db
     cols = tables.columns_of(from_db)
@@ -344,7 +344,7 @@ def test_a_wide_embeddings_table_aggregates_from_the_database(lab):
     dropped = aggregate_features(root_dir=ref, plan=make_plan(
         group_by=["speaker"], per_file=False, stats=["mean"],
         exclude_cols=["text_id", "text"], dropna=True),
-        out_csv="db://lab/study/agg_dropna", verbose=False)
+        out_csv="db://lab/main/study/agg_dropna", verbose=False)
     assert [r["speaker"] for r in tables.read_rows(dropped)] == ["alice", "bob"]
 
 

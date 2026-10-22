@@ -60,7 +60,7 @@ def lab(tmp_path, monkeypatch):
     con.commit()
     con.close()
     db.save_profile(db.Profile(name="lab", dialect="sqlite", path=str(dbfile)))
-    yield csv_to_analysis_ready_csv(csv_path="db://lab/study", out_csv="db://lab/taters/texts",
+    yield csv_to_analysis_ready_csv(csv_path="db://lab/main/study", out_csv="db://lab/main/taters/texts",
                                     text_cols=["text"], id_cols=["pid"], verbose=False)
     tables.close_sessions()
     db._SECRETS.clear()
@@ -83,9 +83,9 @@ def _train(gathered, tmp_path, **kw):
 
 @needs_gensim
 def test_training_from_a_database_writes_its_tables_back_and_its_model_to_disk(lab, tmp_path):
-    out = _train(lab, tmp_path, out_features_csv="db://lab/taters/features/word_vectors")
+    out = _train(lab, tmp_path, out_features_csv="db://lab/main/taters/features/word_vectors")
     assert isinstance(out, tables.TableRef) and out.is_db
-    assert str(out) == "db://lab/taters/features/word_vectors"
+    assert str(out) == "db://lab/main/taters/features/word_vectors"
     assert tables.count(out) == 80
     columns = tables.columns_of(out)
     assert columns[:4] == ["text_id", "token_count", "in_vocab_count", "wv_1"]
@@ -104,7 +104,7 @@ def test_training_from_a_database_writes_its_tables_back_and_its_model_to_disk(l
     assert not list(models.glob(".wv_*")), "the scratch files are gone"
 
     # the neighbors table went beside the features, in the database
-    neighbors = tables.parse_ref("db://lab/taters/features/wv_neighbors")
+    neighbors = tables.parse_ref("db://lab/main/taters/features/wv_neighbors")
     assert tables.exists(neighbors)
     assert tables.columns_of(neighbors) == ["probe", "rank", "word", "similarity"]
     by_probe = {}
@@ -127,9 +127,9 @@ def test_training_from_a_database_writes_its_tables_back_and_its_model_to_disk(l
 def test_the_default_destinations_follow_the_source_into_the_database(lab, tmp_path):
     out = wv.train_word_vectors(analysis_csv=lab, min_count=2, vector_size=8, epochs=2,
                                 seed=1, reproducible=True, verbose=False)
-    assert str(out) == "db://lab/taters/features/word_vectors/texts"
-    assert tables.exists("db://lab/taters/features/word_vectors/word_vectors_neighbors")
-    model = tmp_path / "db_local" / "lab" / "taters" / "features" / "word_vectors" / \
+    assert str(out) == "db://lab/main/taters/features/word_vectors/texts"
+    assert tables.exists("db://lab/main/taters/features/word_vectors/word_vectors_neighbors")
+    model = tmp_path / "db_local" / "lab" / "main" / "taters" / "features" / "word_vectors" / \
         "models" / "word_vectors.json"
     assert model.is_file() and model.with_suffix(".npy").is_file()
     # the same call again is handed back, not retrained
@@ -140,33 +140,33 @@ def test_the_default_destinations_follow_the_source_into_the_database(lab, tmp_p
 
 @needs_gensim
 def test_applying_the_model_from_the_database_reproduces_the_training_features(lab, tmp_path):
-    trained = _train(lab, tmp_path, out_features_csv="db://lab/taters/features/word_vectors")
+    trained = _train(lab, tmp_path, out_features_csv="db://lab/main/taters/features/word_vectors")
     applied = wv.apply_word_vectors(model_json=tmp_path / "models" / "wv.json",
                                     analysis_csv=lab,
-                                    out_features_csv="db://lab/taters/features/applied",
+                                    out_features_csv="db://lab/main/taters/features/applied",
                                     verbose=False)
-    assert isinstance(applied, tables.TableRef) and str(applied) == "db://lab/taters/features/applied"
+    assert isinstance(applied, tables.TableRef) and str(applied) == "db://lab/main/taters/features/applied"
     assert tables.columns_of(applied) == tables.columns_of(trained)
     assert tables.fingerprint(applied) == tables.fingerprint(trained)
     # and the default destination for a database source is a table too
     by_default = wv.apply_word_vectors(model_json=tmp_path / "models" / "wv.json",
                                        analysis_csv=lab, verbose=False)
-    assert str(by_default) == "db://lab/taters/features/word_vectors_applied/texts"
+    assert str(by_default) == "db://lab/main/taters/features/word_vectors_applied/texts"
     assert tables.count(by_default) == 80
 
 
 @needs_gensim
 def test_describe_writes_the_neighbors_table_where_it_is_asked_to(lab, tmp_path):
-    _train(lab, tmp_path, out_features_csv="db://lab/taters/features/word_vectors")
+    _train(lab, tmp_path, out_features_csv="db://lab/main/taters/features/word_vectors")
     model = tmp_path / "models" / "wv.json"
-    out = wv.describe_word_vectors(model, "db://lab/taters/neighbors", probes="potato, zork",
+    out = wv.describe_word_vectors(model, "db://lab/main/taters/neighbors", probes="potato, zork",
                                    top_neighbors=3, verbose=False)
-    assert str(out) == "db://lab/taters/neighbors"
+    assert str(out) == "db://lab/main/taters/neighbors"
     rows = list(tables.read_rows(out))
     assert [r["word"] for r in rows if r["probe"] == "zork"] == [""], "an unknown probe is a blank row"
     assert len([r for r in rows if r["probe"] == "potato"]) == 3
     # asked again, the table is handed back; a file default lands beside the model
-    assert wv.describe_word_vectors(model, "db://lab/taters/neighbors", verbose=False) == out
+    assert wv.describe_word_vectors(model, "db://lab/main/taters/neighbors", verbose=False) == out
     beside = wv.describe_word_vectors(model, verbose=False)
     assert beside == model.with_name("wv_neighbors.csv") and beside.is_file()
     assert "the" not in beside.read_text(encoding="utf-8-sig").split("\n")[1].split(",")[0]

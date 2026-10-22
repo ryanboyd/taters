@@ -68,20 +68,20 @@ def test_a_file_ref_is_a_path_and_a_db_ref_is_not(tmp_path):
     assert not f.is_db and Path(f) == tmp_path / "features" / "readability.csv"
     assert f.stem == "readability"
 
-    d = parse_ref("db://lab/taters/study7/features/readability")
+    d = parse_ref("db://lab/main/taters/study7/features/readability")
     assert d.is_db and d.profile == "lab" and d.stem == "readability"
     assert d.parts == ["taters", "study7", "features", "readability"]
     with pytest.raises(TypeError):
         Path(d)
     with pytest.raises(TypeError):
         open(d)
-    assert str(d) == "db://lab/taters/study7/features/readability"
+    assert str(d) == "db://lab/main/taters/study7/features/readability"
 
 
 def test_a_db_ref_survives_a_template_suffix_and_a_careless_path(tmp_path):
-    assert parse_ref("db://lab/features/readability.csv") == parse_ref("db://lab/features/readability")
+    assert parse_ref("db://lab/main/features/readability.csv") == parse_ref("db://lab/main/features/readability")
     assert parse_ref(Path("db:/lab/features/readability")).is_db, "what Path() leaves behind"
-    assert parse_ref("db://lab/x").sibling("y") == parse_ref("db://lab/y")
+    assert parse_ref("db://lab/main/x").sibling("y") == parse_ref("db://lab/main/y")
     assert parse_ref(tmp_path / "a" / "x.csv").sibling("y") == parse_ref(tmp_path / "a" / "y.csv")
     with pytest.raises(ValueError):
         parse_ref("db://lab")
@@ -89,10 +89,10 @@ def test_a_db_ref_survives_a_template_suffix_and_a_careless_path(tmp_path):
 
 def test_a_ref_pickles_hashes_and_compares_by_its_string():
     import pickle
-    r = parse_ref("db://lab/a/b")
+    r = parse_ref("db://lab/main/a/b")
     assert pickle.loads(pickle.dumps(r)) == r
-    assert len({r, parse_ref("db://lab/a/b")}) == 1
-    assert r == "db://lab/a/b"
+    assert len({r, parse_ref("db://lab/main/a/b")}) == 1
+    assert r == "db://lab/main/a/b"
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +136,7 @@ def test_profiles_are_saved_without_passwords_and_read_back(home, monkeypatch):
     saved = (home / "settings.json").read_text(encoding="utf-8")
     assert "password" in saved and "secret" not in saved, "only *how*, never the value"
     assert db.get_profile("lab-db").label() == \
-        "MySQL · study7 on db.lab.edu · as ro · password from TATERS_DB_PASSWORD_LAB_DB"
+        "MySQL · ro@db.lab.edu · password from TATERS_DB_PASSWORD_LAB_DB"
 
     monkeypatch.setenv("TATERS_DB_PASSWORD_LAB_DB", "s3cret")
     assert db.password_for(db.get_profile("lab-db")) == "s3cret"
@@ -163,7 +163,7 @@ def test_a_bad_profile_name_or_dialect_is_refused(home):
 # ---------------------------------------------------------------------------
 
 def test_a_table_is_typed_swapped_in_and_read_back_in_order(lab):
-    ref = parse_ref("db://lab/taters/s7/features/read")
+    ref = parse_ref("db://lab/main/taters/s7/features/read")
     rows = [["a", "1", "1.5", "hi"], ["b", "007", "nan", ""], ["c", "3", "", "yo"]]
     with tables.write_table(ref, ["text_id", "n", "x", "note"]) as w:
         w.writerows(rows)
@@ -187,7 +187,7 @@ def test_a_table_is_typed_swapped_in_and_read_back_in_order(lab):
 
 
 def test_hinted_columns_skip_the_typed_copy_and_still_type(lab):
-    ref = parse_ref("db://lab/t/hinted")
+    ref = parse_ref("db://lab/main/t/hinted")
     with tables.write_table(ref, ["text_id", "n", "f"],
                             hints={"text_id": "text", "n": "int", "f": "float"}) as w:
         w.writerow(["a", "4", "2.5"])
@@ -201,7 +201,7 @@ def test_a_table_taters_did_not_make_is_never_replaced(lab):
     s.run('CREATE TABLE "mine" ("a" TEXT)')
     s.close()
     with pytest.raises(db.DbError, match="Taters did not make"):
-        with tables.write_table(parse_ref("db://lab/mine"), ["a"]) as w:
+        with tables.write_table(parse_ref("db://lab/main/mine"), ["a"]) as w:
             w.writerow(["x"])
     s = db.session_for("lab")
     assert s.d.table_exists(s, "mine") and not s.d.table_exists(s, "mine__tload")
@@ -209,7 +209,7 @@ def test_a_table_taters_did_not_make_is_never_replaced(lab):
 
 
 def test_an_interrupted_load_leaves_the_old_table_and_no_scratch(lab):
-    ref = parse_ref("db://lab/t/keep")
+    ref = parse_ref("db://lab/main/t/keep")
     with tables.write_table(ref, ["a"]) as w:
         w.writerow(["old"])
     with pytest.raises(RuntimeError):
@@ -241,7 +241,7 @@ def test_a_table_too_wide_for_the_engine_is_packed_and_reads_back_the_same(lab, 
             for n in range(5)]
     rows[2][5] = ""                                   # a blank survives the trip
     rows[3][6] = "007"                                # and so does an id-like cell
-    ref = parse_ref("db://lab/taters/s/features/embeddings")
+    ref = parse_ref("db://lab/main/taters/s/features/embeddings")
     hints = {"text_id": "text", "source_col": "text", **{f"d{i}": "float" for i in range(2500)}}
     with tables.write_table(ref, cols, hints=hints) as w:
         w.writerows(rows)
@@ -269,13 +269,13 @@ def test_a_table_too_wide_for_the_engine_is_packed_and_reads_back_the_same(lab, 
 def test_a_packed_table_cannot_key_on_a_packed_column(lab):
     cols = [f"c{i}" for i in range(2000)]
     with pytest.raises(db.DbError, match="would be packed away"):
-        with tables.write_table(parse_ref("db://lab/wide"), cols, unique_key="c5"):
+        with tables.write_table(parse_ref("db://lab/main/wide"), cols, unique_key="c5"):
             pass
     # no hints at all: every column that is not an id gets packed, and the
     # text that lands there still comes back as text
-    with tables.write_table(parse_ref("db://lab/wide"), cols) as w:
+    with tables.write_table(parse_ref("db://lab/main/wide"), cols) as w:
         w.writerow(["x y"] + ["1"] * 1999)
-    assert list(tables.read_cells("db://lab/wide")) == [["x y"] + ["1"] * 1999]
+    assert list(tables.read_cells("db://lab/main/wide")) == [["x y"] + ["1"] * 1999]
 
 
 # ---------------------------------------------------------------------------
@@ -289,7 +289,7 @@ def test_a_packed_table_cannot_key_on_a_packed_column(lab):
 ])
 def test_the_fingerprint_of_a_file_equals_its_database_copy(lab, tmp_path, cells):
     f = write_rows(tmp_path / "t.csv", ["text_id", "n", "x", "s"], [cells, ["z", "1", "2", "3"]])
-    ref = parse_ref("db://lab/t/copy")
+    ref = parse_ref("db://lab/main/t/copy")
     with tables.write_table(ref, ["text_id", "n", "x", "s"]) as w:
         for row in read_rows(f):
             w.writerow(row)
@@ -423,7 +423,7 @@ def test_export_writes_a_join_to_csv_with_only_select_needed(lab, tmp_path):
     rows = read_rows(out)
     assert list(rows[0]) == ["id", "body", "age"]
     assert [r["age"] for r in rows] == ["30", "30", "25", ""], "the orphan's age is blank"
-    assert tables.export_table(source="db://lab/users", out_csv=tmp_path / "u.csv",
+    assert tables.export_table(source="db://lab/main/users", out_csv=tmp_path / "u.csv",
                                verbose=False).is_file()
     assert len(read_rows(tmp_path / "u.csv")) == 3
 
@@ -431,7 +431,7 @@ def test_export_writes_a_join_to_csv_with_only_select_needed(lab, tmp_path):
 def test_export_is_on_the_command_line(lab, tmp_path):
     from taters.helpers.tables import main
     out = tmp_path / "cli.csv"
-    main(["export", "--source", "db://lab/users", "--out-csv", str(out), "--verbose", "false"])
+    main(["export", "--source", "db://lab/main/users", "--out-csv", str(out), "--verbose", "false"])
     assert out.is_file() and len(read_rows(out)) == 3
 
 
@@ -462,8 +462,8 @@ def test_a_port_that_is_not_a_database_is_said_in_words_not_a_traceback(home, mo
         raise pymysql.err.InternalError(
             "Packet sequence number wrong - got 45 expected 0")
     monkeypatch.setattr(pymysql, "connect", refuse)
-    profile = db.Profile(name="cronus", dialect="mysql", host="cronus.example.edu",
-                         user="boyd", password="ask")
+    profile = db.Profile(name="myserver", dialect="mysql", host="myserver.example.edu",
+                         user="me", password="ask")
     result = db.probe(profile, "pw")
     assert not result.select
     said = " ".join(result.notes)
@@ -476,20 +476,20 @@ def test_a_port_that_is_not_a_database_is_said_in_words_not_a_traceback(home, mo
 # ---------------------------------------------------------------------------
 
 def test_a_tunneled_profile_round_trips_and_names_the_ssh_host(home):
-    prof = db.Profile(name="cronus", dialect="mysql", host="localhost", user="boyd",
-                      database="study", ssh_host="cronus.cs.example.edu", ssh_user="rboyd",
+    prof = db.Profile(name="myserver", dialect="mysql", host="localhost", user="me",
+                      database="study", ssh_host="myserver.example.edu", ssh_user="me",
                       ssh_port=2200, ssh_key="~/.ssh/id_lab")
     db.save_profile(prof)
     (back,) = db.list_profiles()
     assert back == prof and back.tunneled
-    assert back.ssh_address == "rboyd@cronus.cs.example.edu:2200"
-    assert back.where == "study on localhost via ssh rboyd@cronus.cs.example.edu:2200"
+    assert back.ssh_address == "me@myserver.example.edu:2200"
+    assert back.where == "study on localhost via ssh me@myserver.example.edu:2200"
     cmd = db.tunnel_command(back, 51234)
     assert cmd[0] == "ssh" and "-N" in cmd and "BatchMode=yes" in cmd
     assert cmd[cmd.index("-L") + 1] == "127.0.0.1:51234:localhost:3306"
     assert cmd[cmd.index("-p") + 1] == "2200"
     assert cmd[cmd.index("-i") + 1].endswith(".ssh/id_lab") and "~" not in cmd[cmd.index("-i") + 1]
-    assert cmd[-1] == "rboyd@cronus.cs.example.edu"
+    assert cmd[-1] == "me@myserver.example.edu"
     assert db._ssl_context(back) is None, "the tunnel is the encryption"
 
 
@@ -536,7 +536,7 @@ def test_a_database_behind_ssh_is_reached_through_the_tunnel(home):
         result = db.probe(prof)
         assert result.select and result.can_write, result.notes
         assert "t" in db._TUNNELS
-        ref = parse_ref("db://t/taters/sshtest/x")
+        ref = parse_ref("db://t/taters_test/taters/sshtest/x")
         with tables.write_table(ref, ["text_id", "a"]) as w:
             w.writerow(["r1", "1"])
         assert list(tables.read_rows(ref)) == [{"text_id": "r1", "a": "1"}]
@@ -699,3 +699,104 @@ def test_the_probe_says_what_it_is_doing_at_each_step(lab):
         "Setting up the small registry Taters keeps of its tables",
     ]
     assert result.tables == 6, "counted in one query, not described one by one"
+
+
+# ---------------------------------------------------------------------------
+# What the ssh host's own client knows
+# ---------------------------------------------------------------------------
+
+def test_the_look_reads_the_saved_mysql_login_and_the_socket():
+    p = db.Profile(name="lab", dialect="mysql", ssh_host="h.edu", ssh_user="me")
+    out = ("--mycnf--\n[client]\nuser = lab_ro\npassword = \"p@ss:word\"\n# a comment\n"
+           "[mysqld]\nuser = mysql\n--pgpass--\n--sockets--\nmysql=/run/mysqld/mysqld.sock\n"
+           "--user--\nme\n")
+    h = db.parse_login_hints(out, p)
+    assert (h.user, h.password, h.socket, h.source, h.os_user) == \
+        ("lab_ro", "p@ss:word", "/run/mysqld/mysqld.sock", "~/.my.cnf", "me")
+    assert h.found
+    nothing = db.parse_login_hints("--mycnf--\n--pgpass--\n--sockets--\n--user--\nme\n", p)
+    assert not nothing.found and nothing.os_user == "me"
+
+
+def test_the_look_reads_pgpass_for_the_right_database():
+    p = db.Profile(name="lab", dialect="postgres", database="study", ssh_host="h.edu")
+    out = ("--mycnf--\n--pgpass--\nlocalhost:5432:other:bob:nope\n"
+           "localhost:5432:study:ann:yes:colon\n*:*:*:fallback:z\n--sockets--\n"
+           "postgres=/var/run/postgresql/.s.PGSQL.5432\n--user--\nann\n")
+    h = db.parse_login_hints(out, p)
+    assert (h.user, h.password, h.source) == ("ann", "yes:colon", "~/.pgpass")
+    assert h.socket == "/var/run/postgresql/.s.PGSQL.5432"
+
+
+def test_a_socket_tunnel_forwards_to_the_socket_and_plink_cannot(home):
+    p = db.Profile(name="lab", dialect="mysql", user="me", password="none", ssh_host="h.edu",
+                   ssh_user="me", socket="/run/mysqld/mysqld.sock")
+    cmd = db.tunnel_command(p, 5555)
+    assert cmd[cmd.index("-L") + 1] == "127.0.0.1:5555:/run/mysqld/mysqld.sock"
+    assert "localhost" not in cmd[cmd.index("-L") + 1]
+    with pytest.raises(db.DbError, match="plink cannot forward"):
+        db.tunnel_command(db.with_fields(p, ssh_key="/k.ppk"), 5555)
+    assert p.where == " on /run/mysqld/mysqld.sock via ssh me@h.edu".replace(" on", "", 1) \
+        or "via ssh me@h.edu" in p.where
+
+
+def test_the_server_password_mode_reads_the_saved_login_each_session(home, monkeypatch):
+    p = db.Profile(name="lab", dialect="mysql", host="localhost", user="lab_ro",
+                   password="server", ssh_host="h.edu", ssh_user="me")
+    db.save_profile(p)
+    calls = []
+    monkeypatch.setattr(db, "remote_login_hints", lambda profile: (
+        calls.append(profile.name), db.LoginHints(user="lab_ro", password="s3cret",
+                                                  source="~/.my.cnf"))[1])
+    assert db.password_for(p) == "s3cret"
+    assert db.password_for(p) == "s3cret" and calls == ["lab"], "once per session"
+    db.forget_password("lab")
+    monkeypatch.setattr(db, "remote_login_hints", lambda profile: db.LoginHints(os_user="me"))
+    with pytest.raises(db.NotPermitted, match="saved login"):
+        db.password_for(p)
+    assert "s3cret" not in (home / "settings.json").read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(not __import__("os").environ.get("TATERS_TEST_SSH_KEY"),
+                    reason="needs the docker ssh container; see tests/README.md")
+def test_a_database_that_trusts_the_ssh_login_needs_no_password_through_its_socket(home):
+    """The test container runs a MariaDB on its socket only, where the user
+    taters logs in by socket authentication: the shape of a lab server where
+    `mysql` just launches once you are logged in."""
+    import os
+
+    key = os.environ["TATERS_TEST_SSH_KEY"]
+    look = db.Profile(name="lk", dialect="mysql", database="socket_test", password="ask",
+                      ssh_host="127.0.0.1", ssh_port=2222, ssh_user="taters", ssh_key=key)
+    hints = db.remote_login_hints(look)
+    assert hints.socket.endswith("mysqld.sock") and hints.os_user == "taters"
+    prof = db.Profile(name="sk", dialect="mysql", user="taters", database="socket_test",
+                      password="none", ssh_host="127.0.0.1", ssh_port=2222, ssh_user="taters",
+                      ssh_key=key, socket=hints.socket)
+    db.save_profile(prof)
+    try:
+        result = db.probe(prof)
+        assert result.select and result.can_write, result.notes
+        ref = parse_ref("db://sk/socket_test/taters/sock/x")
+        with tables.write_table(ref, ["text_id", "a"]) as w:
+            w.writerow(["r1", "1"])
+        assert list(tables.read_rows(ref)) == [{"text_id": "r1", "a": "1"}]
+    finally:
+        tables.close_sessions()
+
+
+def test_an_ssh_host_that_reads_as_an_option_is_refused():
+    """ssh -oProxyCommand=... runs a local command: a host or a login that
+    starts with a dash must never reach the command line."""
+    for bad in ("-oProxyCommand=calc", "-v", "h e.edu", "h;edu"):
+        with pytest.raises(ValueError, match="ssh host"):
+            db.Profile(name="lab", dialect="mysql", ssh_host=bad)
+    with pytest.raises(ValueError, match="ssh user"):
+        db.Profile(name="lab", dialect="mysql", ssh_host="h.edu", ssh_user="-oX")
+    assert db.Profile(name="lab", dialect="mysql", ssh_host="my-server.example.edu",
+                      ssh_user="me_2").ssh_address == "me_2@my-server.example.edu"
+
+
+def test_a_found_password_never_shows_in_a_repr():
+    h = db.LoginHints(user="u", password="s3cret", source="~/.my.cnf")
+    assert "s3cret" not in repr(h) and "s3cret" not in str(h)

@@ -82,6 +82,9 @@ def test_import_export_rename_and_delete_carry_the_payload(home, tmp_path):
 
     renamed = lib.rename(kind, "clinical", "notes-v2")
     assert renamed.name == "notes-v2.json"
+    # the name inside the file follows too: menus read that one, and a model
+    # once stayed "roberta-base-adapted" on every screen through three renames
+    assert json.loads(renamed.read_text(encoding="utf-8")).get("name") in (None, "notes-v2")
     assert (lib.kind_dir(kind) / "notes-v2.encoder").is_dir()
     assert not (lib.kind_dir(kind) / "clinical.encoder").exists()
     doc = json.loads(renamed.read_text(encoding="utf-8"))
@@ -330,3 +333,18 @@ def test_the_import_offer_files_each_model_where_it_belongs(home, tmp_path):
     p = ScriptedPrompter([True, False])
     assert offer_library_import(p, [(enc, "enc (text encoder)")]) == []
     assert any("already in your library" in q for _k, q in p.asked)
+
+
+def test_a_rename_renames_the_model_itself_not_just_its_file(home, tmp_path):
+    from taters.helpers.model_spec import describe_encoder
+
+    kind = lib.KINDS["encoders"]
+    manifest = _encoder(tmp_path / "run")
+    doc = json.loads(manifest.read_text(encoding="utf-8"))
+    doc["name"] = "clinical"
+    manifest.write_text(json.dumps(doc), encoding="utf-8")
+    lib.import_into(kind, manifest)
+    renamed = lib.rename(kind, "clinical", "kodis-adapted")
+    assert json.loads(renamed.read_text(encoding="utf-8"))["name"] == "kodis-adapted"
+    label, _detail = describe_encoder(renamed)
+    assert label.startswith("kodis-adapted [")

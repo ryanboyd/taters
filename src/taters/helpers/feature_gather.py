@@ -328,7 +328,7 @@ def feature_gather(
     ----------
     root_dir : PathLike
         Folder containing per-item CSVs (or a single CSV file), or a table
-        in a database (``db://<connection>/<table>``).
+        in a database (``db://<connection>/<database>/<table>``).
     pattern : str, default="*.csv"
         Glob pattern for selecting CSV files.
     recursive : bool, default=True
@@ -799,7 +799,7 @@ def aggregate_features(
     ----------
     root_dir : PathLike
         Folder containing per-item CSVs, a single CSV file, or a database
-        table (``db://<connection>/<table>``).
+        table (``db://<connection>/<database>/<table>``).
     pattern : str, default="*.csv"
         Glob pattern for selecting files.
     recursive : bool, default=True

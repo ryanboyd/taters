@@ -175,6 +175,7 @@ def test_fine_tuning_asks_which_columns_to_predict_and_offers_only_spreadsheets(
         "distilroberta-base",           # the encoder, before anything else
         "csv", *browse_to(study_csv), ["text"], True, ["pid"],
         "row",
+        "",                             # the fine-tuned model's name: the default
         ["openness", "condition"],      # the columns we want to predict
         ":done",                        # picking something opens up the options list
         "Predict", "save",
@@ -220,17 +221,24 @@ def test_adapting_asks_for_the_encoder_first_and_names_the_result_after_it(study
         "distilroberta-base",
         "csv", *browse_to(study_csv), ["text"], True, ["pid"],
         "row",
+        "Kodis adapted",                # what the adapted model is called
         ":done", "Adapt", "save",
     ])
     assert run_train(p, cwd=tmp_path) is None
     questions = [q for _k, q in p.asked]
     assert questions.index("Which encoder?") < questions.index("What kind of data do you have?")
+    # the model's own name is a question, asked where the model is made --
+    # a real session named the pipeline and expected the model to carry it
+    assert "What should the adapted model be called?" in questions
+    assert "Spelled Kodis-adapted" in p.text_output
     import yaml
 
     preset = yaml.safe_load(next(tmp_path.glob("*/*.yaml")).read_text(encoding="utf-8"))
     variables = preset["meta"]["variables"]
     assert variables["encoder"]["default"] == "distilroberta-base"
-    assert variables["encoder_name"]["default"] == "distilroberta-base-adapted"
+    assert variables["encoder_name"]["default"] == "Kodis-adapted"
+    step = next(s for s in preset["steps"] if s["call"].endswith("adapt_encoder"))
+    assert step["with"]["name"] == "{{var:encoder_name}}"
 
 
 def test_esc_walks_back_one_screen_at_a_time(tmp_path):
@@ -386,6 +394,7 @@ def test_training_from_scratch_asks_the_size_and_warns_about_the_cost(study_csv,
         "scratch", "scratch_transformer",
         "csv", *browse_to(study_csv), ["text"], True, ["pid"], "row",
         "small",                        # which size
+        "",                             # its name: the default
         True,                           # go ahead
         ":done", "Scratch", "save",
     ])

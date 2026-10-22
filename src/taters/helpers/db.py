@@ -96,6 +96,8 @@ _NUMBER = re.compile(r"^[+-]?(?:(?:0|[1-9]\d*)(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?
 _NON_FINITE = {"nan", "inf", "-inf", "+inf", "infinity", "-infinity", "+infinity"}
 
 _PROFILE_NAME = re.compile(r"^[a-z][a-z0-9_-]*$")
+#: What may go on an ssh command line as a host or a login name.
+_SSH_WORD = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 class DbError(RuntimeError):
@@ -130,9 +132,11 @@ class Profile:
     A saved way to reach a database. Everything but the password.
 
     ``password`` records *how* the password is obtained -- ``"ask"`` (a
-    masked prompt, once per session), ``"env"`` (``TATERS_DB_PASSWORD_<NAME>``)
-    or ``"none"`` -- never the password itself. A ``password`` value that is
-    anything else is dropped when the profile is loaded.
+    masked prompt, once per session), ``"env"`` (``TATERS_DB_PASSWORD_<NAME>``),
+    ``"server"`` (read from the person's own ``~/.my.cnf`` or ``~/.pgpass``
+    on the ssh host, each session) or ``"none"`` -- never the password
+    itself. A ``password`` value that is anything else is dropped when the
+    profile is loaded.
     """
 
     name: str
@@ -159,10 +163,15 @@ class Profile:
     #: plink, which otherwise only trusts what PuTTY has cached. OpenSSH
     #: keeps its own list (known_hosts), so this stays empty for it.
     ssh_hostkey: str = ""
+    #: The database's unix socket on the ssh host. Set, the tunnel goes to
+    #: the socket instead of a port, and the server sees the connection as
+    #: the ssh user -- which is what lets a database that trusts the local
+    #: login (socket authentication) be used with no password at all.
+    socket: str = ""
 
     _FIELDS = ("name", "dialect", "host", "port", "user", "database", "schema",
                "path", "ssl", "ssl_ca", "password", "export",
-               "ssh_host", "ssh_port", "ssh_user", "ssh_key", "ssh_hostkey")
+               "ssh_host", "ssh_port", "ssh_user", "ssh_key", "ssh_hostkey", "socket")
 
     def __post_init__(self):
         if self.dialect not in DIALECTS:
@@ -170,8 +179,15 @@ class Profile:
         if not _PROFILE_NAME.match(self.name):
             raise ValueError(f"a connection name is lowercase letters, digits, "
                              f"_ or -, starting with a letter: {self.name!r}")
-        if self.password not in ("ask", "env", "none"):
+        if self.password not in ("ask", "env", "none", "server"):
             object.__setattr__(self, "password", "ask")
+        # these become arguments to ssh/plink: a value starting with "-"
+        # would be read as an option (ProxyCommand runs a local command),
+        # so only the characters a host name or a login can hold are allowed
+        for label, value in (("ssh host", self.ssh_host), ("ssh user", self.ssh_user)):
+            if value and not _SSH_WORD.match(value):
+                raise ValueError(f"an {label} is letters, digits, dots, underscores and "
+                                 f"dashes, and cannot start with a dash: {value!r}")
 
     @property
     def engine_label(self) -> str:
@@ -188,23 +204,36 @@ class Profile:
         return (f"{self.ssh_user}@" if self.ssh_user else "") + f"{self.ssh_host}{port}"
 
     @property
-    def where(self) -> str:
-        """``study7 on db.lab.edu`` or the file's name."""
-        if self.dialect == "sqlite":
-            return Path(self.path).name or self.path
+    def server(self) -> str:
+        """``db.lab.edu`` (with the port when it is not the usual one), or the
+        socket or address as seen through the ssh tunnel."""
         port = f":{self.port}" if self.port and self.port != DEFAULT_PORT[self.dialect] else ""
         if self.tunneled:
-            return f"{self.database} on {self.host or 'localhost'}{port} via ssh {self.ssh_address}"
-        return f"{self.database} on {self.host}{port}"
+            return (self.socket if self.socket else f"{self.host or 'localhost'}{port}") \
+                + f" via ssh {self.ssh_address}"
+        return f"{self.host}{port}"
+
+    @property
+    def where(self) -> str:
+        """``study7 on db.lab.edu`` when pointed at a database, else just the
+        server; or the file's name."""
+        if self.dialect == "sqlite":
+            return Path(self.path).name or self.path
+        return f"{self.database} on {self.server}" if self.database else self.server
 
     def label(self) -> str:
-        """One line for a picker: engine, where, who, and how it logs in."""
-        parts = [self.engine_label, self.where]
-        if self.dialect != "sqlite":
-            parts.append(f"as {self.user}")
+        """One line for a picker: engine, who at where, and how it logs in. A
+        connection is the server and the login; the database comes later."""
+        parts = [self.engine_label]
+        if self.dialect == "sqlite":
+            parts.append(self.where)
+        else:
+            parts.append(f"{self.user}@{self.server}" if self.user else self.server)
             parts.append({"ask": "asks for its password",
                           "env": f"password from {password_env(self.name)}",
-                          "none": "no password"}[self.password])
+                          "server": "password from your saved login on the ssh host",
+                          "none": ("no password, by socket login" if self.socket
+                                   else "no password")}[self.password])
         return " · ".join(parts)
 
     def to_dict(self) -> dict:
@@ -295,6 +324,17 @@ def password_for(profile: Profile,
         return env
     if profile.name in _SECRETS:
         return _SECRETS[profile.name]
+    if profile.password == "server":
+        # the person's own saved login on the ssh host, read over the same
+        # ssh login each session and kept only in memory, like a typed one
+        hints = remote_login_hints(profile)
+        if hints.password is None:
+            raise NotPermitted(
+                f"{profile.name} is set to take its password from your saved login on "
+                f"{profile.ssh_host}, and {hints.problem or 'none was found there'}. Set "
+                f"the connection to ask instead (Settings > Database connections).")
+        _SECRETS[profile.name] = hints.password
+        return hints.password
     if ask is None:
         raise NotPermitted(
             f"{profile.name} needs a password and none is known. Set "
@@ -995,11 +1035,19 @@ def tunnel_command(profile: Profile, local_port: int) -> List[str]:
     key. Batch mode either way -- a key, an agent or Pageant, never a
     prompt, since there is no terminal to answer one in the middle of a run.
     """
-    target = f"127.0.0.1:{local_port}:{profile.host or 'localhost'}:" \
-             f"{profile.port or DEFAULT_PORT[profile.dialect]}"
+    # a socket on the far end instead of a port: the server then sees the
+    # ssh user, not a network client (OpenSSH only; plink cannot forward one)
+    far = profile.socket if profile.socket else \
+        f"{profile.host or 'localhost'}:{profile.port or DEFAULT_PORT[profile.dialect]}"
+    target = f"127.0.0.1:{local_port}:{far}"
     who = (f"{profile.ssh_user}@" if profile.ssh_user else "") + profile.ssh_host
     key = str(Path(profile.ssh_key).expanduser()) if profile.ssh_key else ""
     if uses_putty(profile):
+        if profile.socket:
+            raise DbError(f"{profile.name} logs in over the database's socket on "
+                          f"{profile.ssh_host}, which PuTTY's plink cannot forward. Use an "
+                          f"OpenSSH key for this connection (PuTTYgen: Conversions > Export "
+                          f"OpenSSH key), or give it the database's port and a password.")
         cmd = [plink_path() or "plink", "-ssh", "-batch", "-v", "-N", "-L", target]
         if profile.ssh_port and profile.ssh_port != 22:
             cmd += ["-P", str(profile.ssh_port)]
@@ -1015,6 +1063,158 @@ def tunnel_command(profile: Profile, local_port: int) -> List[str]:
         cmd += ["-i", key]
     cmd.append(who)
     return cmd
+
+
+@dataclass(frozen=True)
+class LoginHints:
+    """What the ssh host's own database client would do: the login saved
+    in ``~/.my.cnf`` / ``~/.pgpass`` (user, password), the database's local
+    socket if there is one, and the ssh user. Nothing here is shown or
+    saved; a password found is used for the session and forgotten."""
+
+    user: str = ""
+    # kept out of repr, so no traceback, log line or debug print of a
+    # LoginHints can ever carry the password
+    password: Optional[str] = field(default=None, repr=False)
+    socket: str = ""
+    source: str = ""            # which file the login came from, if any
+    os_user: str = ""
+    problem: str = ""           # why nothing could be read, in words
+
+    @property
+    def found(self) -> bool:
+        return bool(self.password is not None or self.socket)
+
+
+#: One command, run on the ssh host, that prints the three things worth
+#: knowing with markers between them. Only the person's own files, and only
+#: the places the database's socket usually lives.
+_LOOK = ("echo --mycnf--; cat ~/.my.cnf 2>/dev/null; echo --pgpass--; cat ~/.pgpass 2>/dev/null; "
+         "echo --sockets--; for s in /run/mysqld/mysqld.sock /var/run/mysqld/mysqld.sock "
+         "/var/lib/mysql/mysql.sock /tmp/mysql.sock; do [ -S \"$s\" ] && echo mysql=$s; done; "
+         "for s in /var/run/postgresql/.s.PGSQL.5432 /run/postgresql/.s.PGSQL.5432 "
+         "/tmp/.s.PGSQL.5432; do [ -S \"$s\" ] && echo postgres=$s; done; echo --user--; id -un")
+
+
+def remote_command(profile: Profile, command: str, timeout: float = 30.0) -> Tuple[int, str, str]:
+    """Run one shell command on the ssh host, in batch mode, through the
+    same program and key the tunnel uses. ``(exit code, stdout, stderr)``."""
+    import subprocess
+
+    who = (f"{profile.ssh_user}@" if profile.ssh_user else "") + profile.ssh_host
+    key = str(Path(profile.ssh_key).expanduser()) if profile.ssh_key else ""
+    if uses_putty(profile):
+        cmd = [plink_path() or "plink", "-ssh", "-batch"]
+        if profile.ssh_port and profile.ssh_port != 22:
+            cmd += ["-P", str(profile.ssh_port)]
+        for fp in [f.strip() for f in profile.ssh_hostkey.split(",") if f.strip()]:
+            cmd += ["-hostkey", fp]
+        cmd += ["-i", key, who, command]
+    else:
+        cmd = ["ssh", "-o", "BatchMode=yes"]
+        if profile.ssh_port and profile.ssh_port != 22:
+            cmd += ["-p", str(profile.ssh_port)]
+        if key:
+            cmd += ["-i", key]
+        cmd += [who, command]
+    done = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                          stdin=subprocess.DEVNULL)
+    return done.returncode, done.stdout, done.stderr
+
+
+def remote_login_hints(profile: Profile) -> LoginHints:
+    """
+    Look on the ssh host for how its own database client logs in, with the
+    person's consent already given: their ``~/.my.cnf`` (MySQL) or
+    ``~/.pgpass`` (PostgreSQL), and whether the database's socket is there.
+    A failure to log in comes back as ``problem``, never as an exception,
+    because this is a look, not the connection.
+    """
+    import subprocess
+
+    try:
+        code, out, err = remote_command(profile, _LOOK)
+    except (OSError, subprocess.SubprocessError) as e:
+        return LoginHints(problem=f"could not run a command on {profile.ssh_host}: {e}")
+    if code != 0 and "--mycnf--" not in out:
+        if _host_key_unknown(err):
+            raise HostKeyUnknown(_ssh_words(err, profile), profile, keys=host_keys(profile, err))
+        return LoginHints(problem=_ssh_words(err, profile))
+    return parse_login_hints(out, profile)
+
+
+def parse_login_hints(text: str, profile: Profile) -> LoginHints:
+    """The look's output as :class:`LoginHints`; separated out so it can be
+    tested without a server."""
+    sections: Dict[str, List[str]] = {}
+    current = ""
+    for line in text.splitlines():
+        if line.strip() in ("--mycnf--", "--pgpass--", "--sockets--", "--user--"):
+            current = line.strip().strip("-")
+            sections[current] = []
+        elif current:
+            sections[current].append(line)
+    os_user = next((ln.strip() for ln in sections.get("user", []) if ln.strip()), "")
+    sockets = dict(ln.split("=", 1) for ln in sections.get("sockets", []) if "=" in ln)
+    socket = sockets.get(profile.dialect, "")
+    user, password, source = "", None, ""
+    if profile.dialect == "mysql":
+        client = _my_cnf_client("\n".join(sections.get("mycnf", [])))
+        user = client.get("user", "")
+        password = client.get("password")
+        socket = client.get("socket", socket) or socket
+        source = "~/.my.cnf" if client else ""
+    elif profile.dialect == "postgres":
+        hit = _pgpass_match("\n".join(sections.get("pgpass", [])), profile)
+        if hit:
+            user, password, source = hit[0], hit[1], "~/.pgpass"
+    return LoginHints(user=user, password=password, socket=socket, source=source,
+                      os_user=os_user)
+
+
+def _my_cnf_client(text: str) -> Dict[str, str]:
+    """The ``[client]`` section of a ``.my.cnf`` (``[mysql]`` counts too),
+    quotes stripped, later lines winning."""
+    out: Dict[str, str] = {}
+    section = ""
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip().lower()
+            continue
+        if section not in ("client", "mysql"):
+            continue
+        key, sep, value = line.partition("=")
+        key = key.strip().lower()
+        value = value.strip().strip("'\"") if sep else ""
+        if key in ("user", "password", "socket", "host", "port"):
+            out[key] = value
+    return out
+
+
+def _pgpass_match(text: str, profile: Profile) -> Optional[Tuple[str, str]]:
+    """``(user, password)`` from the first ``.pgpass`` line that fits this
+    database: host and database may be ``*``, and a local socket counts as
+    localhost."""
+    wanted_db = profile.database or ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(":")
+        if len(parts) < 5:
+            continue
+        host, _port, dbname, user, password = parts[0], parts[1], parts[2], parts[3], ":".join(parts[4:])
+        if host not in ("*", "localhost", "127.0.0.1", profile.host or "localhost"):
+            continue
+        if dbname not in ("*", wanted_db) and wanted_db:
+            continue
+        if profile.user and user not in ("*", profile.user):
+            continue
+        return (user if user != "*" else profile.user), password
+    return None
 
 
 def _free_port() -> int:
@@ -1567,6 +1767,9 @@ class Probe:
         enc = {True: "yes", False: "no", None: "n/a (a file)"}[self.encrypted]
         head = (f"Connected to {profile.name} ({self.version}, {profile.where})"
                 + (f" as {profile.user}" if profile.user else "") + f". Encrypted: {enc}.")
+        if profile.dialect != "sqlite" and profile.database:
+            head = (f"Connected to {profile.name} ({self.version}, {profile.server}) as "
+                    f"{profile.user}, on database {profile.database}. Encrypted: {enc}.")
         out = [head, f"Can read: yes — {self.tables} table(s).",
                f"Can create tables: {'yes' if self.create else 'no'}.",
                f"Can replace tables it made: {'yes' if self.drop else 'no'}."]
@@ -2170,9 +2373,32 @@ def stream_query(session: Session, sql: str, params: Sequence[Any] = (), *,
     return columns, rows()
 
 
-def session_for(name: str, ask: Optional[Callable[[str], str]] = None) -> Session:
-    """A session by profile name; the usual entry from the table layer."""
-    return connect(get_profile(name), ask=ask)
+def session_for(name: str, database: str = "",
+                ask: Optional[Callable[[str], str]] = None) -> Session:
+    """
+    A session by connection name, on one of its databases; the usual entry
+    from the table layer. A connection is a server and a login; which
+    database to use on it is chosen each time, so it is passed here. Empty
+    means the connection's own default (a SQLite file has only the one).
+    """
+    profile = get_profile(name)
+    return connect(for_database(profile, database), ask=ask)
+
+
+def for_database(profile: Profile, database: str = "") -> Profile:
+    """The profile pointed at one database on its server. ``main`` and ""
+    mean the file itself for SQLite; "" means the saved default otherwise."""
+    if profile.dialect == "sqlite":
+        return profile if profile.database == "main" else with_fields(profile, database="main")
+    if not database or database == profile.database:
+        return profile
+    return with_fields(profile, database=database)
+
+
+def database_of(profile: Profile) -> str:
+    """The database segment of a table address on this profile: ``main``
+    for a file, else whatever database the profile is pointed at."""
+    return "main" if profile.dialect == "sqlite" else profile.database
 
 
 def describe_profile(profile: Profile) -> dict:

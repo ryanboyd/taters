@@ -124,7 +124,7 @@ def score_with_model(
     feature_csvs
         The feature tables this run produced, joined on ``key_cols`` to find
         the columns a ridge or classifier was fitted on. Files, or tables in
-        a database (``db://<connection>/<table>``). Ignored by a model that
+        a database (``db://<connection>/<database>/<table>``). Ignored by a model that
         works from text.
     metadata_csv
         A table keyed like the feature tables that carries the spreadsheet's
@@ -302,8 +302,7 @@ def _default_out(out_csv, feature_csvs, *parts: str) -> tables.TableRef:
     first = next((tables.parse_ref(p) for p in (feature_csvs or ()) if str(p).strip()),
                  None)
     if first is not None and first.is_db:
-        return tables.TableRef(profile=first.profile,
-                               logical="/".join(["taters", "features", *parts]))
+        return first.under("/".join(["taters", "features", *parts]))
     return tables.TableRef(Path("features").joinpath(*parts[:-1]) / f"{parts[-1]}.csv")
 
 
@@ -312,7 +311,7 @@ def _under(ref: tables.TableRef, folder: str, stem: str) -> tables.TableRef:
     database table beside a database table."""
     if ref.is_db:
         logical = "/".join(p for p in [*ref.parts[:-1], folder, stem] if p)
-        return tables.TableRef(profile=ref.profile, logical=logical)
+        return ref.under(logical)
     return tables.TableRef(ref.path.parent / folder / (f"{stem}.csv" if stem else ""))
 
 

@@ -64,7 +64,7 @@ def test_the_probe_lists_tables_and_can_write(live):
 
 
 def test_a_table_is_written_typed_and_read_back(live):
-    ref = tables.parse_ref("db://t/taters/live/features/x")
+    ref = tables.parse_ref("db://t/taters_test/taters/live/features/x")
     with tables.write_table(ref, ["text_id", "a", "b"]) as w:
         w.writerow(["r1", "1", "x"])
         w.writerow(["r2", "2.5", ""])
@@ -74,7 +74,7 @@ def test_a_table_is_written_typed_and_read_back(live):
 
 
 def test_a_wide_table_is_packed_on_the_server(live):
-    ref = tables.parse_ref("db://t/taters/live/features/emb")
+    ref = tables.parse_ref("db://t/taters_test/taters/live/features/emb")
     cols = ["text_id"] + [f"d{i}" for i in range(1500)]
     with tables.write_table(ref, cols, hints={"text_id": "text",
                                               **{c: "float" for c in cols[1:]}}) as w:
@@ -96,7 +96,7 @@ def test_the_join_report_and_the_gather_agree_with_sqlite(live):
     assert report.relationship == "many-to-one"
     assert report.left.rows_matched == 2 and report.right.rows_unmatched == 1
     out = csv_to_analysis_ready_csv(csv_path=spec.to_dict(),
-                                    out_csv="db://t/taters/live/gathered/texts",
+                                    out_csv="db://t/taters_test/taters/live/gathered/texts",
                                     text_cols=["body"], id_cols=["id"], carry_cols=["age"],
                                     verbose=False, overwrite_existing=True)
     rows = list(tables.read_rows(out))
@@ -120,7 +120,7 @@ def test_a_large_gather_streams_and_writes_on_the_same_profile(live):
     out = csv_to_analysis_ready_csv(
         csv_path={"connection": "t", "from": {"table": "live_big", "as": "b"},
                   "order_by": ["b.id"]},
-        out_csv="db://t/taters/live/gathered/big", text_cols=["body"], group_by=["grp"],
+        out_csv="db://t/taters_test/taters/live/gathered/big", text_cols=["body"], group_by=["grp"],
         verbose=False, overwrite_existing=True)
     assert tables.count(out) == 7
     assert next(tables.read_rows(out))["group_count"] == "500"

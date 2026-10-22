@@ -65,7 +65,8 @@ _POSTS_AND_PEOPLE = (_cols("posts", "id", "pid", "body")
 def test_a_database_source_is_offered_and_built_from_its_tables(lab, tmp_path):
     p = ScriptedPrompter([
         "db", "lab",
-        _POSTS_AND_PEOPLE,                # the one column screen
+        ["posts", "participants"],        # which tables, under the database
+        _POSTS_AND_PEOPLE,                # then their columns, on one screen
         ["readability"], "row",
         "lab",                            # where should the results go
         [],                               # no statistics
@@ -77,7 +78,10 @@ def test_a_database_source_is_offered_and_built_from_its_tables(lab, tmp_path):
     kinds = {c.value: c for c in p.offered_choices("What kind of data do you have?")}
     assert kinds["db"].label.startswith("Tables in a database")
     asked = _asked(p)
-    assert "Which columns do you need?" in asked
+    assert asked.index("Which tables?") < asked.index("Which columns do you need?")
+    hier = {c.value: c for c in p.offered_choices("Which tables?")}
+    assert hier["\x00db:lab"].children == ("outcomes", "participants", "posts")
+    assert hier["posts"].depth == 1 and "body" in hier["posts"].help
     assert "Which table has one row per piece of text?" not in asked, \
         "posts references participants, so posts is the row table"
     assert "Which column(s) identify each row?" not in asked, "the key is the id"
@@ -101,17 +105,18 @@ def test_a_database_source_is_offered_and_built_from_its_tables(lab, tmp_path):
     spec = preset["vars"]["source"]
     assert spec["join"][0]["table"] == "participants"
     assert list(spec["columns"]) == ["id", "pid", "body", "condition", "openness", "age"]
-    assert preset["vars"]["results_root"].startswith("db://lab/taters/")
+    assert preset["vars"]["results_root"].startswith("db://lab/main/taters/")
     assert preset["meta"]["id"] == "study"
 
 
 def test_a_fan_out_join_is_warned_about_and_confirmed(lab, tmp_path):
     p = ScriptedPrompter([
         "db", "lab",
+        ["posts", "outcomes"],
         _cols("posts", "id", "body") + _cols("outcomes", "wave", "phq9"),
         False,                            # don't repeat the rows
         "columns",                        # pick the columns again instead
-        _POSTS_AND_PEOPLE,
+        ["posts", "participants"], _POSTS_AND_PEOPLE,
         ["readability"], "row", "", [], False, "Study", "save",
     ])
     result = wiz.run_wizard(p, cwd=tmp_path)
@@ -127,7 +132,8 @@ def test_a_fan_out_join_is_warned_about_and_confirmed(lab, tmp_path):
 
 def test_the_key_is_kept_even_when_it_was_not_ticked(lab, tmp_path):
     p = ScriptedPrompter([
-        "db", "lab", _cols("posts", "body") + _cols("participants", "age"),
+        "db", "lab", ["posts", "participants"],
+        _cols("posts", "body") + _cols("participants", "age"),
         ["readability"], "row", "", [], False, "Study", "save",
     ])
     result = wiz.run_wizard(p, cwd=tmp_path)
@@ -138,7 +144,7 @@ def test_the_key_is_kept_even_when_it_was_not_ticked(lab, tmp_path):
 
 def test_statistics_on_a_database_source_vet_outcomes_from_the_server(lab, tmp_path):
     p = ScriptedPrompter([
-        "db", "lab", _POSTS_AND_PEOPLE,
+        "db", "lab", ["posts", "participants"], _POSTS_AND_PEOPLE,
         ["readability"], "row",
         "lab",
         ["stats_correlations"], False, ["openness"], False, "fdr_bh", False,
@@ -150,14 +156,14 @@ def test_statistics_on_a_database_source_vet_outcomes_from_the_server(lab, tmp_p
     assert outcomes["openness"].label == "openness", "the name stays the name"
     assert outcomes["openness"].annotation.split()[0] == "participants", "the table beside it"
     assert result.preset["vars"]["stats_outcome_cols"] == ["openness"]
-    assert result.preset["vars"]["results_root"].startswith("db://lab/")
+    assert result.preset["vars"]["results_root"].startswith("db://lab/main/")
 
 
 def test_the_composed_database_pipeline_runs(lab, tmp_path):
     from taters.pipelines.run_pipeline import run_preset
 
     p = ScriptedPrompter([
-        "db", "lab", _POSTS_AND_PEOPLE,
+        "db", "lab", ["posts", "participants"], _POSTS_AND_PEOPLE,
         ["readability"], "row", "lab",
         ["stats_group_differences"], False, "condition", False, "fdr_bh", False,
         ":done", "Study", "save",

@@ -201,9 +201,35 @@ def _seed_encoder(recipe_id: str, encoder: str) -> Callable[..., None]:
         var_values.setdefault("encoder", encoder)
         name_var, suffix = _NAME_VARS[recipe_id]
         var_values.setdefault(name_var, f"{encoder_stem(encoder)}-{suffix}")
+        # asked here, where the model is being made, rather than left as a
+        # default on the options screen: a real session named the pipeline
+        # and expected the model to carry that name, and nothing ever
+        # asked what the model itself should be called
+        var_values[name_var] = ask_model_name(prompter, suffix, var_values[name_var])
         if recipe_id == "finetune_text_predictor":
             ask_outcomes(prompter, src, var_values, overrides)
     return hook
+
+
+#: What each kind of trained model is called in the naming question.
+_MODEL_WORDS = {"adapted": "adapted model", "finetuned": "fine-tuned model",
+                "scratch": "new encoder"}
+
+
+def ask_model_name(prompter: Prompter, suffix: str, default: str) -> str:
+    """The model's own name: its file, its entry in the library, and what
+    every menu calls it. Spelled as a file name (see `slug`)."""
+    from ..helpers.model_spec import slug
+
+    what = _MODEL_WORDS.get(suffix, "model")
+    prompter.reason(f"This names the {what} itself -- its file, its place in your "
+                    f"library, and what menus call it. The pipeline's name is asked "
+                    f"separately.")
+    typed = str(prompter.text(f"What should the {what} be called?", default=default)).strip()
+    name = slug(typed, fallback=default) if typed else default
+    if name != typed and typed:
+        prompter.note(f"  Spelled {name}, so it works as a file name.", style="dim")
+    return name
 
 
 def _count_texts(src) -> int:
@@ -245,6 +271,8 @@ def seed_scratch() -> Callable[..., None]:
                                      default=var_values.get("pretrain_preset", "small")))
         var_values["pretrain_preset"] = preset
         var_values.setdefault("encoder_name", f"{preset}-scratch")
+        var_values["encoder_name"] = ask_model_name(prompter, "scratch",
+                                                    var_values["encoder_name"])
 
         n_texts = _count_texts(src)
         device_name = "cpu"

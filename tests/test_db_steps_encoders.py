@@ -53,7 +53,7 @@ def both(tmp_path, monkeypatch):
     con.commit()
     con.close()
     db.save_profile(db.Profile(name="lab", dialect="sqlite", path=str(dbfile)))
-    yield csv_path, "db://lab/study"
+    yield csv_path, "db://lab/main/study"
     tables.close_sessions()
     db._SECRETS.clear()
 
@@ -97,24 +97,24 @@ def _big_texts(path: Path, n: int) -> Path:
 def test_entropy_on_a_database_table_matches_the_file(both, tmp_path):
     csv_path, table = both
     from_file = _gather(csv_path, tmp_path / "g.csv")
-    from_db = _gather(table, "db://lab/taters/gathered")
+    from_db = _gather(table, "db://lab/main/taters/gathered")
     file_out = analyze_entropy(analysis_csv=from_file, out_features_csv=tmp_path / "e.csv",
                                verbose=False)
-    db_out = analyze_entropy(analysis_csv=from_db, out_features_csv="db://lab/taters/entropy",
+    db_out = analyze_entropy(analysis_csv=from_db, out_features_csv="db://lab/main/taters/entropy",
                              verbose=False)
     assert isinstance(file_out, Path) and tables.parse_ref(db_out).is_db
     _same_rows(file_out, db_out)
     assert "ent_word_shannon_bits" in tables.columns_of(db_out)
     # the second call hands the table back rather than measuring it again
-    assert analyze_entropy(analysis_csv=from_db, out_features_csv="db://lab/taters/entropy",
+    assert analyze_entropy(analysis_csv=from_db, out_features_csv="db://lab/main/taters/entropy",
                            verbose=False) == db_out
 
 
 def test_entropy_defaults_to_a_table_beside_a_database_source(both):
     _csv, table = both
-    from_db = _gather(table, "db://lab/taters/gathered")
+    from_db = _gather(table, "db://lab/main/taters/gathered")
     out = analyze_entropy(analysis_csv=from_db, verbose=False)
-    assert str(out) == "db://lab/taters/features/entropy/gathered"
+    assert str(out) == "db://lab/main/taters/features/entropy/gathered"
     assert tables.exists(out) and tables.count(out) == 4
 
 
@@ -139,12 +139,12 @@ def test_the_classifier_scores_a_database_table_into_the_database(both, classifi
     manifest = import_hf_classifier(source=classifier, out_dir=tmp_path / "m",
                                     name="clf", outcome="topic")
     from_file = _gather(csv_path, tmp_path / "g.csv")
-    from_db = _gather(table, "db://lab/taters/gathered")
+    from_db = _gather(table, "db://lab/main/taters/gathered")
     file_out = apply_hf_classifier(model_json=manifest, analysis_csv=from_file,
                                    out_features_csv=tmp_path / "s.csv", device="cpu",
                                    verbose=False, max_length=16)
     db_out = apply_hf_classifier(model_json=manifest, analysis_csv=from_db,
-                                 out_features_csv="db://lab/taters/scored", device="cpu",
+                                 out_features_csv="db://lab/main/taters/scored", device="cpu",
                                  verbose=False, max_length=16)
     assert tables.parse_ref(db_out).is_db
     _same_rows(file_out, db_out)
@@ -221,12 +221,12 @@ def test_the_predictor_scores_a_database_table_into_the_database(both, predictor
 
     csv_path, table = both
     from_file = _gather(csv_path, tmp_path / "g.csv")
-    from_db = _gather(table, "db://lab/taters/gathered")
+    from_db = _gather(table, "db://lab/main/taters/gathered")
     file_out = apply_text_predictor(model_json=predictor, analysis_csv=from_file,
                                     out_features_csv=tmp_path / "s.csv", device="cpu",
                                     verbose=False)
     db_out = apply_text_predictor(model_json=predictor, analysis_csv=from_db,
-                                  out_features_csv="db://lab/taters/predicted", device="cpu",
+                                  out_features_csv="db://lab/main/taters/predicted", device="cpu",
                                   verbose=False)
     assert tables.parse_ref(db_out).is_db
     _same_rows(file_out, db_out)
@@ -234,7 +234,7 @@ def test_the_predictor_scores_a_database_table_into_the_database(both, predictor
     # the default destination beside a database source is a table too
     default = apply_text_predictor(model_json=predictor, analysis_csv=from_db, device="cpu",
                                    verbose=False)
-    assert str(default) == "db://lab/taters/features/text_predictor_applied"
+    assert str(default) == "db://lab/main/taters/features/text_predictor_applied"
 
 
 def test_the_predictor_reads_a_big_table_in_bounded_slices(predictor, tmp_path, monkeypatch):
@@ -263,7 +263,7 @@ def test_the_predictor_trains_from_a_database_table(both, encoder, tmp_path):
 
     _csv, _table = both
     study = _study(tmp_path / "s.csv")
-    gathered = csv_to_analysis_ready_csv(csv_path=study, out_csv="db://lab/taters/study",
+    gathered = csv_to_analysis_ready_csv(csv_path=study, out_csv="db://lab/main/taters/study",
                                          text_cols=["text"], id_cols=["pid"],
                                          carry_cols=["score", "topic"], verbose=False)
     out = finetune_text_predictor(analysis_csv=gathered, outcome_cols=["score", "topic"],
@@ -294,7 +294,7 @@ def test_an_encoder_is_adapted_from_a_database_table(both, encoder, tmp_path):
     from taters.text.adapt_encoder import adapt_encoder
 
     corpus = csv_to_analysis_ready_csv(csv_path=_corpus(tmp_path / "c.csv"),
-                                       out_csv="db://lab/taters/corpus", text_cols=["text"],
+                                       out_csv="db://lab/main/taters/corpus", text_cols=["text"],
                                        id_cols=["text_id"], verbose=False)
     out = adapt_encoder(analysis_csv=corpus, out_model_json=tmp_path / "models" / "adapted.json",
                         base_model=str(encoder), epochs=1, max_length=32, batch_size=8,
@@ -308,7 +308,7 @@ def test_an_encoder_is_pretrained_from_a_database_table(both, tmp_path):
     from taters.text.pretrain_encoder import MIN_VOCAB, pretrain_encoder
 
     corpus = csv_to_analysis_ready_csv(csv_path=_corpus(tmp_path / "c.csv"),
-                                       out_csv="db://lab/taters/corpus", text_cols=["text"],
+                                       out_csv="db://lab/main/taters/corpus", text_cols=["text"],
                                        id_cols=["text_id"], verbose=False)
     out = pretrain_encoder(analysis_csv=corpus, out_model_json=tmp_path / "models" / "scratch.json",
                            preset="custom", layers=2, hidden_size=32, attention_heads=2,

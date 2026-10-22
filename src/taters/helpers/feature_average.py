@@ -149,7 +149,7 @@ def average_feature_table(
     in_csv : str or Path
         The feature table to average: one row per text, a row key, and numeric
         columns. Non-numeric columns are dropped, since there is no mean of a
-        word. A file, or ``db://<connection>/<table>``.
+        word. A file, or ``db://<connection>/<database>/<table>``.
     out_csv : str or Path
         Where to write the averaged table: a file, or a database table.
     group_by : sequence of str

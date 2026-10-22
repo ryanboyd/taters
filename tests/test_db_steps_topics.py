@@ -29,8 +29,8 @@ LOOSE = dict(min_freq=1, min_obs_pct=0.0, min_token_count=1)
 VOCAB = dict(vocab_min_freq=0, vocab_min_obs_pct=0, vocab_rule="top_n",
              vocab_top_n=0)
 
-DB_TEXT = "db://lab/posts"
-GATHERED_DB = "db://lab/taters/gathered/posts"
+DB_TEXT = "db://lab/main/posts"
+GATHERED_DB = "db://lab/main/taters/gathered/posts"
 
 
 def _docs(n: int = 40):
@@ -101,7 +101,7 @@ def _scores(ref) -> dict:
 
 def test_the_frequency_list_lands_in_the_database_with_the_files_numbers(lab, tmp_path):
     from_file = _freqs(lab, "file", tmp_path / "freqs.csv")
-    from_db = _freqs(lab, "db", "db://lab/taters/features/ngram_frequencies")
+    from_db = _freqs(lab, "db", "db://lab/main/taters/features/ngram_frequencies")
     assert isinstance(from_file, Path) and from_file.is_file()
     assert tables.parse_ref(from_db).is_db and tables.exists(from_db)
     assert tables.exists(GATHERED_DB), "the gather went to the database too"
@@ -114,13 +114,13 @@ def test_the_frequency_list_lands_in_the_database_with_the_files_numbers(lab, tm
 
 def test_the_matrix_reads_a_database_vocabulary_and_writes_a_database_table(lab, tmp_path):
     freq_file = _freqs(lab, "file", tmp_path / "freqs.csv")
-    freq_db = _freqs(lab, "db", "db://lab/taters/features/ngram_frequencies")
+    freq_db = _freqs(lab, "db", "db://lab/main/taters/features/ngram_frequencies")
     dtm_file = build_doc_term_matrix(
         freq_list_csv=freq_file, **_source(lab, "file"),
         out_features_csv=tmp_path / "dtm.csv", overwrite_existing=True, **VOCAB)
     dtm_db = build_doc_term_matrix(
         freq_list_csv=str(freq_db), **_source(lab, "db"),
-        out_features_csv="db://lab/taters/features/doc_term_matrix",
+        out_features_csv="db://lab/main/taters/features/doc_term_matrix",
         overwrite_existing=True, **VOCAB)
     assert tables.parse_ref(dtm_db).is_db and tables.exists(dtm_db)
     _same_table(dtm_file, dtm_db)
@@ -133,13 +133,13 @@ def test_the_matrix_reads_a_database_vocabulary_and_writes_a_database_table(lab,
     by_default = build_doc_term_matrix(
         freq_list_csv=str(freq_db), **_source(lab, "db"), weighting="binary",
         overwrite_existing=True, **VOCAB)
-    assert str(by_default) == "db://lab/taters/features/doc_term_matrix/posts_binary"
+    assert str(by_default) == "db://lab/main/taters/features/doc_term_matrix/posts_binary"
     assert tables.exists(by_default)
 
     # and the resume contract holds for a table: there, so handed back
     again = build_doc_term_matrix(
         freq_list_csv=str(freq_db), **_source(lab, "db"),
-        out_features_csv="db://lab/taters/features/doc_term_matrix", **VOCAB)
+        out_features_csv="db://lab/main/taters/features/doc_term_matrix", **VOCAB)
     assert str(again) == str(dtm_db)
 
 
@@ -162,14 +162,14 @@ def test_mem_fits_and_applies_with_every_table_in_the_database(lab, tmp_path):
     from taters.text.topic_model_mem import apply_mem_model
 
     on_file = _mem(lab, "file", tmp_path / "mem" / "mem.csv")
-    on_db = _mem(lab, "db", "db://lab/taters/features/topic_model_mem/mem")
+    on_db = _mem(lab, "db", "db://lab/main/taters/features/topic_model_mem/mem")
     assert tables.parse_ref(on_db).is_db and tables.exists(on_db)
 
     # the scores, the three small tables and the model's own matrix are all
     # tables, so they are all in the database, beside the scores
     for stem in ("mem_loadings", "mem_eigenvalues", "mem_theme_variance",
                  "mem_matrix/freq_list", "mem_matrix/dtm"):
-        ref = f"db://lab/taters/features/topic_model_mem/{stem}"
+        ref = f"db://lab/main/taters/features/topic_model_mem/{stem}"
         assert tables.exists(ref), stem
         twin = tmp_path / "mem" / f"{stem}.csv"
         assert twin.is_file(), f"the file twin {stem}"
@@ -177,7 +177,7 @@ def test_mem_fits_and_applies_with_every_table_in_the_database(lab, tmp_path):
     _same_table(on_file, on_db)
 
     # the model is not rows, so it is on disk, under the run's db_local folder
-    model = tmp_path / "db_local" / "lab" / "taters" / "features" / "topic_model_mem" / "mem_model.json"
+    model = tmp_path / "db_local" / "lab" / "main" / "taters" / "features" / "topic_model_mem" / "mem_model.json"
     assert model.is_file()
     assert not (tmp_path / "features").exists() and not (tmp_path / "db:").exists()
 
@@ -185,17 +185,17 @@ def test_mem_fits_and_applies_with_every_table_in_the_database(lab, tmp_path):
     # roundtrip contract, now across a database as well
     applied = apply_mem_model(
         model_json=model, **_source(lab, "db"),
-        out_features_csv="db://lab/taters/features/topic_model_mem/mem_applied",
+        out_features_csv="db://lab/main/taters/features/topic_model_mem/mem_applied",
         overwrite_existing=True)
     assert tables.exists(applied)
     assert _scores(applied) == _scores(on_db) == _scores(on_file)
 
     # and a database address for the model file is a file under db_local
     # too, which is what a pipeline template renders on a database run
-    again = _mem(lab, "db", "db://lab/taters/features/topic_model_mem/mem2",
-                 out_model_json="db://lab/taters/features/topic_model_mem/mem2_model.json")
+    again = _mem(lab, "db", "db://lab/main/taters/features/topic_model_mem/mem2",
+                 out_model_json="db://lab/main/taters/features/topic_model_mem/mem2_model.json")
     assert tables.exists(again)
-    assert (tmp_path / "db_local" / "lab" / "taters" / "features" / "topic_model_mem"
+    assert (tmp_path / "db_local" / "lab" / "main" / "taters" / "features" / "topic_model_mem"
             / "mem2_model.json").is_file()
 
 
@@ -210,21 +210,21 @@ def test_lda_fits_and_applies_through_the_database(lab, tmp_path):
             n_topics=2, passes=3, **LOOSE, **VOCAB)
 
     on_file = fit("file", tmp_path / "lda" / "lda.csv")
-    on_db = fit("db", "db://lab/taters/features/topic_model_lda/lda")
+    on_db = fit("db", "db://lab/main/taters/features/topic_model_lda/lda")
     _same_table(on_file, on_db)
     for stem in ("lda_loadings", "lda_top_terms", "lda_matrix/dtm"):
-        ref = f"db://lab/taters/features/topic_model_lda/{stem}"
+        ref = f"db://lab/main/taters/features/topic_model_lda/{stem}"
         assert tables.exists(ref), stem
         _same_table(tmp_path / "lda" / f"{stem}.csv", ref)
-    model = tmp_path / "db_local" / "lab" / "taters" / "features" / "topic_model_lda" / "lda_model.json"
+    model = tmp_path / "db_local" / "lab" / "main" / "taters" / "features" / "topic_model_lda" / "lda_model.json"
     assert model.is_file()
 
     applied = apply_lda_model(
         model_json=model, **_source(lab, "db"),
-        out_features_csv="db://lab/taters/features/topic_model_lda/lda_applied",
+        out_features_csv="db://lab/main/taters/features/topic_model_lda/lda_applied",
         overwrite_existing=True)
     assert _scores(applied) == _scores(on_db)
-    assert tables.exists("db://lab/taters/features/topic_model_lda/lda_applied_matrix/freq_list"), \
+    assert tables.exists("db://lab/main/taters/features/topic_model_lda/lda_applied_matrix/freq_list"), \
         "apply's frozen vocabulary went where its matrix goes: into the database"
 
 
@@ -238,24 +238,24 @@ def test_word_clouds_draw_from_database_tables(lab, tmp_path):
     pytest.importorskip("PIL")
     from taters.figures import wordclouds as wc
 
-    _mem(lab, "db", "db://lab/taters/features/topic_model_mem/mem")
-    loadings = "db://lab/taters/features/topic_model_mem/mem_loadings"
+    _mem(lab, "db", "db://lab/main/taters/features/topic_model_mem/mem")
+    loadings = "db://lab/main/taters/features/topic_model_mem/mem_loadings"
     folder = wc.theme_wordclouds(loadings, tmp_path / "clouds", verbose=False)
     assert sorted(p.name for p in folder.glob("*.png")) == ["Theme_1.png", "Theme_2.png"]
     index = (folder / "index.md").read_text(encoding="utf-8")
     assert "mem_loadings" in index, \
         "the index names the table it was drawn from"
 
-    freqs = _freqs(lab, "db", "db://lab/taters/features/ngram_frequencies")
+    freqs = _freqs(lab, "db", "db://lab/main/taters/features/ngram_frequencies")
     folder = wc.frequency_wordclouds(freqs, tmp_path / "freq_clouds", verbose=False)
     assert (folder / "top_words.png").is_file()
 
     # a db:// address for the picture folder (what a template renders on a
     # database run) is a folder under db_local, not a folder called "db:"
     folder = wc.frequency_wordclouds(
-        freqs, "db://lab/taters/features/figures/wordclouds/ngram_frequencies",
+        freqs, "db://lab/main/taters/features/figures/wordclouds/ngram_frequencies",
         verbose=False)
-    assert folder == (tmp_path / "db_local" / "lab" / "taters" / "features" / "figures"
+    assert folder == (tmp_path / "db_local" / "lab" / "main" / "taters" / "features" / "figures"
                       / "wordclouds" / "ngram_frequencies")
     assert (folder / "top_words.png").is_file() and not (tmp_path / "db:").exists()
 
@@ -267,12 +267,12 @@ def test_the_loadings_of_a_database_feature_set_are_found_from_the_sidecar(lab, 
     pytest.importorskip("scipy")
     from taters.figures.wordclouds import _theme_loadings_for
 
-    features = "db://lab/taters/features/topic_model_mem/mem"
+    features = "db://lab/main/taters/features/topic_model_mem/mem"
     _mem(lab, "db", features)
     stats_dir = tmp_path / "stats_results"
     stats_dir.mkdir()
     found = _theme_loadings_for("mem", ["Theme_1", "Theme_2"], {"mem": features},
                                 stats_dir, "utf-8-sig")
-    assert str(found) == "db://lab/taters/features/topic_model_mem/mem_loadings"
-    assert _theme_loadings_for("mem", ["Theme_1"], {"mem": "db://lab/nowhere/mem"},
+    assert str(found) == "db://lab/main/taters/features/topic_model_mem/mem_loadings"
+    assert _theme_loadings_for("mem", ["Theme_1"], {"mem": "db://lab/main/nowhere/mem"},
                                stats_dir, "utf-8-sig") is None

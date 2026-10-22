@@ -915,7 +915,7 @@ def _gather_from_db(spec, *, out_csv, overwrite_existing: bool,
         raise ValueError(f"agg_cols statistics must be one of {sorted(_AGG_STATS)}, "
                          f"got {sorted(bad_stats)}")
 
-    anchor = tables.parse_ref(f"db://{spec.connection}/{spec.table or 'query'}")
+    anchor = sources.anchor(spec)
     session = tables._session(anchor)
     resolved = sources.resolve_columns(spec, session)
     names = [n for n, _a, _c in resolved]
@@ -945,8 +945,8 @@ def _gather_from_db(spec, *, out_csv, overwrite_existing: bool,
                 f"apart: name id_cols. A row numbered by its position would join "
                 f"the wrong rows the next time the table is read.")
 
-    out = (tables.parse_ref(out_csv) if out_csv is not None else tables.parse_ref(
-        f"db://{spec.connection}/taters/{(spec.table or 'query')}_"
+    out = (tables.parse_ref(out_csv) if out_csv is not None else anchor.under(
+        f"taters/{(spec.table or 'query')}_"
         + ("grouped_" + "_".join(_sanitize_for_filename(g) for g in group_by) if group_by
            else _sanitize_for_filename(mode) + "_"
            + "_".join(_sanitize_for_filename(c) for c in text_cols))))

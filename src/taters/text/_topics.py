@@ -1057,10 +1057,8 @@ def matrix_refs(out_dir):
 
     folder = tables.parse_ref(out_dir)
     if folder.is_db:
-        return (tables.TableRef(profile=folder.profile,
-                                logical=f"{folder.logical}/freq_list"),
-                tables.TableRef(profile=folder.profile,
-                                logical=f"{folder.logical}/dtm"))
+        return (folder.under(f"{folder.logical}/freq_list"),
+                folder.under(f"{folder.logical}/dtm"))
     folder.path.mkdir(parents=True, exist_ok=True)
     return (tables.TableRef(folder.path / "freq_list.csv"),
             tables.TableRef(folder.path / "dtm.csv"))

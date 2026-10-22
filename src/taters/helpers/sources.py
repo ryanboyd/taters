@@ -66,6 +66,9 @@ class Join:
 @dataclass(frozen=True)
 class Source:
     connection: str
+    #: Which database on the connection. A connection is a server and a
+    #: login; the database is chosen when the source is.
+    database: str = ""
     table: str = ""
     alias: str = ""
     joins: Tuple[Join, ...] = ()
@@ -116,6 +119,8 @@ class Source:
                 d["from"]["schema"] = self.schema
             if self.joins:
                 d["join"] = [j.to_dict() for j in self.joins]
+        if self.database:
+            d["database"] = self.database
         if self.columns:
             d["columns"] = dict(self.columns)
         if self.order_by:
@@ -135,6 +140,7 @@ class Source:
                               allow_many_to_many=bool(j.get("allow_many_to_many")),
                               schema=str(j.get("schema") or "")))
         return cls(connection=str(doc.get("connection") or connection),
+                   database=str(doc.get("database") or ""),
                    table=str(base.get("table") or ""), alias=str(base.get("as") or ""),
                    joins=tuple(joins),
                    columns={str(k): str(v) for k, v in (doc.get("columns") or {}).items()},
@@ -154,10 +160,27 @@ def coerce(value: Any, *, connection: str = "") -> Source:
     text = str(value).strip()
     if text.startswith(DB_SCHEME) or text.startswith("db:/"):
         ref = parse_ref(text)
-        return Source(connection=ref.profile, table=ref.logical)
+        return Source(connection=ref.profile, database=ref.database, table=ref.logical)
     if not connection:
         raise ValueError(f"{text!r} needs a connection name")
     return Source(connection=connection, table=text)
+
+
+def anchor(spec: Source):
+    """
+    A :class:`~taters.helpers.tables.TableRef` for the source's base table
+    (or ``query``): what opens the right session, and what an output
+    defaults beside. A spec that names no database gets the connection's
+    saved default, or a refusal when there is none.
+    """
+    from . import db
+    from .tables import parse_ref
+
+    database = spec.database or db.database_of(db.get_profile(spec.connection))
+    if not database:
+        raise ValueError(f"the source on {spec.connection} names no database "
+                         f"(database: in the source spec)")
+    return parse_ref(f"db://{spec.connection}/{database}/{spec.table or 'query'}")
 
 
 # ---------------------------------------------------------------------------

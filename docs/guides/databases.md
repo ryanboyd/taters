@@ -18,10 +18,16 @@ you need them), and copying a spreadsheet in.
 
 ## Connections
 
-A connection is how Taters gets to a database: what kind it is, where it
-lives, who you are there, and how you log in. You set one up once, under
-**Settings → Database connections → Add a connection**, and it is saved for
-next time. The password is not saved, ever; more on that below.
+A connection is how Taters gets to a database server: what kind it is,
+where it lives, who you are there, and how you log in. You set one up once,
+under **Settings → Database connections → Add a connection**, and it is
+saved for next time. The password is not saved, ever; more on that below.
+
+A connection is the server and your login, not a database. Most servers
+hold several databases, and which one you want is a question about what
+you are doing today, so Taters asks it each time you use the connection
+(with the one you used last as the default). One connection to the lab's
+server is enough for every database your account can see on it.
 
 ### What you'll need to know
 
@@ -44,10 +50,10 @@ database does. It is a normal thing to ask them for.
 That's it. Taters logs in as soon as it has those, before saving anything,
 so a wrong password or an unreachable server is found right there rather
 than at the end of a long run. It says what it is doing at each step
-(opening the tunnel, logging in, counting the tables, checking whether the
-account can create one), so a slow server is never a blank wait. Then it lists the databases your account can
-see on that server and asks which one this connection is for. One database
-per connection; add a second connection for a second database.
+(opening the tunnel, logging in, listing the databases), so a slow server
+is never a blank wait, and it reads back which databases your login can
+see. The connection is named after the login, `me-db-lab-edu`, unless you
+call it something else.
 
 ### If you normally log in to a machine first
 
@@ -57,7 +63,7 @@ and you are in. If that is how it works for you, answer *Through an ssh
 host* when Taters asks how the database is reached. It then asks:
 
 * **Which ssh host?** Exactly what you type after `ssh` when you log in by
-  hand: `you@cronus.cs.example.edu`.
+  hand: `you@myserver.example.edu`.
 * **Do you log in to that host with a particular key file?** Say no if
   logging in by hand just works; Taters uses the same keys and the same
   setup as your `ssh` does. Say yes only if you normally pass one with
@@ -69,19 +75,22 @@ host* when Taters asks how the database is reached. It then asks:
   logs in to the machine the way you do, and from there the database is
   local.
 
-Taters never asks for an ssh password. If your key needs a passphrase, it
-has to be loaded in your ssh agent, the same as it would for any script.
+Taters logs in to the machine right then, before asking anything about the
+database: if the machine can't be reached, there is nothing to ask yet, and
+a wrong host or port is fixed on the spot. Taters never asks for an ssh
+password. If your key needs a passphrase, it has to be loaded in your ssh
+agent, the same as it would for any script.
 
 The first time you connect to a machine from a given computer, ssh doesn't
 know it yet, and Taters shows you what it found:
 
-> cronus.cs.example.edu is new to this computer. ssh remembers each server's
+> myserver.example.edu is new to this computer. ssh remembers each server's
 > key so that a different machine answering to the same name is noticed.
 > This is the key it showed:
 >
 >     ssh-ed25519  SHA256:Vb7n…
 >
-> Accept cronus.cs.example.edu's key and continue?
+> Accept myserver.example.edu's key and continue?
 
 Accepting means trusting that this really is that server, so don't just
 say yes. The way to know is to compare the fingerprint with one you got
@@ -110,21 +119,35 @@ plain `ssh` can read.
 
 **One thing that surprises people.** On the server, `mysql` logs you in
 without asking for anything, so it feels like there is no password. There
-is one of two things going on, and you can't tell which from the outside:
+is one of two things going on, and Taters can find out which for you:
 
-* A password is stored in a small file in your home folder on that machine,
-  called `.my.cnf`, and `mysql` reads it silently. Then that *is* your
-  password, and it is what Taters needs. To see it, log in to the machine
-  and run `cat ~/.my.cnf`.
-* Or the database trusts you because you are logged in to the same machine
-  (this is called socket authentication). That only works from *on* the
-  machine, not through a tunnel. Then the account needs a password set
-  before anything outside the machine can use it, which is a one-line job
-  for whoever runs the database. Ask them for "a password for my MySQL
-  account so I can connect over a tunnel."
+> On that machine the database may already know you: a login saved in your
+> home folder, or a local socket that trusts your ssh login. Taters can look;
+> it shows and saves nothing it finds.
+>
+> Look on the ssh host for how the database logs you in? (Y/n)
 
-If the login fails, Taters says the password was not accepted; that is your
-cue to check which of the two it is.
+Say yes and Taters runs one command over your ssh login that reads your own
+`~/.my.cnf` (or `~/.pgpass`) and checks for the database's local socket.
+Then one of these:
+
+* **A saved login was found.** Your `.my.cnf` holds a username and a
+  password, which is what `mysql` was quietly using. Taters offers a new
+  way of getting the password, *From your saved login on that host*: it
+  reads the file afresh over ssh each session and keeps the password in
+  memory until you close the app, so it is never copied to this computer's
+  disk and never shown.
+* **The database's socket was found.** The database trusts whoever is
+  logged in to the machine (socket authentication). Taters points its
+  tunnel at the socket instead of a port, and the database sees the
+  connection as *you*, so there is no password at all. This is the plain
+  OpenSSH path; PuTTY's plink can't forward a socket, and Taters says so.
+* **Nothing there.** Taters asks for the password as usual.
+
+You can say no and set things up by hand, in which case the two cases above
+are what to look for yourself: `cat ~/.my.cnf` on the server shows a saved
+password, and a database that only trusts the local login needs a password
+set by whoever runs it before a tunnel to its *port* can use it.
 
 ### The password
 
@@ -177,10 +200,12 @@ short version of the ones that come up:
 
 ### Test it
 
-**Test it** doesn't read your account's grants; it tries. Can it read? Can it
-make a table? Can it drop one it made? Then it says, in a sentence, what that
-means: a read-only account can copy tables out and can be the *source* of a
-run, but a run's results will have to go to files or to another database.
+**Test it** doesn't read your account's grants; it tries. It logs in, asks
+which database to check (what an account may do differs by database: read
+one, make tables in another), then: Can it read? Can it make a table? Can
+it drop one it made? Then it says, in a sentence, what that means: a
+read-only account can copy tables out and can be the *source* of a run,
+but a run's results will have to go to files or to another database.
 
 ---
 
@@ -188,16 +213,21 @@ run, but a run's results will have to go to files or to another database.
 
 Pick *Tables in a database* at "What kind of data do you have?". Then:
 
-1. **Which database?** A saved connection, or add one on the spot. If the
-   account can only read, Taters says so and carries on: the results will go
-   to files, or to another database, which it asks about later.
-2. **Which columns do you need?** One screen, every table, every column,
-   laid out in three lined-up columns: the column's name, the table it is
-   in, and its type. Each table is also a heading with its row count; tick a
-   heading to take the whole table. Under each column is what the catalog
-   knows: *the table's key*, *→ participants.pid* for a link the database
-   declares, *long text*. (In a saved pipeline the columns are written the
-   way SQL names them, `posts.body`, `participants.age`.) A database with hundreds of columns gets one
+1. **Which connection?** A saved one, or add one on the spot. Taters logs
+   in and asks **Which database?** from the server's own list (a SQLite file
+   is its own database, so that question is skipped). If the account can
+   only read that database, Taters says so and carries on: the results will
+   go to files, or to another database, which it asks about later.
+2. **Which tables?** The database's tables arranged under it, each with its
+   size and which columns hold text. Tick the database to take every table,
+   or open it up and tick the ones that hold what you need.
+3. **Which columns do you need?** Those tables' columns on one screen, laid
+   out as the column's name, the table it is in, and its type. Each table is
+   a heading with its row count; tick a heading to take the whole table.
+   Under each column is what the catalog knows: *the table's key*,
+   *→ participants.pid* for a link the database declares, *long text*. (In a
+   saved pipeline the columns are written the way SQL names them,
+   `posts.body`, `participants.age`.) A database with hundreds of columns gets one
    question first — which tables are involved — so the screen stays a screen.
    Tick the text, anything to group rows by, and any outcome or control the
    statistics will need.
@@ -262,8 +292,9 @@ Anything in, anything out. One question, asked once per run:
 > Where should the results go?
 
 *This folder, as spreadsheets* writes `features/`, `gathered/` and the
-analysis table as CSV files, exactly as always. A database connection that
-can create tables gets every table the run makes instead: the gathered text
+analysis table as CSV files, exactly as always. A connection, and then a
+database on it, where the account can create tables gets every table the
+run makes instead: the gathered text
 (`taters__study7__gathered__texts`), each feature table
 (`taters__study7__features__readability`), the metadata and the analysis
 table (`taters__study7__stats_results__analysis_table`). The report, the
@@ -300,7 +331,7 @@ nothing else in the database is ever touched.
 ## Copying tables out (Wrangle data)
 
 *Wrangle data → Tables from a database, out to spreadsheets.* Needs only
-permission to read. Pick the connection, then it goes step by step:
+permission to read. It goes step by step:
 
 > What do you want out?
 >
@@ -310,27 +341,44 @@ permission to read. Pick the connection, then it goes step by step:
 **Each table as its own spreadsheet** is the plain copy: the rows as they
 are, one CSV per table, named after it.
 
-1. **Which tables?** A list with each table's size; tick the ones you want,
-   or tick *Every table* at the top to take them all.
-2. **Keep every column of each table?** Yes is the usual answer. No opens
-   the column screen for just those tables with everything ticked, and you
+1. **Which connection(s)?** Tick one or several of your saved connections
+   (or add one). Taters logs in to each right there.
+2. **Which database(s)?** One screen, the databases of each server arranged
+   under its connection. Tick a connection to take every database on it, or
+   open it up and tick the ones you want; a name the login cannot list can
+   be typed. A SQLite file is its own database, so a file skips this.
+3. **Which tables?** One screen, the tables of each database arranged under
+   it. Tick a database to take every table in it, or open it up and tick the
+   ones you want; each table shows its size and which columns hold text.
+4. **Keep every column of each table?** Yes is the usual answer. No opens
+   the column screen, one per database, with everything ticked, and you
    untick what you don't want.
-3. **Where should the spreadsheets go?** A folder, picked in the browser.
-   If any of the files are already there, Taters says which and asks before
-   replacing them.
+5. **Where should the spreadsheets go?** A folder, picked in the browser.
+   From one database the files land in it as `<table>.csv`; from several,
+   each database gets a folder of its own inside it, so two databases with
+   a `users` table never collide. If any of the files are already there,
+   Taters says which and asks before replacing them.
+
+One thing worth saying plainly: a spreadsheet is a plain copy of whatever
+was in those tables. Once it is on a laptop it is outside whatever
+protections the database and its server give participant data, and keeping
+it where your ethics approval says it may live is your call, not the
+tool's. Taters only ever writes where you point it, and asks before
+replacing anything.
 
 Then a read-back of what is about to be written, and the files:
 
 ```
 3 table(s) → /home/me/study7:
-    users.csv (480 rows, 4 columns)
-    posts.csv (12,000 rows, 5 columns)
-    outcomes.csv (960 rows, 3 columns)
+    study7/users.csv (480 rows, 4 columns)
+    study7/posts.csv (12,000 rows, 5 columns)
+    archive/waves.csv (2 rows, 2 columns)
 ```
 
-**One spreadsheet from several tables, joined** is the run's own column
-screen, for when you want the participants' ages beside each post rather
-than in a separate file:
+**One spreadsheet from several tables, joined** is the run's own two
+screens on one database -- which tables, then which of their columns -- for
+when you want the participants' ages beside each post rather than in a
+separate file. Pick the connection, the database, the tables, then:
 
 > Which columns do you want in the spreadsheet?
 
@@ -364,8 +412,8 @@ flows.
 *Wrangle data → A spreadsheet, into a database table.* Needs permission to
 create tables.
 
-Pick the connection and the file (the encoding and separator are worked out
-from the file, as everywhere in Taters). Name the table — letters, digits and
+Pick the connection, the database on it, and the file (the encoding and
+separator are worked out from the file, as everywhere in Taters). Name the table — letters, digits and
 underscores, and Taters reads back what it had to tidy — and say which column
 identifies each row; that column becomes the table's key, so a repeated value
 stops the write rather than slipping through. Then it tells you what it is
@@ -393,16 +441,18 @@ that is already taken by something else is refused outright.
 from taters import Taters
 t = Taters()
 
-t.export_table(source={"connection": "lab",
+t.export_table(source={"connection": "lab", "database": "study7",
                        "from": {"table": "posts", "as": "p"},
                        "join": [{"table": "users", "as": "u", "on": [["p.user_id", "u.id"]]}]},
                out_csv="posts_with_users.csv")
 ```
 
-The `source` is the same structure the app builds: a base table, joins on
-named keys, and optionally the output columns. It renders to SQL for whichever
-engine the connection speaks, from quoted identifiers only. A table or a join
-can also be named by address, `db://lab/posts`.
+The `source` is the same structure the app builds: a connection, which
+database on it, a base table, joins on named keys, and optionally the
+output columns. It renders to SQL for whichever engine the connection
+speaks, from quoted identifiers only. A table can also be named by
+address, `db://<connection>/<database>/<table>`, so `db://lab/study7/posts`;
+a SQLite file's one database is called `main`.
 
 ## Where to go next
 
