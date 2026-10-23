@@ -22,6 +22,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from ..helpers import db, sources
 from .columns import Inspection
 from .db_columns import DbInspection, inspect_source
+from . import glyphs
 from .prompts import Cancelled, Choice, GoBack, Prompter, ask_at_least_one
 
 __all__ = ["Picked", "pick_connection", "login", "pick_database", "open_database",
@@ -159,8 +160,7 @@ def offer_host_key(prompter: Prompter, exc: db.HostKeyUnknown, *,
     """
     p = exc.profile
     if not exc.keys:
-        prompter.note(f"  {exc}", style="yellow")
-        return None
+        return _accept_by_hand(prompter, exc)
     prompter.reason(f"{p.ssh_host} is new to this computer. ssh remembers each "
                     f"server's key so that a different machine answering to the same "
                     f"name is noticed. This is the key it showed:")
@@ -183,6 +183,44 @@ def offer_host_key(prompter: Prompter, exc: db.HostKeyUnknown, *,
                                     if not db.uses_putty(p) else
                                     "Taters hands it to plink each time."), style="green")
     return updated
+
+
+def _accept_by_hand(prompter: Prompter, exc: db.HostKeyUnknown) -> Optional[db.Profile]:
+    """
+    The host is new and its key could not be fetched to show here. The
+    way out that always works is the one ssh itself offers: log in once by
+    hand, where it shows the key and asks. Run that right here instead of
+    sending the person off to a shell.
+    """
+    p = exc.profile
+    tool = "PuTTY" if db.uses_putty(p) else "ssh"
+    prompter.note(f"  {exc}", style="yellow")
+    prompter.reason(f"{p.ssh_host} is new to this computer, and Taters could not fetch "
+                    f"its key to show you here. {tool} can: logging in by hand shows "
+                    f"the key and asks whether to trust it.")
+    answer = str(prompter.select("What now?", [
+        Choice("hand", f"Log in by hand, here, with {tool}",
+               f"Runs `{db.ssh_hint(p)}` in this window; {tool} shows the server's key and "
+               f"asks. Say yes there only if the fingerprint matches one you got some other way."),
+        Choice("again", "Try to fetch the key again"),
+        Choice("back", f"{glyphs.BACK} Never mind", tone="nav"),
+    ]))
+    if answer == "back":
+        return None
+    if answer == "again":
+        keys = db.host_keys(p)
+        if not keys:
+            prompter.note(f"  Still nothing: {p.ssh_host} did not answer with a key.",
+                          style="yellow")
+            return None
+        return offer_host_key(prompter, db.HostKeyUnknown(str(exc), p, keys=keys))
+    prompter.note(f"  Handing over to {tool}. Answer its question, and the login "
+                  f"itself; Taters carries on when it returns.", style="cyan")
+    code = db.login_by_hand(p)
+    if code != 0:
+        prompter.note(f"  {tool} came back with code {code}. If you accepted the key, "
+                      f"Taters tries again anyway.", style="dim")
+    return p
 
 
 @dataclass
@@ -314,16 +352,27 @@ def open_database(prompter: Prompter, logged: _Login, database: str) -> Optional
     """Probe one database on a server the person is logged in to, and
     open the session the rest of the conversation reads through."""
     target = db.for_database(logged.profile, database)
-    try:
-        with prompter.scanning(f"Looking at {database} on {target.name}"
-                               if target.dialect != "sqlite"
-                               else f"Connecting to {target.name}", unit="checks") as step:
-            probe = db.probe(target, logged.password, on_step=step)
-        if not probe.select:
-            raise db.DbError("; ".join(probe.notes) or f"could not open {database}")
-        session = db.connect(target, logged.password)
-    except db.DbError as e:
-        prompter.note(f"  {e}", style="yellow")
+    for _attempt in range(2):
+        try:
+            with prompter.scanning(f"Looking at {database} on {target.name}"
+                                   if target.dialect != "sqlite"
+                                   else f"Connecting to {target.name}", unit="checks") as step:
+                probe = db.probe(target, logged.password, on_step=step)
+            if not probe.select:
+                raise db.DbError("; ".join(probe.notes) or f"could not open {database}")
+            session = db.connect(target, logged.password)
+            break
+        except db.HostKeyUnknown as e:
+            # the tunnel's first opening can land here too; same offer
+            accepted = offer_host_key(prompter, e)
+            if accepted is None:
+                return None
+            target = db.for_database(accepted, database)
+            continue
+        except db.DbError as e:
+            prompter.note(f"  {e}", style="yellow")
+            return None
+    else:
         return None
     if target.dialect == "sqlite":
         # a server said "Connected" at the login; a file has no login, so

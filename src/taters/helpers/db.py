@@ -1371,12 +1371,78 @@ def host_keys(profile: Profile, log: str = "") -> List[HostKey]:
                     found.append(HostKey(parts[1], parts[2], _fingerprint(parts[2])))
                 except Exception:
                     continue
+    if not found and not uses_putty(profile) and shutil.which("ssh"):
+        # no ssh-keyscan (or it got nothing): ssh itself will write the key
+        # it is shown into a known_hosts file of our choosing, and a
+        # throwaway file is one nothing trusts. the login is expected to
+        # fail; the file is what was wanted
+        found = _keys_via_ssh(profile)
     if not found:
         # plink: "ssh-ed25519 255 SHA256:AbC..." somewhere in its refusal
         m = re.search(r"((?:ssh|ecdsa)-[\w@.-]+)\s+\d+\s+(SHA256:[A-Za-z0-9+/=]+)", log)
         if m:
             found.append(HostKey(m.group(1), "", m.group(2)))
     return found
+
+
+def _keys_via_ssh(profile: Profile) -> List[HostKey]:
+    import subprocess
+    import tempfile
+
+    found: List[HostKey] = []
+    who = (f"{profile.ssh_user}@" if profile.ssh_user else "") + profile.ssh_host
+    with tempfile.TemporaryDirectory() as tmp:
+        scratch = Path(tmp) / "known_hosts"
+        cmd = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+               "-o", f"UserKnownHostsFile={scratch}", "-o", "PasswordAuthentication=no",
+               "-o", "PubkeyAuthentication=no", "-o", "ConnectTimeout=10"]
+        if profile.ssh_port and profile.ssh_port != 22:
+            cmd += ["-p", str(profile.ssh_port)]
+        cmd += [who, "exit"]
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, timeout=30,
+                           stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError):
+            return found
+        if scratch.is_file():
+            for line in scratch.read_text(encoding="utf-8", errors="replace").splitlines():
+                parts = line.split()
+                if len(parts) >= 3 and not line.startswith("#"):
+                    try:
+                        found.append(HostKey(parts[1], parts[2], _fingerprint(parts[2])))
+                    except Exception:
+                        continue
+    return found
+
+
+def login_by_hand(profile: Profile) -> int:
+    """
+    Run the by-hand login right here, in this terminal, with nothing
+    captured: ssh (or plink) shows the server's key and asks whether to
+    trust it, exactly as it would at a shell prompt, and remembers the
+    answer where it always does. For when the key could not be fetched to
+    show inside the app. Returns the program's exit code.
+    """
+    import subprocess
+
+    who = (f"{profile.ssh_user}@" if profile.ssh_user else "") + profile.ssh_host
+    key = str(Path(profile.ssh_key).expanduser()) if profile.ssh_key else ""
+    if uses_putty(profile):
+        cmd = [plink_path() or "plink", "-ssh"]
+        if profile.ssh_port and profile.ssh_port != 22:
+            cmd += ["-P", str(profile.ssh_port)]
+        cmd += ["-i", key, who, "exit"]
+    else:
+        cmd = ["ssh"]
+        if profile.ssh_port and profile.ssh_port != 22:
+            cmd += ["-p", str(profile.ssh_port)]
+        if key:
+            cmd += ["-i", key]
+        cmd += [who, "exit"]
+    try:
+        return subprocess.run(cmd).returncode
+    except OSError:
+        return 255
 
 
 def known_hosts_path() -> Path:

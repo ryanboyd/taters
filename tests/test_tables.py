@@ -699,6 +699,34 @@ def test_an_unknown_host_key_is_shown_and_can_be_accepted(home, monkeypatch, tmp
     assert cmd[cmd.index("-hostkey") + 1] == key.fingerprint
 
 
+def test_without_keyscan_the_key_is_fetched_through_ssh_itself(tmp_path, monkeypatch):
+    """A machine with ssh but no ssh-keyscan (or one keyscan cannot reach):
+    ssh is told to write the key it is shown into a throwaway known_hosts,
+    and that is what the person is shown. Nothing real trusts it until
+    they say so."""
+    import base64
+    import shutil
+
+    blob = base64.b64encode(b"\x00\x00\x00\x0bssh-ed25519" + b"\x00" * 36).decode()
+    fake = tmp_path / "ssh"
+    # the fake finds the UserKnownHostsFile= option and writes a line there,
+    # then fails the login the way the real one would with no key offered
+    fake.write_text("#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in UserKnownHostsFile=*) "
+                    "f=\"${a#UserKnownHostsFile=}\";; esac; done\n"
+                    f"echo '[h.edu]:2200 ssh-ed25519 {blob}' > \"$f\"\n"
+                    "echo 'Permission denied (publickey).' >&2\nexit 255\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}:" + __import__("os").environ["PATH"])
+    real_which = shutil.which
+    monkeypatch.setattr(shutil, "which",
+                        lambda name, *a, **k: None if name == "ssh-keyscan" else real_which(name, *a, **k))
+    p = db.Profile(name="lab", dialect="mysql", host="localhost", user="u",
+                   ssh_host="h.edu", ssh_user="me", ssh_port=2200)
+    (key,) = db.host_keys(p)
+    assert key.type == "ssh-ed25519" and key.blob == blob
+    assert key.fingerprint == db._fingerprint(blob)
+
+
 def test_the_fingerprint_matches_ssh_keygen(tmp_path):
     import shutil
     import subprocess

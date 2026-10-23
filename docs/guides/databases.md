@@ -103,6 +103,13 @@ compare it with, or you have connected to that machine before and the key
 has changed, say no and ask whoever runs it, because that is exactly the
 situation this check exists for.
 
+If Taters can't fetch the key to show you (no `ssh-keyscan` on this
+computer, or the server won't answer it), it offers to run the by-hand
+login right there in the window instead: `ssh -p 130 you@myserver.example.edu`,
+where ssh itself shows the fingerprint and asks. Answer there, and Taters
+carries on when it comes back. Same advice: say yes only if the fingerprint
+matches one you got some other way.
+
 If something goes wrong and you want to change one thing, the "What now?"
 menu lets you change just that: the ssh host (a forgotten port, say), the
 key file, the database's address as seen from the machine, or the

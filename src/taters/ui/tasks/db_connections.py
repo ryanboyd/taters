@@ -402,6 +402,14 @@ def add_connection(prompter: Prompter,
             trial = db.with_fields(_trial(), database="")
             try:
                 password = db.password_for(trial, ask=prompter.secret)
+            except db.HostKeyUnknown as e:
+                from ..db_source import offer_host_key
+
+                accepted = offer_host_key(prompter, e, save=False)
+                if accepted is None:
+                    raise _Abandon()
+                state["ssh_hostkey"] = accepted.ssh_hostkey
+                continue
             except db.DbError as e:
                 prompter.note(f"  {e}", style="yellow")
                 password = None

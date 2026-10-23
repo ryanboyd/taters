@@ -196,6 +196,32 @@ def test_a_database_behind_an_ssh_host_is_set_up_from_the_same_questions(
            "(host, or host:port)" in asked
 
 
+def test_a_key_that_cannot_be_fetched_is_accepted_by_logging_in_by_hand_here(home, monkeypatch):
+    """The report: 'ssh does not know [server] yet. Log in once by hand...'
+    with nothing to do about it in the app. Now the by-hand login runs right
+    here, where ssh shows the key and asks, and Taters carries on."""
+    from taters.ui.db_source import offer_host_key
+
+    ran = []
+    monkeypatch.setattr(db, "login_by_hand", lambda profile: (ran.append(profile), 0)[1])
+    p = db.Profile(name="lab", dialect="mysql", host="localhost", user="u",
+                   ssh_host="h.edu", ssh_user="me", ssh_port=130)
+    exc = db.HostKeyUnknown("ssh does not know h.edu yet. Log in once by hand with "
+                            "`ssh -p 130 me@h.edu` to accept its key, then try again.", p)
+    pr = ScriptedPrompter(["hand"])
+    assert offer_host_key(pr, exc) == p
+    assert ran == [p]
+    menu = {c.value: c for c in pr.offered_choices("What now?")}
+    assert list(menu) == ["hand", "again", "back"]
+    assert menu["hand"].label == "Log in by hand, here, with ssh"
+    assert "`ssh -p 130 me@h.edu`" in menu["hand"].help
+    assert "only if the fingerprint matches one you got some other way" in menu["hand"].help
+    assert "Handing over to ssh" in pr.text_output
+    # declining is still a way out, and nothing runs
+    pr = ScriptedPrompter(["back"])
+    assert offer_host_key(pr, exc) is None and len(ran) == 1
+
+
 def test_an_unknown_host_key_is_offered_and_accepted_in_the_add_flow(home, tmp_path,
                                                                      monkeypatch):
     """The host key comes up at the ssh check, before any database question,
