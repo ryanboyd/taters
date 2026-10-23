@@ -297,9 +297,13 @@ def db_out_flow(ctx: TaskContext) -> Optional[Path]:
     def ask_connection() -> bool:
         if state["shape"] != "join":
             return False
-        state["picked"] = pick_connection(prompter, need_write=False)
-        state["tables"] = list_tables(prompter, state["picked"])
-        return True
+        while True:
+            state["picked"] = pick_connection(prompter, need_write=False)
+            try:
+                state["tables"] = list_tables(prompter, state["picked"])
+            except GoBack:
+                continue        # the server could not answer; said, so pick again
+            return True
 
     def ask_which() -> bool:
         if state["shape"] != "join":

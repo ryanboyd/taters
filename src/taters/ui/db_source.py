@@ -361,9 +361,18 @@ def _rows_word(info: db.TableInfo) -> str:
 
 
 def list_tables(prompter: Prompter, picked: Picked) -> List[db.TableInfo]:
-    with prompter.scanning(f"Looking at the tables in {picked.name}", unit="tables") as seen:
-        found = picked.session.d.list_tables(picked.session, picked.profile.schema)
-        seen(len(found))
+    """The catalog of the picked database. What the server says when it
+    cannot answer (its disk full, the connection dropped) is said in a
+    sentence, and the question before this one is asked again."""
+    try:
+        with prompter.scanning(f"Looking at the tables in {picked.label}",
+                               unit="tables") as seen:
+            found = picked.session.d.list_tables(picked.session, picked.profile.schema)
+            seen(len(found))
+    except db.DbError as e:
+        prompter.note(f"  {e}", style="yellow")
+        picked.session.close()
+        raise GoBack()
     return found
 
 
@@ -598,9 +607,13 @@ def inspection_for(prompter: Prompter, state: JoinState,
     key = str(spec.to_dict())
     if key not in state.inspections:
         label = " with ".join([spec.table] + [j.table for j in spec.joins])
-        with prompter.scanning(f"Reading {label}", unit="columns") as seen:
-            state.inspections[key] = inspect_source(spec, state.picked.session,
-                                                    on_rows=seen)
+        try:
+            with prompter.scanning(f"Reading {label}", unit="columns") as seen:
+                state.inspections[key] = inspect_source(spec, state.picked.session,
+                                                        on_rows=seen)
+        except db.DbError as e:
+            prompter.note(f"  {e}", style="yellow")
+            raise GoBack()
     return state.inspections[key]
 
 

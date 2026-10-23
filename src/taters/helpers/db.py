@@ -524,6 +524,14 @@ class Dialect:
     def encrypted(self, session: "Session") -> Optional[bool]:
         return None                 # a file: the question does not apply
 
+    def driver_errors(self) -> tuple:
+        """The exception classes the driver raises for something the server
+        said, so a session can turn them into words. Not a programming
+        error: a TypeError from a bad parameter stays what it is."""
+        import sqlite3
+
+        return (sqlite3.Error,)
+
     def translate(self, sql: str) -> str:
         return sql
 
@@ -694,6 +702,11 @@ class MySQLDialect(Dialect):
         row = session.all("SHOW SESSION STATUS LIKE 'Ssl_cipher'")
         return bool(row and row[0][1]) if row else None
 
+    def driver_errors(self) -> tuple:
+        import pymysql
+
+        return (pymysql.err.MySQLError,)
+
     def translate(self, sql: str) -> str:
         return _split_placeholders(sql)
 
@@ -853,6 +866,11 @@ class PostgresDialect(Dialect):
             return bool(session.one("SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()"))
         except Exception:
             return None
+
+    def driver_errors(self) -> tuple:
+        import psycopg
+
+        return (psycopg.Error,)
 
     def translate(self, sql: str) -> str:
         return _split_placeholders(sql)
@@ -1634,18 +1652,32 @@ class Session:
         except Exception:
             pass
 
+    @contextlib.contextmanager
+    def _said(self):
+        """A driver's exception becomes a :class:`DbError` that says, in
+        words, what the server said and whose problem it is. A programming
+        error (a bad parameter, a bug) is not the server's and passes."""
+        try:
+            yield
+        except DbError:
+            raise
+        except self.d.driver_errors() as e:
+            raise DbError(query_words(e, self.profile)) from e
+
     def run(self, sql: str, params: Sequence[Any] = ()) -> None:
         cur = self.con.cursor()
         try:
-            cur.execute(self.d.translate(sql), tuple(params))
+            with self._said():
+                cur.execute(self.d.translate(sql), tuple(params))
         finally:
             cur.close()
 
     def all(self, sql: str, params: Sequence[Any] = ()) -> List[tuple]:
         cur = self.con.cursor()
         try:
-            cur.execute(self.d.translate(sql), tuple(params))
-            return [tuple(r) for r in cur.fetchall()]
+            with self._said():
+                cur.execute(self.d.translate(sql), tuple(params))
+                return [tuple(r) for r in cur.fetchall()]
         finally:
             cur.close()
 
@@ -1659,13 +1691,14 @@ class Session:
         with self.d.stream_scope(self.con):
             cur = self.d.stream_cursor(self.con)
             try:
-                cur.execute(self.d.translate(sql), tuple(params))
-                while True:
-                    chunk = cur.fetchmany(batch)
-                    if not chunk:
-                        break
-                    for row in chunk:
-                        yield tuple(row)
+                with self._said():
+                    cur.execute(self.d.translate(sql), tuple(params))
+                    while True:
+                        chunk = cur.fetchmany(batch)
+                        if not chunk:
+                            break
+                        for row in chunk:
+                            yield tuple(row)
             finally:
                 cur.close()
 
@@ -1685,9 +1718,10 @@ class Session:
     def columns_of_query(self, sql: str, params: Sequence[Any] = ()) -> List[str]:
         cur = self.con.cursor()
         try:
-            cur.execute(self.d.translate(self.d.limit(f"SELECT * FROM ({sql}) AS q", 0)),
-                        tuple(params))
-            return [str(c[0]) for c in (cur.description or [])]
+            with self._said():
+                cur.execute(self.d.translate(self.d.limit(f"SELECT * FROM ({sql}) AS q", 0)),
+                            tuple(params))
+                return [str(c[0]) for c in (cur.description or [])]
         finally:
             cur.close()
 
@@ -1696,7 +1730,8 @@ class Session:
             return
         cur = self.con.cursor()
         try:
-            self.d.executemany(cur, self.d.translate(sql), [tuple(r) for r in rows])
+            with self._said():
+                self.d.executemany(cur, self.d.translate(sql), [tuple(r) for r in rows])
         finally:
             cur.close()
 
@@ -1836,6 +1871,46 @@ def probe(profile: Profile, password: Optional[str] = None,
     return Probe(select=True, create=create, drop=drop, registry=registry,
                  version=version, tables=tables, encrypted=encrypted,
                  notes=tuple(notes))
+
+
+def query_words(e: Exception, p: Profile) -> str:
+    """
+    What the server said while a query ran, in words a person can act on.
+    The login explainers cover not getting in; this covers the things that
+    go wrong once in -- the server's disk filling up, the connection
+    dropping, a table the account may not read -- which are almost always
+    somebody else's to fix, and the sentence says whose.
+    """
+    text = str(e)
+    low = text.lower()
+    code = e.args[0] if getattr(e, "args", None) and isinstance(e.args[0], int) else None
+    ask = ("Ask whoever runs the database server" if p.dialect != "sqlite"
+           else "Free some space on this computer")
+    if (code in (1021, 1114) or "errno: 28" in low or "no space left" in low
+            or "disk is full" in low or "disk full" in low):
+        return (f"{p.engine_label} on {p.name} has run out of disk space"
+                + (" (its temp space, which it needs to answer a query)"
+                   if code == 1021 or "/tmp" in text else "")
+                + f". Nothing is wrong on this computer. {ask}; until then "
+                f"the database cannot answer.")
+    if code in (2013, 2006) or "server has gone away" in low or \
+            "closed the connection unexpectedly" in low or "connection was killed" in low:
+        return (f"The connection to {p.name} dropped mid-query"
+                + (" (the ssh tunnel may have closed)" if p.tunneled else "")
+                + ". Try again; if it keeps happening on one table, the server may "
+                "be killing long queries.")
+    if code in (1142, 1143, 1044, 1045) or "permission denied" in low or "access denied" in low \
+            or "command denied" in low:
+        return (f"{p.user or 'This account'} is not allowed to do that on {p.name}: "
+                f"{_short(e)}. Ask whoever runs the database for the right.")
+    if code in (1205, 1213) or "lock wait timeout" in low or "deadlock" in low \
+            or "database is locked" in low:
+        return (f"{p.name} is busy: another session holds a lock on what this needs. "
+                f"Try again in a moment.")
+    if code in (1146,) or ("no such table" in low) or ("does not exist" in low and
+                                                       "relation" in low):
+        return f"{p.name} has no such table any more: {_short(e)}."
+    return f"{p.engine_label} on {p.name} said: {_short(e)}"
 
 
 def _short(e: Exception) -> str:

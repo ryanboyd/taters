@@ -674,9 +674,13 @@ def _ask_db_source(prompter: Prompter, *,
                              "feature_cols": []}
 
     def ask_connection() -> bool:
-        state["picked"] = pick_connection(prompter, need_write=False)
-        state["tables"] = list_tables(prompter, state["picked"])
-        return True
+        while True:
+            state["picked"] = pick_connection(prompter, need_write=False)
+            try:
+                state["tables"] = list_tables(prompter, state["picked"])
+            except GoBack:
+                continue        # the server could not answer; said, so pick again
+            return True
 
     def ask_which() -> bool:
         prompter.reason(

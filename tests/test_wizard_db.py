@@ -62,6 +62,34 @@ _POSTS_AND_PEOPLE = (_cols("posts", "id", "pid", "body")
                      + _cols("participants", "condition", "openness", "age"))
 
 
+def test_a_server_that_cannot_list_its_tables_is_said_and_asked_again(lab, tmp_path,
+                                                                        monkeypatch):
+    """The catalog query failing (the server's disk full, in the real
+    report) is a sentence and the connection question again, not a
+    traceback out of the app."""
+    real = db._DIALECTS["sqlite"].list_tables
+    calls = []
+
+    def flaky(session, schema=""):
+        calls.append(1)
+        if len(calls) == 1:
+            raise db.DbError("SQLite on lab has run out of disk space. Nothing is wrong "
+                             "on this computer.")
+        return real(session, schema)
+    monkeypatch.setattr(db._DIALECTS["sqlite"], "list_tables", flaky)
+    p = ScriptedPrompter([
+        "db", "lab",                      # the first look at its tables fails
+        "lab",                            # so the connection is asked again
+        ["posts", "participants"], _POSTS_AND_PEOPLE,
+        ["readability"], "row", "lab", [], False, "Study", "save",
+    ])
+    result = wiz.run_wizard(p, cwd=tmp_path)
+    assert result.preset["vars"]["connection"] == "lab"
+    assert "has run out of disk space" in p.text_output
+    assert _asked(p).count("Which connection?") == 2
+    assert len(calls) == 2
+
+
 def test_a_database_source_is_offered_and_built_from_its_tables(lab, tmp_path):
     p = ScriptedPrompter([
         "db", "lab",

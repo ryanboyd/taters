@@ -125,6 +125,46 @@ def test_file_sidecars_keep_their_old_names(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# What the server says mid-query, in words
+# ---------------------------------------------------------------------------
+
+def test_a_drivers_error_mid_query_becomes_a_sentence(lab):
+    """The real report: MariaDB's temp disk filled while it answered the
+    catalog query, and the person got a forty-line traceback ending in
+    'Disk full (/tmp/#sql_1f551_0.MAI)'. Every session verb now turns the
+    driver's exception into one sentence that says whose problem it is."""
+    s = db.connect(db.get_profile("lab"))
+    with pytest.raises(db.DbError, match="has no such table any more") as info:
+        s.all("SELECT * FROM nope")
+    assert "nope" in str(info.value)
+    with pytest.raises(db.DbError, match="SQLite on lab said"):
+        s.run("THIS IS NOT SQL")
+    s.close()
+
+
+def test_the_servers_troubles_are_said_as_whose_problem_they_are():
+    p = db.Profile(name="lab", dialect="mysql", host="h", user="me",
+                   ssh_host="box.example.edu", ssh_user="me")
+
+    def err(code, text):
+        e = Exception(code, text)
+        return e
+    full = db.query_words(err(1021, "Disk full (/tmp/#sql_1f551_0.MAI); waiting for someone "
+                                    "to free some space... (errno: 28 \"No space left on device\")"), p)
+    assert full.startswith("MySQL on lab has run out of disk space (its temp space")
+    assert "Nothing is wrong on this computer" in full and "Ask whoever runs" in full
+    assert "#sql_1f551" not in full, "the server's file name is noise to a person"
+    gone = db.query_words(err(2013, "Lost connection to MySQL server during query"), p)
+    assert gone.startswith("The connection to lab dropped mid-query (the ssh tunnel may have closed)")
+    denied = db.query_words(err(1142, "SELECT command denied to user 'me'@'%' for table 'x'"), p)
+    assert denied.startswith("me is not allowed to do that on lab")
+    pg = db.Profile(name="pg", dialect="postgres", host="h", user="me")
+    assert "run out of disk space" in db.query_words(
+        Exception("could not write to file: No space left on device"), pg)
+    assert db.query_words(Exception("something odd"), pg) == "PostgreSQL on pg said: something odd"
+
+
+# ---------------------------------------------------------------------------
 # Profiles and secrets
 # ---------------------------------------------------------------------------
 
