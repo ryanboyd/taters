@@ -88,8 +88,13 @@ def analyze_texts_to_csv(
 
     from ...helpers import tables
 
+    # out_csv arrives as text from the step above (and from the CLI), so
+    # the folder comes from the parsed ref; a database table has no folder
+    # to make. this line used to reach for .parent on the raw string and
+    # took down every archetype run in 1.5.3
     out_ref = tables.parse_ref(out_csv)
-    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    if not out_ref.is_db:
+        out_ref.path.parent.mkdir(parents=True, exist_ok=True)
 
     # 1) first, we build a quantifier per CSV and hang on to the archetype
     #    names in a stable order

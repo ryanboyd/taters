@@ -639,6 +639,74 @@ def test_a_differently_named_id_column_still_passes_through(tmp_path):
     assert "speaker" not in header, "the lone identity column was carried twice"
 
 
+def _stub_archetyper(monkeypatch):
+    """A stand-in for the archetyper package: the two classes the analyzer
+    uses, scoring every sentence the same, so the analyzer's own plumbing
+    runs for real without a sentence-transformer."""
+    import sys
+    import types
+
+    class _Result:
+        def __init__(self, wc, scores):
+            self.WC, self.archetype_scores = wc, scores
+
+    class ArchetypeCollection:
+        def add_archetypes_from_CSV(self, filepath, file_encoding, file_has_headers):
+            self.names = ["calm", "stormy"]
+
+    class ArchetypeQuantifier:
+        def __init__(self, archetypes, model):
+            self.names = archetypes.names
+            self.results = []
+
+        def get_list_of_archetypes(self):
+            return list(self.names)
+
+        def analyze(self, text, mean_center_vectors, fisher_z_transform):
+            self.results = [_Result(len(text.split()), {"calm": 0.5, "stormy": 0.25})]
+
+    pkg = types.ModuleType("archetypes")
+    mod = types.ModuleType("archetypes.archetypes")
+    mod.ArchetypeCollection, mod.ArchetypeQuantifier = ArchetypeCollection, ArchetypeQuantifier
+    pkg.archetypes = mod
+    monkeypatch.setitem(sys.modules, "archetypes", pkg)
+    monkeypatch.setitem(sys.modules, "archetypes.archetypes", mod)
+
+
+def test_the_archetype_analyzer_takes_its_output_as_text_and_makes_the_folder(tmp_path,
+                                                                           monkeypatch):
+    """A user's report on 1.5.3: every archetype run died with
+    "'str' object has no attribute 'parent'" after counting 13 million rows,
+    because the step hands the output location down as text and the
+    analyzer reached for .parent on it. The folder is made from the parsed
+    ref now, and the whole step runs, end to end, with a stub model."""
+    from taters.text import analyze_with_archetypes as awa
+    from taters.text.dictionary_analyzers import multi_archetype_analyzer as maa
+
+    _stub_archetyper(monkeypatch)
+    arche = tmp_path / "themes.csv"
+    arche.write_text("archetype,prompt\ncalm,a calm scene\n", encoding="utf-8")
+    # the analyzer itself, handed a string into a folder that is not there yet
+    out = tmp_path / "deep" / "er" / "scores.csv"
+    got = maa.analyze_texts_to_csv(
+        items=[("a", "hello there friend"), ("b", "one")], archetype_csvs=[arche],
+        out_csv=str(out), device="cpu", verbose=False)
+    assert Path(got) == out and out.is_file()
+    rows = read_csv(out)
+    assert header_of(out) == ["text_id", "WC", "themes__calm", "themes__stormy"]
+    assert [(r["text_id"], r["WC"]) for r in rows] == [("a", "3"), ("b", "1")]
+    # and the step above it, the way a pipeline calls it
+    src = tmp_path / "texts.csv"
+    src.write_text("text_id,text\nx,hello there\ny,bye now then\n", encoding="utf-8")
+    result = awa.analyze_with_archetypes(
+        csv_path=src, text_cols=["text"], id_cols=["text_id"], mode="concat",
+        gathered_csv=tmp_path / "gathered.csv",
+        out_features_csv=tmp_path / "features" / "archetypes.csv",
+        archetype_csvs=[arche], device="cpu")
+    assert Path(result).is_file()
+    assert [r["text_id"] for r in read_csv(result)] == ["x", "y"]
+
+
 def test_archetypes_do_not_duplicate_a_text_id_id_column(tmp_path, monkeypatch):
     """
     Same defect, same fix, in the archetype analyzer -- proven without loading
