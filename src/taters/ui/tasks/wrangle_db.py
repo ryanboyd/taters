@@ -383,21 +383,50 @@ def db_out_flow(ctx: TaskContext) -> Optional[Path]:
         prompter.note(f"      {out.relative_to(state['folder']).as_posix()} ({_rows_word(info)}, "
                       f"{words})", style="cyan", wrap=False)
         plan.append((name, database, table, out, cols))
-    written = 0
-    for name, database, table, out, cols in plan:
-        out.parent.mkdir(parents=True, exist_ok=True)
-        _with_display(
-            prompter, f"wrangle: copy {table} out of {_heading(f'{name}/{database}')}",
-            tables.export_table,
-            source={"connection": name, "database": database, "from": {"table": table}},
-            out_csv=out, columns=cols, overwrite_existing=state["replace"], verbose=False)
-        written += 1
+    where = sorted({_heading(f"{n}/{d}") for n, d, _t, _o, _c in plan})
+    written = _with_display(
+        prompter, f"wrangle: copy {len(plan)} table(s) out of {', '.join(where)}",
+        _dump_all, plan=plan, replace=state["replace"])
     prompter.note(f"\n  ✓ Wrote {written} file(s) into {state['folder']}.",
                   style="green", wrap=False)
     prompter.note("  R, Excel, pandas and every Taters spreadsheet flow can read them.",
                   style="dim")
     prompter.pause()
     return None
+
+
+def _dump_all(*, plan, replace: bool, on_progress=None) -> int:
+    """
+    Every table in ``plan`` to its file, under one progress bar that counts
+    tables, with a sub-bar beneath it for the table in hand counting its
+    rows as they stream out. One bar per table, each reading 1/1, told a
+    person nothing about how far along the whole job was.
+    """
+    n = len(plan)
+    done = 0
+
+    def say(i=None, table="", done_rows=None, total_rows=None, finished=False):
+        if on_progress is None:
+            return
+        extra = {}
+        if table:
+            extra = dict(item=i, item_name=table, item_done=done_rows, item_total=total_rows,
+                         item_unit="rows", item_finished=finished)
+        on_progress(done, n, message=table or None, unit="tables", **extra)
+
+    say()
+    for i, (name, database, table, out, cols) in enumerate(plan):
+        out.parent.mkdir(parents=True, exist_ok=True)
+
+        def sub(d=None, t=None, message=None, unit=None, _i=i, _table=table, **_extra):
+            say(_i, _table, d, t)
+        tables.export_table(
+            source={"connection": name, "database": database, "from": {"table": table}},
+            out_csv=out, columns=cols, overwrite_existing=replace, verbose=False,
+            on_progress=sub)
+        done += 1
+        say(i, table, finished=True)
+    return done
 
 
 def db_in_flow(ctx: TaskContext) -> Optional[Path]:

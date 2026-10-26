@@ -658,6 +658,31 @@ def test_a_connection_added_on_the_way_is_not_asked_for_its_database_twice(home,
     assert db.get_profile("lab").database == "", "nothing picked for it behind the scenes"
 
 
+def test_a_dump_of_several_tables_is_one_bar_over_tables_with_a_sub_bar_for_rows(lab, tmp_path):
+    """A bar per table, each reading 1/1, said nothing about the whole job.
+    One bar counts tables; the table in hand gets a sub-bar beneath it
+    counting its rows as they stream, and that row goes when it is done."""
+    from taters.ui.tasks.wrangle_db import _dump_all
+
+    plan = [("lab", "main", t, tmp_path / f"{t}.csv", None)
+            for t in ("users", "posts", "outcomes")]
+    seen = []
+    n = _dump_all(plan=plan, replace=False,
+                  on_progress=lambda done, total, message=None, unit=None, **extra: seen.append(
+                      (done, total, message, unit, extra)))
+    assert n == 3 and all((tmp_path / f"{t}.csv").is_file() for t in ("users", "posts", "outcomes"))
+    assert {t for _d, t, _m, _u, _e in seen} == {3}, "one total, the number of tables"
+    assert {u for _d, _t, _m, u, _e in seen} == {"tables"}
+    assert [d for d, _t, _m, _u, _e in seen] == sorted(d for d, _t, _m, _u, _e in seen)
+    assert seen[-1][:2] == (3, 3)
+    posts = [e for _d, _t, m, _u, e in seen if m == "posts"]
+    assert posts and all(e["item"] == 1 and e["item_name"] == "posts" and e["item_unit"] == "rows"
+                         for e in posts)
+    assert any(e["item_total"] == 4 and e["item_done"] == 4 for e in posts), \
+        "the sub-bar reaches 4 of 4 rows"
+    assert posts[-1]["item_finished"] is True and not posts[0]["item_finished"]
+
+
 def test_a_dump_can_keep_only_some_columns_and_asks_before_replacing(lab, tmp_path):
     from taters.ui.browse import _TYPE
 

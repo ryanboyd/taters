@@ -112,7 +112,28 @@ def _with_display(prompter, label: str, fn, **kwargs):
         emit("run_start", steps=1, inputs=[])
         emit("step_start", index=1, total=1, call=label, scope="global")
 
+        seen_items: set = set()
+
         def on_progress(done, total, message=None, unit=None, **extra):
+            # a job made of pieces (tables being copied out, one after the
+            # other) can carry the piece in hand as item_*: that is a
+            # sub-bar under the step's own, the same row a per-file step
+            # gets, with the piece's own count on it
+            item = extra.pop("item", None)
+            name = extra.pop("item_name", None)
+            item_done = extra.pop("item_done", None)
+            item_total = extra.pop("item_total", None)
+            item_unit = extra.pop("item_unit", None)
+            finished = extra.pop("item_finished", False)
+            if item is not None:
+                if item not in seen_items:
+                    seen_items.add(item)
+                    emit("item_start", index=1, item=item, input=str(name or item))
+                if finished:
+                    emit("item_done", index=1, item=item, status="ok")
+                else:
+                    emit("item_progress", index=1, item=item, done=item_done,
+                         total=item_total, message=None, unit=item_unit)
             emit("step_progress", index=1, call=label, done=done,
                  total=total, message=message, unit=unit, **extra)
 

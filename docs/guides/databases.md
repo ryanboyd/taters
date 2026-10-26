@@ -360,7 +360,10 @@ are, one CSV per table, named after it.
 4. **Keep every column of each table?** Yes is the usual answer. No opens
    the column screen, one per database, with everything ticked, and you
    untick what you don't want.
-5. **Where should the spreadsheets go?** A folder, picked in the browser.
+5. **Where should the spreadsheets go?** A folder, picked in the browser;
+   *+ New folder here…* makes one on the spot and steps into it. The copy
+   then runs under one progress bar that counts tables, naming the one in
+   hand and how far through its rows it is.
    From one database the files land in it as `<table>.csv`; from several,
    each database gets a folder of its own inside it, so two databases with
    a `users` table never collide. If any of the files are already there,

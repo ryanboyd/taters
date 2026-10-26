@@ -57,6 +57,29 @@ def test_going_up_a_level(tree):
     assert browse_for_folder(p, start=tree / "essays") == tree.resolve()
 
 
+def test_a_new_folder_can_be_made_from_the_browser_and_used(tree):
+    """Choosing where things go usually means somewhere that is not there
+    yet. The row makes it, steps into it, and "Use this folder" takes it."""
+    from taters.ui.browse import _NEW
+
+    p = ScriptedPrompter([_NEW, "dump 2026", _CHOOSE])
+    assert browse_for_folder(p, start=tree) == (tree / "dump 2026").resolve()
+    assert (tree / "dump 2026").is_dir()
+    assert ("text", "Name for the new folder:") in p.asked
+    rows = labels(p, "Which folder?")
+    assert rows[2] == "+ New folder here…", "right under 'Use this folder'"
+
+
+def test_a_new_folder_name_is_one_level_and_an_existing_one_is_entered(tree):
+    from taters.ui.browse import _NEW
+
+    # a path, not a name: refused, still browsing; then a name that exists
+    p = ScriptedPrompter([_NEW, "a/b", _NEW, "essays", _CHOOSE])
+    assert browse_for_folder(p, start=tree) == (tree / "essays").resolve()
+    assert "without slashes" in p.text_output and "already here" in p.text_output
+    assert not (tree / "a").exists()
+
+
 def test_folders_show_how_many_usable_files_they_hold(tree):
     """
     The annotation is what turns "which of these eleven folders was it?" into

@@ -56,6 +56,7 @@ def short_path(path: Path, keep: int = 2) -> str:
 _CHOOSE = "\x00choose"
 _UP = "\x00up"
 _TYPE = "\x00type"
+_NEW = "\x00new"
 
 
 def _entries(folder: Path, *, want_files: Optional[Sequence[str]]) -> tuple:
@@ -180,6 +181,9 @@ def _listing(box: dict, *, want_files, count_suffixes,
                               row(f"{glyphs.TICK} Use this folder") if here_hint
                               else f"{glyphs.TICK} Use this folder",
                               annotation=here_hint, tone="good"))
+        # choosing where things go usually means somewhere that is not
+        # there yet; this makes it, right here, and steps into it
+        choices.append(Choice(_NEW, "+ New folder here…", tone="nav"))
     for folder in folders:
         hint = _count_hint(folder, count_suffixes)
         # a dot-folder says so in the annotation column, so that ~/.cache
@@ -216,6 +220,30 @@ def _listing(box: dict, *, want_files, count_suffixes,
 def _crumb(box: dict) -> str:
     path = short_path(box["here"])
     return f"{path}   · {box['note']}" if box["note"] else path
+
+
+def _make_folder(prompter: Prompter, here: Path) -> Optional[Path]:
+    """Ask for a name and make that folder under ``here``. A name, not a
+    path: one level, so what gets made is what is on the screen. Returns
+    the new folder (or the one already there by that name), None when the
+    person gave no name or it could not be made."""
+    name = str(prompter.text("Name for the new folder:", default="")).strip()
+    if not name:
+        return None
+    if name in (".", "..") or any(sep in name for sep in ("/", "\\")):
+        prompter.note("  Just a name, without slashes; folders are made one level "
+                      "at a time.", style="yellow")
+        return None
+    target = here / name
+    if target.is_dir():
+        prompter.note(f"  {name}/ is already here; stepping into it.", style="dim")
+        return target
+    try:
+        target.mkdir()
+    except OSError as e:
+        prompter.note(f"  Could not make {name}/ here: {e}", style="yellow")
+        return None
+    return target
 
 
 def _browse(
@@ -255,7 +283,7 @@ def _browse(
             target = box["here"].parent
         else:
             target = Path(value)
-            if value in (_CHOOSE, _TYPE) or not target.is_dir():
+            if value in (_CHOOSE, _TYPE, _NEW) or not target.is_dir():
                 return None
         box["here"] = target
         return {"choices": listing(),
@@ -280,6 +308,12 @@ def _browse(
             # only a renderer that can't swap in place ever hands back a
             # navigation value; this loop is its fallback, one screen per step.
             box["here"] = box["here"].parent
+            continue
+        if picked == _NEW:
+            made = _make_folder(prompter, box["here"])
+            if made is not None:
+                box["here"] = made
+            prompter.repaint()
             continue
         if picked == _TYPE:
             raw = str(prompter.path(type_prompt, default="")).strip()
