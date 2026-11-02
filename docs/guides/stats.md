@@ -482,7 +482,7 @@ What comes back is deliberately more than one number:
 | `classifier_per_class.csv` | precision, recall, F1 and support per class — where the model is good and where it is useless |
 | `classifier_confusion.csv` | what the mistakes actually were |
 | `classifier_folds.csv` | each fold's own score, and the penalty it chose |
-| `classifier_predictions__<set>.csv` | the saved model's prediction and the held-out one, per row, with the fold |
+| `classifier_predictions__<set>.csv` | the saved model's prediction and the held-out one, per row, with the fold and a held-out probability per class (`oof_p_<outcome>_<class>`) |
 
 Accuracy is never reported without that baseline beside it, because on an
 outcome where 90% of people are in one class, a model that always answers
@@ -627,6 +627,154 @@ reachable the same way — `python -m taters.stats.group_differences`,
 ordinary steps in a pipeline file. The wizard just writes that file for
 you.
 
+## What the predictions track in words
+
+A ridge fitted on embeddings is a weight per dimension, and its coefficient
+cloud is a cloud of `e238`, `e10` and `e455`: true, and no use to anybody.
+The same goes for a model on PCA components of an embedding set, or on
+another model's scores. So after every ridge and classifier, Taters explains
+the model in words, and writes the words as tables before it draws anything:
+
+* **Word correlates** (`ridge_word_correlates.csv`,
+  `classifier_word_correlates.csv`). Every word's relative frequency across
+  texts, correlated with the model's **held-out** prediction -- what the
+  scores track in language -- and with its **residual**, observed minus
+  predicted: what the outcome has that the model missed, which is the
+  cloud nobody reports and everybody should look at. For a classifier the
+  target is the held-out probability of each class. Held-out, because the
+  in-sample prediction has seen the answer. One row per word per target:
+  `r`, `p`, the adjusted `p_adj` (one correction family per target), how
+  many texts the word is in and its mean relative frequency, sorted by
+  |r|. A word has to be in at least ten texts and 1% of them to be tested.
+  The tokens are the n-gram steps' own, so a word here is the word the
+  frequency list counts.
+* **Token attributions** (`ridge_token_attributions.csv`,
+  `ridge_attributed_texts.csv`, `ridge_attribution_summary.csv`). This is
+  the one that answers the question. Taters' embeddings are means over
+  tokens (per sentence, then per text), a text's word vectors are a mean
+  over its words, and a ridge is linear in either, so a prediction is --
+  exactly, not approximately -- a sum of one share per token (in its
+  context, for an encoder). Every text is re-read through the same model
+  with the same settings, every token's share is computed, and the shares
+  are summed per word: `mean_contribution` (when this word occurs, this is how
+  much it moves the score), `total_contribution` (over the whole corpus,
+  which the frequent words dominate), how often and in how many texts. For
+  the highest and lowest scored texts (`explain_top_texts`, five each by
+  default) every token's share is written out in reading order, and those
+  texts are drawn shaded under the clouds, blue pushing the score up and
+  red down. The summary table records the model, the method in a sentence
+  (the layers and pooling of an encoder; the weighting of a word-vector
+  model), and `max_gap`: the largest difference, over every text, between
+  a text's summed shares and its prediction recomputed from the same token
+  states. That number is the exactness audit, and it is about 1e-6 for an
+  encoder and 1e-15 for word vectors. The shares are of the kept model's
+  own prediction (for a classifier, the class-versus-rest log-odds, which
+  is what is linear; not the probability). For an encoder this costs a
+  second pass through it, the same time the extraction took;
+  `explain_how: correlates` skips it. A model whose pooling is not a mean
+  (`cls`, `max`, a sentence-transformers model with a Dense layer) cannot
+  be decomposed this way, and the report says so and gives correlates only.
+* **Word directions** (`ridge_word_directions.csv`), for a word-vector
+  model only. A word-vector model knows its words without a text, so every
+  word in its vocabulary is scored by the push a text of that one word
+  would give the prediction -- the whole vocabulary ranked, not only the
+  words that happened to occur -- and drawn as the `direction` clouds.
+  One row per word per target, so a large imported vocabulary makes a
+  large table; it is the record.
+
+Which sets get this is `explain_predictions`: **auto** (the default) does it
+for the feature sets whose columns are not words -- embeddings, model
+scores, components of those; **all** does every set, which is a fine way to
+see what a LIWC-based model's predictions track in actual words; **off**
+skips it. `explain_manifest.json` in the results folder names every table
+written; on a database run they are tables in the database, like the
+analysis table.
+
+### How token attribution works
+
+Nothing here is estimated. The shares come from reading the model's own
+arithmetic backwards, and the whole of it is adding and scaling.
+
+**Where a prediction comes from.** The embedding steps read a text sentence
+by sentence. For every sentence the encoder produces one vector per token,
+*in context* (the vector for "fine" in "I'm fine" is not the vector for
+"fine" in "a fine day"). The step averages those token vectors into a
+sentence vector, averages the sentence vectors into the text's vector, and
+that vector is the text's row of `e_1 … e_768`. The ridge then predicts the
+outcome as a weighted sum of those numbers plus a constant; if PCA sits in
+front, that is one more weighted sum; standardizing is a scale and a shift.
+
+**Why it comes apart.** A weighted sum of an average is the average of the
+weighted sums. So the ridge's weights can be pushed back through every
+stage -- through the components onto the dimensions, through the sentence
+mean onto the sentences, through the token mean onto the tokens -- and the
+prediction for a text becomes, exactly, the constant plus one number per
+token: that token's contextual vector dotted with the effective weight
+vector, divided by the number of tokens in its sentence and the number of
+sentences in the text (and by the vector's length, when the step normalized
+it). Those numbers are the shares. Summed over a text they reproduce the
+model's prediction, and `max_gap` in the summary table is the largest
+discrepancy seen over every text in the run -- on the order of 1e-15, which
+is floating-point rounding, not approximation. The attributed-texts table
+keeps a `[specials]` row for the encoder's start and end tokens, which
+carry a share like any position, so a reader can add a text's rows back up
+to its prediction.
+
+**What is done with the shares.** Every text is re-read through the same
+encoder with the same settings (layers, pooling, window, normalization are
+taken from the embedding table's own record), every token's share is
+computed, word pieces are merged back into the word a person reads, and
+the shares are summed per word across the corpus. `mean_contribution` is
+the average share a word carries when it occurs -- how far, on average, the
+word moves the predicted score in the contexts it actually appears in.
+`total_contribution` is the sum over the corpus, which frequent words
+dominate. `sd` says how much the word's share varies between its
+occurrences, which is the measure of how context-dependent it is. The cloud
+is sized by the mean (`explain_size_by: total` sizes it by the total).
+
+**How this differs from the correlates.** The correlates ask, across texts,
+whether texts that use a word more get higher held-out predictions. That is
+a question about co-occurrence in the corpus: *the* and *and* can correlate
+with a predicted trait because longer, calmer texts contain more of them,
+not because the model reacts to *the*. The attribution asks how much of a
+prediction is literally carried by a word's token vectors when the word is
+present. The two agree on the words that matter most and disagree on the
+hangers-on, and seeing both is the point of drawing both.
+
+**What it does not claim.** The shares describe *this* ridge over *this*
+encoder's vectors; a different encoder gives a different decomposition.
+They are per position in context, so the same word can push up in one
+sentence and down in another, which is what the shaded texts show. And the
+decomposition exists only because the pooling is a mean: `cls` pooling puts
+the whole share on one token, `max` pooling is not a sum at all, and a
+sentence-transformers model with a `Dense` layer bends the space, so those
+sets get correlates only, with the reason in the report.
+
+**Word vectors.** The same decomposition, with less in it. A text's
+word-vector row is the weighted mean of its words' vectors (`tokens`:
+every occurrence counts one; `sif`: the commonest words count least;
+`types`: each distinct word once, so the attribution spreads that one
+share equally over the word's occurrences), optionally with each word's
+vector scaled to unit length first, and nothing else -- no sentences, no
+windows, no context. So a word's share is its vector dotted with the
+effective weights, times its weight over the text's weight total, and it
+is the same vector wherever the word appears: the shaded texts show which
+of a text's words carried its score, and a word the model does not know
+is there with no share. Because the model's words exist without a text,
+every word in the vocabulary is also ranked by the push a text of that one
+word would give (`*_word_directions`, the `direction` clouds). A model
+applied with concept dictionaries also has `sim_<dictionary>__<category>`
+columns, cosines between the text and a concept, which are not sums over
+the words; their term in the prediction is read from the analysis table
+into one `[features]` row per text, so the text still adds up and the
+summary names the columns.
+
+The same idea reaches further still. A ridge over *any* feature set is
+already a weighted sum of named columns, so each feature's share in each
+text's prediction is its standardized value times its coefficient, and for
+a document-term matrix the features are words, which puts the shaded texts
+within reach there too. That is not built yet.
+
 ## Word clouds
 
 Every result above is also drawn, as a word cloud, under
@@ -664,13 +812,30 @@ What gets drawn:
   (`TIPI_Open: β +0.32`). Every theme, whether or not a model used it, is
   also drawn beside the features under
   `features/figures/wordclouds/topic_model_mem/`.
+* **Words behind a prediction model** — from the tables the section above
+  describes: per outcome, the words going with a higher and a lower
+  held-out prediction, and with a larger and a smaller residual, sized by
+  *r* and filtered at adjusted *p* < .05; and the words whose exact share
+  pushes the prediction up and down, sized by their mean share
+  (`explain_size_by: total` sizes by the total instead); and, for a
+  word-vector model, every word it knows by the direction it would push
+  the prediction — all in a `words/` folder inside the set. The highest
+  and lowest scored texts are drawn word by word in a `texts/` folder
+  beside it, each word shaded by its share. Each caption names the table
+  it was drawn from.
 * **Most frequent terms** — the corpus as a whole, from the frequency list
   (`features/figures/wordclouds/ngram_frequencies/`), and, when the
   statistics have a group column and the document-term matrix is one of the
   feature tables, one cloud per group with the terms that group used most.
 
 The clouds are on by default; the shared `wordclouds` setting turns every one
-of them off and `wordcloud_words` caps the words per cloud (80). A cloud is
+of them off and `wordcloud_words` caps the words per cloud (80).
+`wordcloud_kinds` decides which kinds are drawn: **auto** (the default) leaves
+out the coefficient and component clouds of a feature set whose columns are
+not words -- a cloud of `e238` is not a reading of anything -- and says so in
+the report, drawing the words behind its predictions instead; **all** draws
+every kind for every set, the `e238` cloud included, for anyone who wants it.
+A cloud is
 redrawn only when the table it came from is newer than it is, so a re-run of
 an unchanged pipeline redraws nothing.
 

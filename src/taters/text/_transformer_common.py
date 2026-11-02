@@ -634,9 +634,16 @@ def encode_sentences(model, tokenizer, sentences: Sequence[str], *,
                      max_length: int = 512, batch_size: int = 32,
                      device_name: str = "cpu", precision: str = "auto",
                      stride: int = 32, verbose: bool = False,
-                     on_batch: Optional[Callable[[int, int], None]] = None):
+                     on_batch: Optional[Callable[[int, int], None]] = None,
+                     return_tokens: bool = False):
     """
     One vector per sentence: ``(vectors [n, d] float32, token_counts [n])``.
+
+    With ``return_tokens`` a third value comes back: per sentence, one
+    entry per window as ``(ids with the special tokens, [positions, d]
+    float32)`` -- the very array the pooling read, after the layer
+    choice, so that a prediction over these vectors can be handed back to
+    the positions that made it (see :mod:`taters.stats.attribution`).
 
     Every sentence is tokenized without truncation; one longer than
     ``max_length`` is windowed with ``stride`` tokens of overlap and its
@@ -660,6 +667,16 @@ def encode_sentences(model, tokenizer, sentences: Sequence[str], *,
 
     # first, token ids per sentence, then we chop those into windows. we keep
     # track of which sentence each window came from so we can put it back later
+    # the tokenizer warns, once, that a sequence is longer than the model's
+    # window and "will result in indexing errors". it would, if we fed it
+    # whole; we window it with overlap below, so the warning is wrong here
+    # and only alarms whoever reads the run log. this is the switch
+    # transformers itself flips after showing it
+    try:
+        tokenizer.deprecation_warnings[
+            "sequence-length-is-longer-than-the-specified-maximum"] = True
+    except Exception:
+        pass
     encoded = tokenizer(sentences, add_special_tokens=False, truncation=False)["input_ids"]
     token_counts = [len(ids) for ids in encoded]
     windows: List[Tuple[int, List[int]]] = []
@@ -678,6 +695,7 @@ def encode_sentences(model, tokenizer, sentences: Sequence[str], *,
     order = sorted(range(len(windows)), key=lambda i: len(windows[i][1]))
     dim = int(model.config.hidden_size) * (len(idx) if combine == "concat" else 1)
     window_vectors = np.zeros((len(windows), dim), dtype=np.float32)
+    window_tokens: dict = {}
 
     def run(size: int):
         done = 0
@@ -699,6 +717,15 @@ def encode_sentences(model, tokenizer, sentences: Sequence[str], *,
                 pooled = [pool_hidden(states[i].float(), mask, pooling) for i in idx]
                 vec = torch.cat(pooled, dim=1) if combine == "concat" \
                     else torch.stack(pooled, dim=0).mean(dim=0)
+                if return_tokens:
+                    # the per-position vectors the pooling just read, with
+                    # the same layer choice, trimmed of padding
+                    chosen = [states[i].float() for i in idx]
+                    per_pos = torch.cat(chosen, dim=2) if combine == "concat" \
+                        else torch.stack(chosen, dim=0).mean(dim=0)
+                    per_pos = per_pos.detach().cpu().numpy().astype(np.float32)
+                    for r, w_i in enumerate(chunk):
+                        window_tokens[w_i] = per_pos[r, :len(seqs[r]), :]
             window_vectors[chunk] = vec.detach().cpu().numpy().astype(np.float32)
             done += len(chunk)
             if on_batch is not None:
@@ -716,6 +743,11 @@ def encode_sentences(model, tokenizer, sentences: Sequence[str], *,
         counts[s_i] += 1
     counts[counts == 0] = 1
     vectors /= counts[:, None]
+    if return_tokens:
+        per_sentence: List[list] = [[] for _ in sentences]
+        for w_i, (s_i, ids) in enumerate(windows):
+            per_sentence[s_i].append((with_specials(ids), window_tokens[w_i]))
+        return vectors, token_counts, per_sentence
     return vectors, token_counts
 
 

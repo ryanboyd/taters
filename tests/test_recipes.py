@@ -1252,12 +1252,19 @@ def test_every_analysis_brings_the_word_clouds_and_then_the_report():
                 and r.outcome_kind]
     assert len(analyses) == 4
     for r in analyses:
-        assert r.auto_with == ("stats_wordclouds", "stats_report"), r.id
+        # the two that fit a model also bring the step that explains it in
+        # words, which sits before the clouds that draw from its tables
+        fits = r.id in ("stats_ridge_fit", "stats_classify_fit")
+        assert r.auto_with == (("stats_explain",) if fits else ()) + \
+            ("stats_wordclouds", "stats_report"), r.id
     ids = [r.id for r in RECIPES]
     clouds, report = ids.index("stats_wordclouds"), ids.index("stats_report")
-    assert clouds < report
-    assert clouds > max(ids.index(r.id) for r in analyses)
+    explain = ids.index("stats_explain")
+    assert explain < clouds < report
+    assert explain > max(ids.index(r.id) for r in analyses)
     assert by_id("stats_wordclouds").user_facing is False
+    assert by_id("stats_explain").user_facing is False
+    assert by_id("stats_explain").call.startswith("potato.stats.")
 
 
 def test_the_text_stage_figure_steps_come_with_their_tables():

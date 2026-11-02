@@ -35,9 +35,9 @@ from dataclasses import replace
 from typing import Any, List, Optional, Sequence
 
 from . import glyphs
-from .prompts import (PAUSE_MESSAGE, _REASON_MARK, _REASON_STYLE,
+from .prompts import (LIST_ROOM, PAUSE_MESSAGE, _REASON_MARK, _REASON_STYLE,
                       Cancelled, Choice, GoBack, QuestionaryPrompter,
-                      Stage, _MIN_VISIBLE_ROWS, description_rows,
+                      Stage, description_rows,
                       flip_tick_mark, note_lines, set_chrome_rows,
                       set_tick_mark,
                       set_description_rows, with_annotation)
@@ -71,49 +71,53 @@ _MARKERS = {
 #: reason the other markers are: the glyph set is settled once per process.
 ROW_INDENT = f"  {glyphs.INDENT} "
 
+#: Every hint fits an 80-column terminal with room to spare (a test holds
+#: them under `HINT_WIDTH`): a hint that wraps is a hint that scrolls the
+#: screen, and the one key that matters most -- the way out -- sits at the
+#: end, where a clipped line loses it first. The [←→] variants are spelled
+#: out rather than spliced in, which is how one screen came to carry the
+#: phrase twice and run off the edge.
 _KEY_HINTS = {
     "select": "[↑↓] move · [enter] picks the highlighted row · [1-9] jump · [esc] back",
     # too many rows to number, so the hint had better not offer a digit.
-    # [pgup]/[pgdn] work on every list and are deliberately NOT named here:
-    # this bar is one clipped line, and with the "[←→] change type" variant
-    # it already runs to 77 of the ~78 columns an 80-wide terminal leaves.
-    # Naming another key would push "[esc] back" off the end, and a way out
-    # nobody can see is worse than a jump key they have to guess -- which is
-    # a guess most people make anyway. The wizard guide lists them.
+    # [pgup]/[pgdn] work on every list and are deliberately NOT named here;
+    # the wizard guide lists them.
     "select_long": "[↑↓] move · [enter] picks the highlighted row · [esc] back",
+    # a single pick whose rows can be re-typed with the arrows (which column
+    # is the group: "labels" or "numbers")
+    "select_cycle": "[↑↓] move · [enter] picks the row · [←→] change type · [esc] back",
     # tick screens: entries toggle, actions choose
     "tick": "[↑↓] move · [space] tick · [enter] picks the highlighted row · [esc] back",
+    "tick_cycle": "[space] tick · [enter] picks the row · [←→] change type · [esc] back",
     # the one multi-select dialect (see `checkbox`): boxes tick, and the Done
     # row is the only way forward
     "checkbox": f"[space] ticks a box · [enter] on {glyphs.TICK} Done continues · [esc] back",
+    "checkbox_cycle": f"[space] ticks a box · [enter] on {glyphs.TICK} Done continues · "
+                      f"[←→] type · [esc] back",
     "confirm": "[y]/[n] answer · [enter] picks the highlighted row · [esc] back",
 }
 _DEFAULT_HINT = "[enter] accept · [esc] back · [ctrl-c] quit"
+#: The widest a hint may be, counting its two-space margin: narrower than
+#: an 80-column terminal, so the line never folds.
+HINT_WIDTH = 78
 
-# the rail's one line, plus the blank that separates it from the question
+# the rail's one line, plus the blank that separates it from what follows
 _RAIL_ROWS = 2
 
-# rows a question takes up besides the choices themselves: the question line,
-# the two "N more above/below" markers, the blank line before the description,
-# the key hint, and one spare so the shell prompt doesn't land tight against
-# the last row. we count these out rather than guess, because our first version
-# forgot every one of them and the screen overshot by six. the description
-# block gets reserved separately, at the height of the tallest description on
-# the screen (`set_description_rows`).
-_BELOW_LIST = 1 + 2 + 1 + 1 + 1
+# rows under the list, whatever is on it: the two "N more above/below"
+# markers (drawn blank when the list fits, so the height never moves), the
+# blank line and the key hint, and one spare so the shell prompt doesn't
+# land tight against the last row. the question line(s) and the description
+# block are counted on top of this, per screen, because both vary.
+_UNDER_LIST = 2 + 1 + 1 + 1
 
-#: Rows the option list is entitled to, whatever else wants the screen. The
-#: list is the *point* of the screen; the notes above it are context. A
-#: spreadsheet of 150 columns produced a note naming all 150, which pushed the
-#: list of those same columns down to five visible rows -- a porthole to pick
-#: two columns through, with the answer scrolled off in both directions (a
-#: real report). So the notes are trimmed to fit around the list rather than
-#: the list being squeezed into whatever the notes leave.
-#:
-#: The same number the renderer refuses to go below, taken from there rather
-#: than written twice: a painter that reserves less than the list will insist
-#: on is a painter that trims notes for nothing.
-_LIST_FLOOR = _MIN_VISIBLE_ROWS
+#: Rows the option list is owed, whatever else wants the screen. The list
+#: is the *point* of the screen; the notes above it are context. A
+#: spreadsheet of 150 columns produced a note naming all 150, which pushed
+#: the list of those same columns down to five visible rows -- a porthole to
+#: pick two columns through (a real report). So the notes are trimmed, and
+#: the banner shrinks to one line, before the list gives up rows.
+_LIST_FLOOR = LIST_ROOM
 
 #: The fewest rows of notes worth keeping on a screen too small for both.
 #: Below this the trimming is doing more harm than the crowding was.
@@ -260,32 +264,42 @@ class LivePrompter(QuestionaryPrompter):
     # mis-sizing a window.
     _stages: List[Stage] = []
     _header: str = ""
+    _compact_header: str = ""
     _reason: str = ""
     #: Rows the question about to be asked needs for its own list. Zero on a
     #: screen that only reports something -- the "Check my setup" table is
     #: the whole point of its screen, and trimming it to leave room for a
     #: list that never comes would be vandalism.
     _reserve_rows: int = 0
+    #: Rows the question line itself wraps to, and the description block
+    #: under its list, for the screen being laid out.
+    _question_rows: int = 1
+    _desc_rows: int = 0
 
     def __init__(self, title: str = "Taters") -> None:
         super().__init__()
         self._title = title
         self._stages: List[Stage] = []
         self._header: str = ""
+        self._compact_header: str = ""
         self._screen_notes: List[tuple] = []
         self._reason: str = ""
 
     # -- the screen --------------------------------------------------------
-    def set_header(self, header) -> None:
+    def set_header(self, header, compact=None) -> None:
         """
         The banner to redraw at the top of every screen.
 
         Accepts a string, or a zero-argument callable rendered at each paint.
         The callable is what makes the banner's slow border-color drift real:
         rendered once into a string, the drift was recomputed exactly once per
-        session and the "animation" never visibly moved.
+        session and the "animation" never visibly moved. ``compact`` is the
+        one-line banner for a terminal too short to hold the full one and
+        the question under it; without one, a short terminal keeps the full
+        banner and the list gives up rows instead.
         """
         self._header = header
+        self._compact_header = compact or ""
 
     def note(self, text: str, *, style: str = "", wrap: bool = True) -> None:
         """
@@ -338,6 +352,51 @@ class LivePrompter(QuestionaryPrompter):
             table.add_row(*[str(c) for c in row])
         return len(self._console.render_lines(table, pad=False))
 
+    def _question_rows_for(self, question: str) -> int:
+        """Rows the question line takes once the terminal wraps it: the
+        pointer, the text and a space, over the width. A question long
+        enough to fold used to be counted as one row, and the screen then
+        scrolled by exactly the line it forgot."""
+        from rich.cells import cell_len
+
+        width = max(20, int(getattr(self._console, "width", 80) or 80))
+        return max(1, -(-(cell_len(str(question)) + 3) // width))
+
+    def _below_rows(self) -> int:
+        """Everything a question's live region takes besides its list: the
+        reason, the question line(s), the markers, the description block
+        with its breath of air, the hint and the spare."""
+        desc = int(getattr(self, "_desc_rows", 0) or 0)
+        return (len(self._reason_lines()) + int(self._question_rows or 1)
+                + _UNDER_LIST + (desc + 1 if desc else 0))
+
+    def _screen_rows(self) -> int:
+        return int(getattr(self._console.size, "height", 24) or 24)
+
+    def _use_compact_header(self) -> bool:
+        """
+        Whether this screen's banner has to be the one-liner.
+
+        The full banner is six rows; on a 24-row terminal, with a rail, a
+        reason and a description under the list, that leaves the list a
+        porthole or pushes the banner off the top -- and a banner that
+        scrolls away is worse than a smaller one. So the banner gives way
+        first, before the list gives up rows and before the notes are cut
+        to the bone.
+        """
+        if not self._compact_header:
+            return False
+        full = self._header_rows(compact=False)
+        if self._reserve_rows <= 0:
+            # a report screen: everything it printed is the point, so the
+            # banner is what gives way when the report alone would push it
+            # off the top
+            printed = sum(self._entry_height(e) for e in self._screen_notes)
+            return full + self._rail_height() + printed + 2 > self._screen_rows()
+        needs = (full + self._rail_height() + (_NOTES_FLOOR if self._screen_notes else 0)
+                 + self._below_rows() + self._reserve_rows)
+        return needs > self._screen_rows()
+
     def _notes_budget(self) -> int:
         """
         How many rows the notes may take on this screen.
@@ -350,11 +409,8 @@ class LivePrompter(QuestionaryPrompter):
         """
         if self._reserve_rows <= 0:
             return 10 ** 6          # nothing's competing for space; print it all
-        rows = getattr(self._console.size, "height", 24) or 24
-        spoken_for = (self._rows_painted + self._rail_height()
-                      + len(self._reason_lines()) + _BELOW_LIST
-                      + self._reserve_rows)
-        return max(_NOTES_FLOOR, rows - spoken_for)
+        spoken_for = self._rows_painted + self._below_rows() + self._reserve_rows
+        return max(_NOTES_FLOOR, self._screen_rows() - spoken_for)
 
     def _paint(self) -> None:
         """
@@ -375,10 +431,20 @@ class LivePrompter(QuestionaryPrompter):
         self._console.clear()
         self._blank_last = True
         self._rows_painted = 0
+        compact = self._use_compact_header()
         if self._header:
-            header = self._header() if callable(self._header) else self._header
+            header = self._header_text(compact=compact)
             self._console.print(header, soft_wrap=True)
             self._rows_painted += header.count("\n") + 1
+        # the rail goes under the banner and above everything else, as
+        # printed text: it used to be part of the question's own live region,
+        # which put every note *above* it and left the screen reading
+        # banner, note, rail, question -- the one order nobody meant
+        if self._stages:
+            self._console.print(self._rail_markup(), soft_wrap=True)
+            self._console.print()
+            self._rows_painted += _RAIL_ROWS
+            self._blank_last = True
 
         # we keep the most recent notes that fit: the newest one is about the
         # question on screen, and an older one that's already been read is the
@@ -447,13 +513,35 @@ class LivePrompter(QuestionaryPrompter):
                                  style="dim")
                     continue
                 super().table(title, rows, headers)
+        # a breath between the last note and the question under it, the
+        # same air the rail and the reason get; without it the note read as
+        # the question's first line
+        if kept and not self._blank_last:
+            self._console.print()
+            self._rows_painted += 1
+            self._blank_last = True
 
-    def _header_rows(self) -> int:
-        """Rows the banner took, so the notes' own usage can be measured."""
+    def _header_text(self, *, compact: bool) -> str:
+        source = self._compact_header if compact else self._header
+        return source() if callable(source) else str(source)
+
+    def _header_rows(self, *, compact: Optional[bool] = None) -> int:
+        """Rows the banner takes (the one this screen is using, unless
+        asked about the other), so the notes' own usage can be measured."""
         if not self._header:
             return 0
-        header = self._header() if callable(self._header) else self._header
-        return header.count("\n") + 1
+        if compact is None:
+            compact = self._use_compact_header()
+        return self._header_text(compact=compact).count("\n") + 1
+
+    def _rail_markup(self) -> str:
+        """The rail as rich markup, for printing under the banner."""
+        parts = []
+        for stage in self._stages:
+            marker, style = _MARKERS.get(stage.status, _MARKERS["todo"])
+            color = style.replace("fg:", "")
+            parts.append(f"[{color}]{marker}{stage.label}[/]")
+        return "  " + "  ".join(parts)
 
     # -- progress ----------------------------------------------------------
     def stage(self, key: str, label: str, *, status: str = "active",
@@ -553,47 +641,34 @@ class LivePrompter(QuestionaryPrompter):
         from prompt_toolkit.layout import ConditionalContainer, HSplit, Layout, Window
         from prompt_toolkit.layout.controls import FormattedTextControl
 
-        rail = self._rail_lines()
-
         body = application.layout.container
         try:
             focused = application.layout.current_window
         except Exception:
             # no focusable window yet; wrapping would break focus resolution,
-            # and a missing rail is a much smaller problem than a dead prompt.
+            # and a missing reason is a much smaller problem than a dead prompt.
             return
 
         # ~is_done is what makes this a *live region* instead of more output.
         # prompt_toolkit leaves its final frame in the scrollback (that's how
         # questionary's "? Question  answer" line survives), so without this
-        # filter every answered question would leave a copy of the rail behind,
-        # and eight questions would leave eight rails.
-        # the rail is optional (the hub's menus have no stages); the reason
-        # line and the key hint aren't. we used to bail out entirely when there
-        # was no rail, which meant a `reason()` on a stage-less screen just
-        # never rendered -- an explanation the user was owed, silently dropped.
-        header = ConditionalContainer(
-            Window(
-                FormattedTextControl(lambda: self._rail_lines()),
-                height=_RAIL_ROWS if rail else 0,
-                always_hide_cursor=True,
-            ),
-            filter=~is_done,
-        )
+        # filter every answered question would leave a copy of the hint
+        # behind, and eight questions would leave eight hints. (the rail is
+        # printed above, with the banner, and is not part of this region.)
         footer = ConditionalContainer(
             Window(
-                FormattedTextControl(lambda: [("fg:#808080 italic", f"  {hint}")]),
-                height=1,
+                FormattedTextControl(lambda: [("", "\n"), ("fg:#808080 italic", f"  {hint}")]),
+                height=2,
                 always_hide_cursor=True,
             ),
             filter=~is_done,
         )
 
-        # this goes between the rail and the question, so that the sentence
-        # explaining why a question is on screen sits right against the
-        # question and not above everything else that happens to be up there.
+        # this goes above the question, so that the sentence explaining why
+        # a question is on screen sits right against the question and not
+        # above everything else that happens to be up there.
         reason_rows = len(self._reason_lines())
-        middle = [header]
+        middle = []
         if reason_rows:
             middle.append(ConditionalContainer(
                 Window(
@@ -617,6 +692,17 @@ class LivePrompter(QuestionaryPrompter):
                 ),
                 filter=~is_done,
             ))
+        # the question's own windows must not stretch: left to prompt_toolkit
+        # they grow to fill the terminal, which parks the key hint on the
+        # bottom row with a gulf of blank screen above it. with the hint
+        # directly under the list the screen is as tall as its content
+        try:
+            from prompt_toolkit.filters import to_filter
+
+            for window in application.layout.find_all_windows():
+                window.dont_extend_height = to_filter(True)
+        except Exception:
+            pass
         application.layout = Layout(
             HSplit([*middle, body, footer]),
             focused_element=focused,
@@ -658,18 +744,23 @@ class LivePrompter(QuestionaryPrompter):
         if not transient:
             self._paint()
         # a list gets whatever the screen has left. everything above it was
-        # just painted and counted; below it sit the question itself and the
-        # key hint. before this, we sized the list against a fixed guess of 16
-        # rows, so a step with long option descriptions grew a window taller
-        # than the terminal and scrolled the banner off the top.
-        set_chrome_rows(self._rows_painted + self._rail_height()
-                        + len(self._reason_lines())
-                        + (1 if breadcrumb is not None else 0) + _BELOW_LIST)
+        # just painted and counted (the banner, the rail, the notes); below
+        # it sit the reason, the question line(s), the markers, the
+        # description block and the key hint, counted per screen because
+        # the question can wrap and the description can be absent. before
+        # this, we sized the list against a fixed guess of 16 rows, so a
+        # step with long option descriptions grew a window taller than the
+        # terminal and scrolled the banner off the top.
+        desc = int(getattr(self, "_desc_rows", 0) or 0)
+        set_chrome_rows(self._rows_painted + len(self._reason_lines())
+                        + int(self._question_rows or 1)
+                        + (1 if breadcrumb is not None else 0)
+                        + _UNDER_LIST + (1 if desc else 0))
         # held at the tallest description on this screen, so that moving
         # between rows with long and short (or no) help never changes the
         # list's height -- that's what used to scroll the explanation above
         # the question up the screen a line or two per keypress.
-        set_description_rows(getattr(self, "_desc_rows", 0))
+        set_description_rows(desc)
         try:
             self._wrap(question_obj.application, hint, breadcrumb)
             self._bind_escape(question_obj.application)
@@ -735,6 +826,7 @@ class LivePrompter(QuestionaryPrompter):
                      for i, c in enumerate(shown, 1)]
 
         self._desc_rows = description_rows(shown)
+        self._question_rows = self._question_rows_for(question)
         question_obj = self._q.select(
             question,
             choices=[self._to_q(c) for c in shown],
@@ -772,11 +864,11 @@ class LivePrompter(QuestionaryPrompter):
         if hint_override is not None:
             hint = hint_override
         elif ticked is not None or toggles:
-            hint = _KEY_HINTS["tick"]
+            hint = _KEY_HINTS["tick_cycle" if cycle is not None else "tick"]
+        elif cycle is not None:
+            hint = _KEY_HINTS["select_cycle"]
         else:
             hint = _KEY_HINTS["select"] if numbered else _KEY_HINTS["select_long"]
-        if cycle is not None:
-            hint = hint.replace(" · [esc] back", " · [←→] change type · [esc] back")
         # a list is coming, so the painter above owes it room. only as much as
         # there is to show, though: a three-option menu has no use for twelve
         # rows, and claiming them would trim notes for nothing.
@@ -1066,10 +1158,10 @@ class LivePrompter(QuestionaryPrompter):
         cascade = {"children": kids,
                    "parent": {child: head
                               for head, group in kids.items() for child in group}}
+        # no help on the Done row: the hint bar under the list says exactly
+        # what it does, and a description here cost every tick screen three
+        # rows to say it twice
         rows = [Choice(self._TICKS_DONE, f"{glyphs.TICK} Done — use the ticked items",
-                       help="Tick boxes with [space]; this row's [enter] "
-                            "confirms them. It waits until something is "
-                            "ticked.",
                        tone="good")]
         for c in choices:
             mark = (_heading_mark(kids[c.value], ticked) if c.value in kids
@@ -1079,10 +1171,8 @@ class LivePrompter(QuestionaryPrompter):
         self.select(question, rows, numbered=False,
                     toggle_values=set(order), ticked=ticked,
                     enter_gate=self._TICKS_DONE, cascade=cascade,
-                    hint_override=(_KEY_HINTS["checkbox"] if cycle is None else
-                                   _KEY_HINTS["checkbox"].replace(
-                                       " · [esc] back",
-                                       " · [←→] change type · [esc] back")),
+                    hint_override=_KEY_HINTS["checkbox_cycle" if cycle is not None
+                                             else "checkbox"],
                     cycle=cycle)
         return self._log_answer("tick", question,
                                 [v for v in order if v in ticked])
@@ -1182,6 +1272,7 @@ class LivePrompter(QuestionaryPrompter):
         ordered = [yes, no] if default else [no, yes]
 
         self._desc_rows = description_rows(ordered)
+        self._question_rows = self._question_rows_for(question)
         question_obj = self._q.select(
             question,
             choices=[self._to_q(c) for c in ordered],
@@ -1191,7 +1282,11 @@ class LivePrompter(QuestionaryPrompter):
             instruction=" ",
         )
         self._bind_confirm_keys(question_obj.application)
-        return self._ask(question_obj, _KEY_HINTS["confirm"]) == "yes"
+        self._reserve_rows = 2
+        try:
+            return self._ask(question_obj, _KEY_HINTS["confirm"]) == "yes"
+        finally:
+            self._reserve_rows = 0
 
     def _bind_confirm_keys(self, application) -> None:
         """Answer a yes/no on a single keypress, without moving or pressing enter."""

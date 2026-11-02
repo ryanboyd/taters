@@ -45,6 +45,88 @@ def _ridge_rows():
     return rows
 
 
+def _correlate_rows():
+    rows = []
+    for target, grams in (("prediction", (("gravy", "0.41", "0.001"), ("butter", "-0.2", "0.03"),
+                                          ("potato", "0.05", "0.6"))),
+                          ("residual", (("butter", "0.35", "0.002"),))):
+        for gram, r, q in grams:
+            rows.append({"subset": "", "feature_set": "embeds", "outcome": "openness",
+                         "target": target, "ngram": gram, "r": r, "p": q, "p_adj": q,
+                         "n_texts": "300", "docs": "40", "mean_relfreq": "0.02"})
+    return rows
+
+
+def test_word_correlate_clouds_pair_up_per_target_and_name_their_table():
+    specs = wc.clouds_for_word_correlates(_correlate_rows(), analysis="ridge", max_p=0.05,
+                                          table="ridge_word_correlates")
+    by_name = {s.name: s for s in specs}
+    assert set(by_name) == {"openness__prediction__positive", "openness__prediction__negative",
+                            "openness__residual__positive", "openness__residual__negative"}
+    pos = by_name["openness__prediction__positive"]
+    assert dict(pos.words) == {"gravy": 0.41}, "potato did not pass the correction"
+    assert pos.kind == "correlate" and pos.folder == "ridge-regression/embeds/words"
+    assert "higher predicted scores" in pos.title and "`ridge_word_correlates`" in pos.legend
+    neg = by_name["openness__prediction__negative"]
+    assert dict(neg.words) == {"butter": -0.2}
+    resid = by_name["openness__residual__positive"]
+    assert resid.kind == "residual" and "under-predicts" in resid.title
+    assert not by_name["openness__residual__negative"].words
+    assert "no word went with" in by_name["openness__residual__negative"].note
+
+
+def test_attribution_clouds_give_each_sign_its_own_strongest_words():
+    """Cut by |share| before splitting by sign, one sign took the budget and
+    the other cloud had two words (a real run)."""
+    rows = [{"subset": "", "feature_set": "embeds", "outcome": "o", "target": "prediction",
+             "word": f"neg{i}", "mean_contribution": str(-1.0 - i), "total_contribution": "-1",
+             "sd": "0", "count": "5", "docs": "5", "share_of_abs_total": "0.01"}
+            for i in range(20)]
+    rows += [{"subset": "", "feature_set": "embeds", "outcome": "o", "target": "prediction",
+              "word": f"pos{i}", "mean_contribution": str(0.1 + i * 0.01),
+              "total_contribution": "1", "sd": "0", "count": "5", "docs": "5",
+              "share_of_abs_total": "0.01"} for i in range(8)]
+    specs = {s.name: s for s in wc.clouds_for_attributions(rows, analysis="ridge", top_words=10)}
+    assert len(specs["o__attribution__positive"].words) == 8
+    assert len(specs["o__attribution__negative"].words) == 10
+    assert specs["o__attribution__negative"].words[0][0] == "neg19"
+
+
+def test_direction_clouds_rank_the_vocabulary_each_way():
+    rows = [{"subset": "", "feature_set": "vectors", "outcome": "o", "target": "prediction",
+             "word": w, "direction": str(d), "count": "3", "rank": str(i + 1)}
+            for i, (w, d) in enumerate([("cat", 2.0), ("car", -1.5), ("dog", 0.4), ("fish", -0.1)])]
+    specs = {s.name: s for s in wc.clouds_for_directions(rows, analysis="ridge", table="t")}
+    assert set(specs) == {"o__direction__positive", "o__direction__negative"}
+    assert specs["o__direction__positive"].words == [("cat", 2.0), ("dog", 0.4)]
+    assert specs["o__direction__negative"].words == [("car", -1.5), ("fish", -0.1)]
+    assert specs["o__direction__positive"].kind == "direction"
+    assert "one word" in specs["o__direction__positive"].legend
+    assert specs["o__direction__positive"].folder.endswith("/vectors/words")
+    # `auto` keeps it: it is words, whatever the set's columns are
+    kept = wc.keep_kinds(list(specs.values()), "auto", {"vectors": True})
+    assert len(kept) == 2
+
+
+def test_auto_keeps_the_word_clouds_of_an_opaque_set_and_explains_the_missing_ones():
+    specs = wc.clouds_for_ridge(_ridge_rows(), _allow_all)
+    specs[0].set_name = "embeds"
+    specs[0].kind = "cloud"
+    words = wc.clouds_for_word_correlates(_correlate_rows(), analysis="ridge", max_p=0.05)
+    kept = wc.keep_kinds(specs + words, "auto", {"embeds": True, "dictionary": False})
+    names = [s.name for s in kept]
+    assert "embeds__not_drawn" in names and "openness__prediction__positive" in names
+    assert all(s.name != specs[0].name for s in kept if s.kind == "cloud" and s.words
+               and s.set_name == "embeds")
+    note = next(s for s in kept if s.name == "embeds__not_drawn")
+    assert "not words" in note.note and "wordcloud_kinds: all" in note.note
+    # dictionary's clouds are words and stay
+    assert any(s.set_name == "dictionary" and s.words for s in kept)
+    assert len(wc.keep_kinds(specs + words, "all", {"embeds": True})) == len(specs) + len(words)
+    with pytest.raises(ValueError):
+        wc.keep_kinds(specs, "some", {})
+
+
 def test_ridge_clouds_come_from_the_full_model_only():
     """
     Fitters write every control combination. The cloud shows language fitted

@@ -2508,6 +2508,78 @@ def test_a_ridge_over_embeddings_is_asked_about_pca_at_the_stage(tmp_path):
     assert pca_step["with"]["pca"] == "{{var:stats_pca}}", "the ridge reads the shared setting"
 
 
+def test_pca_on_some_sets_stores_the_tables_names_not_their_labels(tmp_path):
+    """A real run: the preset said `stats_pca: [Document-term matrix,
+    Transformer embeddings (raw, any encoder)]` -- the rows' labels -- and
+    the first analysis stopped with "pca names feature set(s) that do not
+    exist". The setting stores the names the analyses know the sets by."""
+    from taters.stats._common import wanted_sets
+    from taters.ui import wizard as wiz
+    from taters.ui.browse import _TYPE
+    from taters.ui.prompts import ScriptedPrompter
+
+    sheet = _wide_sheet(tmp_path)
+    p = ScriptedPrompter([
+        "csv", _TYPE, str(sheet), ["text"], True, ["pid"],
+        ["ngram_frequencies", "doc_term_matrix", "transformer_embeddings"], "row",
+        "distilroberta-base",
+        ["stats_ridge_fit"], ["openness"],
+        ["doc_term_matrix", "transformer_embeddings"],    # both tables feed the statistics
+        "together",
+        wiz._SOME,                                        # reduce some of them
+        ["doc_term_matrix_count", "transformer_embeddings"],  # ticked by their names
+        False, ":done", "Study", "save",
+    ])
+    result = wiz.run_wizard(p, cwd=tmp_path)
+    assert result.preset["vars"]["stats_pca"] == ["doc_term_matrix_count",
+                                                  "transformer_embeddings"]
+    offered = {c.value: c for c in p.offered_choices("Which feature sets should be reduced")}
+    assert set(offered) == {"doc_term_matrix_count", "transformer_embeddings"}
+    assert "Document-term matrix" in offered["doc_term_matrix_count"].label
+    # and the reducer accepts exactly these names
+    assert wanted_sets(result.preset["vars"]["stats_pca"],
+                       ["doc_term_matrix_count", "transformer_embeddings", "readability"]) \
+        == ["doc_term_matrix_count", "transformer_embeddings"]
+
+
+@pytest.mark.parametrize("reduce", [["word_vectors", "transformer_embeddings"], ["word_vectors"]])
+def test_a_step_dropped_at_the_preflight_leaves_the_pca_list_too(tmp_path, monkeypatch, reduce):
+    """A real run: word vectors ticked, named in the PCA list, then "leave
+    it out" when the preflight found gensim missing. The preset kept
+    `word_vectors` in `stats_pca` and the ridge stopped with "pca names
+    feature set(s) that do not exist". The answers that name a dropped
+    step's table are scrubbed; with nothing left to reduce, PCA is off."""
+    from taters.ui import wizard as wiz
+    from taters.ui.browse import _TYPE
+    from taters.ui.prompts import ScriptedPrompter
+
+    monkeypatch.setattr(wiz, "missing_extras",
+                        lambda r: ["vectors"] if "vectors" in r.extras else [])
+    sheet = _wide_sheet(tmp_path)
+    p = ScriptedPrompter([
+        "csv", _TYPE, str(sheet), ["text"], True, ["pid"],
+        ["doc_term_matrix", "transformer_embeddings", "word_vectors_train"], "row",
+        "distilroberta-base",
+        ["stats_ridge_fit"], ["openness"],
+        ["doc_term_matrix", "word_vectors_train", "transformer_embeddings"],
+        "together",
+        wiz._SOME, reduce,
+        False,
+        "drop",                     # the preflight: gensim is missing, leave word vectors out
+        ":done", "Study", "save",
+    ])
+    result = wiz.run_wizard(p, cwd=tmp_path)
+    calls = [s["call"] for s in result.preset["steps"]]
+    assert not any("word_vectors" in c for c in calls)
+    if len(reduce) == 2:
+        assert result.preset["vars"]["stats_pca"] == ["transformer_embeddings"]
+    else:
+        assert result.preset["vars"].get("stats_pca", "off") == "off"
+    assemble = next(s for s in result.preset["steps"] if "assemble" in s["call"])
+    assert not any("word_vectors" in str(v) for v in assemble.get("with", {}).values())
+    assert any("not reduced to components" in n for n in p.output)
+
+
 def test_a_ridge_over_narrow_features_is_not_asked_about_pca(tmp_path):
     from taters.ui import wizard as wiz
     from taters.ui.browse import _TYPE

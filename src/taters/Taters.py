@@ -108,6 +108,7 @@ class Taters:
     def analyze_group_differences(self, **kwargs):              return self.stats.analyze_group_differences(**kwargs)
     def analyze_correlations(self, **kwargs):                   return self.stats.analyze_correlations(**kwargs)
     def write_stats_report(self, **kwargs):                     return self.stats.write_stats_report(**kwargs)
+    def explain_predictions(self, **kwargs):                    return self.stats.explain_predictions(**kwargs)
     def fit_ridge_csv(self, **kwargs):                          return self.stats.fit_ridge_csv(**kwargs)
     def apply_ridge_csv(self, **kwargs):                        return self.stats.apply_ridge_csv(**kwargs)
     def fit_classifier_csv(self, **kwargs):                     return self.stats.fit_classifier_csv(**kwargs)
@@ -342,6 +343,10 @@ class _StatsAPI:
     def write_stats_report(self, **kwargs):
         from .stats.report import write_stats_report
         return _forward(write_stats_report, kwargs)
+
+    def explain_predictions(self, **kwargs):
+        from .stats.explain import explain_predictions
+        return _forward(explain_predictions, kwargs)
 
     def fit_ridge_csv(self, **kwargs):
         from .stats.ridge import fit_ridge_csv

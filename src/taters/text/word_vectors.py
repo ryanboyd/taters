@@ -75,7 +75,7 @@ from .ngram_prep import make_token_stream
 __all__ = ["train_word_vectors", "apply_word_vectors", "import_word_vectors",
            "describe_word_vectors", "nearest_neighbors",
            "MODEL_KIND", "MODEL_FORMAT", "WEIGHTINGS", "FAMILIES",
-           "ALGORITHMS", "VECTOR_FORMATS"]
+           "ALGORITHMS", "VECTOR_FORMATS", "unit_vectors"]
 
 PathLike = Union[str, Path]
 
@@ -322,25 +322,77 @@ def _weights_for(model: _Loaded, rows: Sequence[int], weighting: str):
     return np.ones(len(rows), dtype=np.float64)
 
 
+def _token_weights(model: _Loaded, tokens: Sequence[str], weighting: str):
+    """
+    One weight per *occurrence* in ``tokens``, before the division by their
+    sum: ``tokens`` gives every in-vocabulary occurrence 1, ``sif`` its
+    word's a/(a+p), ``types`` spreads a type's single weight equally over
+    its occurrences (the mean is over distinct words, so the second "dog"
+    adds nothing -- but it is still there, so each occurrence carries an
+    equal part of the one share). An out-of-vocabulary token weighs 0.
+    The text vector is the weighted sum of the rows over the weight sum;
+    the attribution reads the same numbers per occurrence, so the two
+    agree by construction rather than by care.
+    """
+    import numpy as np
+
+    w = np.zeros(len(tokens), dtype=np.float64)
+    rows = [model.index.get(t) for t in tokens]
+    present = [i for i, r in enumerate(rows) if r is not None]
+    if not present:
+        return w
+    base = _weights_for(model, [rows[i] for i in present], weighting)
+    if weighting == "types":
+        seen: Dict[int, int] = {}
+        for i in present:
+            seen[rows[i]] = seen.get(rows[i], 0) + 1
+        base = np.array([1.0 / seen[rows[i]] for i in present])
+    w[present] = base
+    return w
+
+
 def _text_vector(model: _Loaded, tokens: Sequence[str], weighting: str,
                  normalize_words: bool):
     """The weighted mean vector of a text's in-vocabulary words, and how
     many words that was. ``None`` when nothing was in the vocabulary."""
     import numpy as np
 
-    rows = [model.index[t] for t in tokens if t in model.index]
-    if not rows:
+    w = _token_weights(model, tokens, weighting)
+    present = np.flatnonzero(w)
+    if not len(present):
         return None, 0
-    in_vocab = len(rows)
-    if weighting == "types":
-        rows = sorted(set(rows))
+    rows = [model.index[tokens[i]] for i in present]
     block = np.asarray(model.vectors[rows], dtype=np.float64)
     if normalize_words:
         norms = np.linalg.norm(block, axis=1, keepdims=True)
         norms[norms == 0] = 1.0
         block = block / norms
-    w = _weights_for(model, rows, weighting)
-    return (w[:, None] * block).sum(axis=0) / w.sum(), in_vocab
+    return (w[present, None] * block).sum(axis=0) / w.sum(), len(present)
+
+
+def unit_vectors(model: _Loaded, tokens: Sequence[str], *, weighting: str,
+                 normalize_words: bool):
+    """
+    What each occurrence in ``tokens`` adds to the text's vector: a
+    ``[len(tokens), dim]`` array whose rows sum to :func:`_text_vector`
+    exactly, a zero row for a token the model does not know. This is the
+    unit the attribution step decomposes a prediction over.
+    """
+    import numpy as np
+
+    out = np.zeros((len(tokens), model.dim), dtype=np.float64)
+    w = _token_weights(model, tokens, weighting)
+    present = np.flatnonzero(w)
+    if not len(present):
+        return out
+    rows = [model.index[tokens[i]] for i in present]
+    block = np.asarray(model.vectors[rows], dtype=np.float64)
+    if normalize_words:
+        norms = np.linalg.norm(block, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        block = block / norms
+    out[present] = w[present, None] * block / w.sum()
+    return out
 
 
 def _cosine(a, b) -> Optional[float]:

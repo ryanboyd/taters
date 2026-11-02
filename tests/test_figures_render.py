@@ -14,9 +14,9 @@ import sys
 
 import pytest
 
-from taters.figures.render import (BLUE_HUE, RED_HUE, Layout, _as_pairs,
-                                   _overlaps, color_for, fit_budget, layout,
-                                   scale_sizes, shade)
+from taters.figures.render import (BLUE_HUE, EXTENT, RED_HUE, Layout, _as_pairs,
+                                   _overlaps, _reach, color_for, fit_budget,
+                                   fit_layout, layout, scale_sizes, shade)
 
 
 def fake_measure(text: str, size: int):
@@ -230,3 +230,111 @@ def test_render_without_pillow_raises_a_sentence_that_says_what_to_do(monkeypatc
     assert reason and "pip install pillow" in reason
     with pytest.raises(ImportError, match="pip install pillow"):
         r.render_wordcloud([("a", 1.0)], "x.png", title="t")
+
+
+def test_long_feature_names_are_shown_readably_on_two_lines():
+    """A dictionary category such as Policy_Position_Laver_Garry__Values_
+    Liberal is one word to the layout and half the canvas wide; it was being
+    dropped. The picture shows it readably, on two lines; the table keeps
+    the raw name."""
+    from taters.figures.render import LABEL_BREAK, display_label
+
+    assert display_label("happy") == "happy"
+    assert display_label("word_count") == "word count"
+    shown = display_label("Policy_Position_Laver_Garry__Values_Liberal")
+    assert shown.count("\n") == 1
+    first, second = shown.split("\n")
+    assert first.startswith("Policy Position") and "Values Liberal" in second
+    assert "__" not in shown and "_" not in shown
+    assert len(display_label("a" * (LABEL_BREAK + 5))) == LABEL_BREAK + 5, "no space to break at"
+
+
+def test_a_two_line_label_is_measured_as_its_stacked_box():
+    pytest.importorskip("PIL")
+    from PIL import ImageFont
+
+    from taters.figures.render import DEFAULT_FONT, _ink
+
+    font = ImageFont.truetype(str(DEFAULT_FONT), 24)
+    one = _ink(font, "Values Liberal")
+    two = _ink(font, "Policy Position\nValues Liberal")
+    assert (two[3] - two[1]) > (one[3] - one[1]) * 1.8, "two lines stack"
+    assert (two[2] - two[0]) < _ink(font, "Policy Position Values Liberal")[2] * 0.75
+
+
+def test_the_title_may_take_two_lines(tmp_path):
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    from taters.figures.render import render_wordcloud
+
+    long_title = ("Ridge regression: TIPI_Open — words that push the predicted TIPI_Open up "
+                  "(transformer_embeddings)")
+    out = render_wordcloud([("gravy", 1.0), ("butter", -0.5)], tmp_path / "t.png",
+                           title=long_title, width=1200)
+    with Image.open(out) as img:
+        assert img.size == (1200, 800)
+
+
+# ---------------------------------------------------------------------------
+# Standardized figures: the same frame, filled the same, on every picture
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("n", [3, 12, 60])
+def test_every_cloud_is_fitted_to_the_same_extent_of_its_frame(n):
+    """Three words and sixty both reach about the same share of the drawing
+    area: the owner wants the figures standardized, with no cloud sitting
+    small in the middle of its frame because it had fewer words."""
+    words = _words(n)
+    sizes = scale_sizes([w for _, w in words], 16, 96)
+    lay = fit_layout(words, sizes, fake_measure, width=1200, height=800,
+                     top_margin=140, min_font=16)
+    assert not lay.dropped
+    assert abs(_reach(lay) - EXTENT) < 0.08, _reach(lay)
+
+
+def test_the_largest_word_of_a_sparse_cloud_stops_at_its_share_of_the_height():
+    words = _words(2)
+    sizes = scale_sizes([w for _, w in words], 16, 96)
+    lay = fit_layout(words, sizes, fake_measure, width=1200, height=800,
+                     top_margin=140, min_font=16)
+    assert max(p.size for p in lay.placed) <= (800 - 140) * 0.4 + 1
+
+
+def test_the_cloud_takes_the_shape_of_its_frame():
+    """A round spiral in a frame twice as wide as it is tall filled the
+    height and left the sides blank; the spiral is stretched to the frame."""
+    words = _words(60)
+    sizes = scale_sizes([w for _, w in words], 16, 96)
+    lay = fit_layout(words, sizes, fake_measure, width=1200, height=800,
+                     top_margin=140, min_font=16)
+    x0 = min(p.x for p in lay.placed); x1 = max(p.x + p.w for p in lay.placed)
+    y0 = min(p.y for p in lay.placed); y1 = max(p.y + p.h for p in lay.placed)
+    assert (x1 - x0) / (y1 - y0) > 1.4
+
+
+def test_the_caption_band_is_the_same_height_whatever_the_title(tmp_path):
+    """The cloud under a one-line title is the very same picture as under a
+    two-line title: a longer name never changes the drawing area."""
+    pytest.importorskip("PIL")
+    from PIL import Image, ImageChops, ImageFont
+
+    from taters.figures.render import (DEFAULT_FONT, _Fonts, caption_band,
+                                       render_wordcloud)
+
+    band = caption_band(_Fonts(ImageFont, DEFAULT_FONT))
+    short = render_wordcloud(_words(20), tmp_path / "s.png", title="Short", legend="one line")
+    long = render_wordcloud(_words(20), tmp_path / "l.png", width=1200,
+                            title="Ridge regression: TIPI_Open — words that push the predicted "
+                                  "TIPI_Open up (transformer_embeddings)",
+                            legend="Bigger and darker = larger mean share when it occurs of the "
+                                   "predicted TIPI_Open: the exact share of the word's tokens, in "
+                                   "context, in the prediction. Drawn from the table.")
+    with Image.open(short) as a, Image.open(long) as b:
+        assert a.size == b.size == (1200, 800)
+        below_a = a.crop((0, band, 1200, 800))
+        below_b = b.crop((0, band, 1200, 800))
+        assert ImageChops.difference(below_a, below_b).getbbox() is None
+        # and the band holds the caption, nothing else: the row above the
+        # band is blank on both
+        assert a.crop((0, band - 2, 1200, band)).getextrema() == ((255, 255), (255, 255), (255, 255))

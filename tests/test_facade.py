@@ -94,6 +94,7 @@ FACADE_METHODS = [
     ("stats", "analyze_group_differences"),
     ("stats", "analyze_correlations"),
     ("stats", "write_stats_report"),
+    ("stats", "explain_predictions"),
     ("stats", "fit_ridge_csv"),
     ("stats", "apply_ridge_csv"),
     ("stats", "fit_classifier_csv"),

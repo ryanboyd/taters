@@ -235,9 +235,17 @@ def banner(width: int = MEASURE - 2) -> str:
 
     top = f"  [{frame}]{glyphs.ARC_TL}" + "─" * (inner + 4) + f"{glyphs.ARC_TR}[/]"
     bottom = f"  [{frame}]{glyphs.ARC_BL}" + "─" * (inner + 4) + f"{glyphs.ARC_BR}[/]"
+    # one blank under the frame and none above it: the screen is cleared
+    # before the banner is drawn, so a blank first row only cost a row
     return "\n".join(
-        ["", top, *(row(a, t) for a, t in zip(_SPUD_ART, text_rows)), bottom, ""]
+        [top, *(row(a, t) for a, t in zip(_SPUD_ART, text_rows)), bottom, ""]
     )
+
+
+def compact_banner() -> str:
+    """The banner for a short terminal: the name and the version on one
+    line, so the screen's rows go to the question instead of the frame."""
+    return f"  [{_NAME}]TATERS[/] [dim]{version_line()}[/dim]\n"
 
 
 def version_line() -> str:
@@ -292,7 +300,7 @@ def run_hub(prompter: Prompter, *, cwd: Optional[Path] = None) -> bool:
         # we hand over the function itself, not banner(): the live renderer
         # calls it on every paint, and that's what lets the border color
         # actually drift.
-        prompter.set_header(banner)
+        prompter.set_header(banner, compact=compact_banner)
     if hasattr(prompter, "_title"):
         prompter._title = title()
 

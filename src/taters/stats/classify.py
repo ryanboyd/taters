@@ -832,16 +832,23 @@ def fit_classifier_csv(
                 oof_pred: list = [None] * len(labels_all)
                 oof_prob: list = [None] * len(labels_all)
                 fold_of: list = [None] * len(labels_all)
+                # ...and the held-out probability of *every* class, not just
+                # the winner's: a continuous number per class is what the
+                # words behind a classifier get correlated with later
+                oof_p: dict = {klass: [None] * len(labels_all) for klass in classes}
                 picked = np.argmax(fit["oof"], axis=1)
                 for j, row_i in enumerate(np.flatnonzero(complete)):
                     oof_pred[row_i] = classes[int(picked[j])]
                     oof_prob[row_i] = round(
                         float(fit["oof"][j, picked[j]]), rounding)
                     fold_of[row_i] = int(fit["folds"][j]) + 1
+                    for c_i, klass in enumerate(classes):
+                        oof_p[klass][row_i] = round(float(fit["oof"][j, c_i]), rounding)
                 predictions[outcome] = {
                     "observed": list(labels_all), "pred": final_pred,
                     "prob": final_prob, "oof_pred": oof_pred,
-                    "oof_prob": oof_prob, "fold": fold_of}
+                    "oof_prob": oof_prob, "fold": fold_of,
+                    "classes": list(classes), "oof_p": oof_p}
 
             models_dir.mkdir(parents=True, exist_ok=True)
             stem = slug(set_name, "set") + (f"__{slug(subset)}" if subset else "")
@@ -1010,6 +1017,10 @@ def _write_predictions(path: Path, table, outcome_cols, predictions,
         header += [outcome, f"pred_{outcome}", f"prob_{outcome}",
                    f"oof_pred_{outcome}", f"oof_prob_{outcome}",
                    f"fold_{outcome}"]
+        # the held-out probability of each class, named like apply's
+        # p_<outcome>_<class>
+        header += [f"oof_p_{outcome}_{klass}"
+                   for klass in predictions[outcome].get("classes", ())]
     rows = []
     for i in range(len(table)):
         row = [table[c].iloc[i] for c in key]
@@ -1018,6 +1029,9 @@ def _write_predictions(path: Path, table, outcome_cols, predictions,
             row.append(block["observed"][i])
             for field in ("pred", "prob", "oof_pred", "oof_prob", "fold"):
                 value = block[field][i]
+                row.append("" if value is None else value)
+            for klass in block.get("classes", ()):
+                value = block["oof_p"][klass][i]
                 row.append("" if value is None else value)
         rows.append(row)
     _write_csv(path, header, rows, encoding)

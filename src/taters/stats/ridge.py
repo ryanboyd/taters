@@ -622,6 +622,7 @@ def fit_ridge_csv(
                 "alphas": grid},
             zscore=zscore)
         predictions = {}
+        held_out = {}
         # what each outcome's own model file needs beyond the shared header:
         # its coefficient block, and the predictors and controls it was fitted
         # with (they can differ between outcomes when a constant column gets
@@ -786,6 +787,16 @@ def fit_ridge_csv(
                 full, fit["kept"], np.asarray(fit["mu"]),
                 np.asarray(fit["sigma"]), np.asarray(fit["coef"]),
                 fit["intercept"], rounding)
+            # and the held-out prediction of every row: the one a model that
+            # never saw the row made, which is what cv_r2 was computed from
+            # and the column anything downstream should read. `oof` covers
+            # the complete rows only, so it's scattered back by position
+            oof_full: list = [None] * len(y_all)
+            fold_full: list = [None] * len(y_all)
+            for j, row_i in enumerate(np.flatnonzero(complete)):
+                oof_full[row_i] = round(float(fit["oof"][j]), rounding)
+                fold_full[row_i] = int(fit["folds"][j]) + 1
+            held_out[outcome] = (oof_full, fold_full)
 
 
         model_doc["subset"] = subset
@@ -806,7 +817,7 @@ def fit_ridge_csv(
                 json.dump(doc, fh, indent=1)
         _write_predictions(folder / f"ridge_predictions__{stem}.csv",
                            table if subset_mask is None else table[subset_mask],
-                           outcome_cols, predictions, encoding)
+                           outcome_cols, predictions, encoding, held_out=held_out)
 
     announce(on_progress, "writing the results")
     metrics_header = (
@@ -999,19 +1010,34 @@ def _write_coefficients(path: Path, entries, outcome_cols, lead, rounding,
 
 
 def _write_predictions(path: Path, table, outcome_cols, predictions,
-                       encoding: str) -> None:
-    """The training table with its observed and predicted values side by
-    side -- the file a byte-identity check against apply is run on."""
+                       encoding: str, held_out=None) -> None:
+    """
+    The training table with its observed and predicted values side by side.
+
+    ``pred_`` is the saved model's own prediction -- the file a byte-identity
+    check against apply is run on. ``oof_pred_`` is the held-out one, made
+    by a model fitted without the row, and the fold it was held out in is
+    beside it; that is the column to correlate anything with, since the
+    in-sample one has seen the answer. Both come from the kept model: the
+    language fitted beside every control when there were controls.
+    """
     key = [c for c in ("text_id",) if c in table.columns] or \
         [table.columns[0]]
-    header = key + [c for outcome in outcome_cols
-                    for c in (outcome, f"pred_{outcome}")]
+    header = list(key)
+    for outcome in outcome_cols:
+        header += [outcome, f"pred_{outcome}"]
+        if held_out:
+            header += [f"oof_pred_{outcome}", f"fold_{outcome}"]
     rows = []
     for i in range(len(table)):
         row = [table[c].iloc[i] for c in key]
         for outcome in outcome_cols:
             value = predictions[outcome][i]
             row += [table[outcome].iloc[i], "" if value is None else value]
+            if held_out:
+                oof, fold = held_out[outcome]
+                row += ["" if oof[i] is None else oof[i],
+                        "" if fold[i] is None else fold[i]]
         rows.append(row)
     _write_csv(path, header, rows, encoding)
 

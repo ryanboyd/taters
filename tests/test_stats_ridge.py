@@ -12,7 +12,7 @@ import pytest
 
 np = pytest.importorskip("numpy")
 
-from taters.stats.ridge import (RIDGE_MODEL_FORMAT, _cv_ridge,  # noqa: E402
+from taters.stats.ridge import (RIDGE_MODEL_FORMAT, _cv_ridge, predict_rows,  # noqa: E402
                                 _load_model, _loo_rmse, _decompose,
                                 _svd_coefficients, apply_ridge_csv,
                                 default_alphas, fit_ridge_csv)
@@ -325,6 +325,81 @@ def test_applying_to_the_training_table_reproduces_the_fit_byte_for_byte(tmp_pat
     from_apply = {r["text_id"]: r for r in _read(scored)}
     for row in from_fit:
         assert from_apply[row["text_id"]]["pred_outcome"] == row["pred_outcome"]
+
+
+def test_the_held_out_prediction_of_every_row_is_written_beside_the_fitted_one(tmp_path):
+    """Two different predictions, and conflating them is the mistake: the
+    saved model's own (reproduced exactly by apply) and the one from the
+    fold that never saw the row, which is the column anything downstream
+    should read. The fold is beside it so a result can be traced to a
+    split, and the held-out r² recomputed from the file is the cv_r2 the
+    metrics report."""
+    table, _ = _table(tmp_path)
+    out = fit_ridge_csv(table_csv=table, outcome_cols=["outcome"], rounding=10,
+                        verbose=False)
+    rows = _read(tmp_path / "ridge_predictions__all.csv")
+    assert list(rows[0]) == ["text_id", "outcome", "pred_outcome",
+                             "oof_pred_outcome", "fold_outcome"]
+    assert all(r["oof_pred_outcome"] != "" and 1 <= int(r["fold_outcome"]) <= 5
+               for r in rows)
+    assert any(r["pred_outcome"] != r["oof_pred_outcome"] for r in rows)
+    y = np.array([float(r["outcome"]) for r in rows])
+    oof = np.array([float(r["oof_pred_outcome"]) for r in rows])
+    r2 = 1 - ((y - oof) ** 2).sum() / ((y - y.mean()) ** 2).sum()
+    metrics = {r["model"]: r for r in _read(out)}
+    assert r2 == pytest.approx(float(metrics["language"]["cv_r2"]), abs=1e-6)
+
+
+def test_a_row_the_fit_could_not_use_has_no_held_out_prediction(tmp_path):
+    """A row missing a predictor was in no fold, so it has no held-out
+    prediction and no fold; its cells stay blank rather than borrowed."""
+    table, _ = _table(tmp_path)
+    rows = _read(table)
+    rows[3]["f1"] = ""
+    _write(table, list(rows[0]), [[r[c] for c in rows[0]] for r in rows])
+    fit_ridge_csv(table_csv=table, outcome_cols=["outcome"], verbose=False)
+    got = {r["text_id"]: r for r in _read(tmp_path / "ridge_predictions__all.csv")}
+    gap = got[rows[3]["text_id"]]
+    assert gap["pred_outcome"] == "" and gap["oof_pred_outcome"] == "" \
+        and gap["fold_outcome"] == ""
+    assert sum(1 for r in got.values() if r["fold_outcome"] == "") == 1
+
+
+def test_the_model_collapses_to_one_weight_per_input_column(tmp_path):
+    """Standardization, a PCA in front, and the coefficients are each
+    linear, so the whole chain is one dot product plus a constant -- and it
+    has to agree with the scorer to the last digit, controls and all, or
+    anything built on it (which token moved this score) is built on sand."""
+    import pandas as pd
+
+    from taters.stats import _controls
+    from taters.stats._common import numeric_column
+    from taters.stats._fit_common import effective_weights, score_design
+
+    table = _with_controls(tmp_path)
+    fit_ridge_csv(table_csv=table, outcome_cols=["outcome"],
+                  control_cols=["age", "gender"], pca="all", pca_components=2,
+                  rounding=10, verbose=False)
+    model = json.loads((tmp_path / "models" / "ridge__all__outcome.json")
+                       .read_text(encoding="utf-8"))
+    lin = effective_weights(model, "outcome")
+    assert lin.reduced and set(lin.weights) == {f"f{i}" for i in range(4)}
+    assert set(lin.controls) == {"age", "gender=m"}
+
+    frame = pd.read_csv(table, dtype=str, keep_default_na=False)
+    design, _inputs, _wanted = score_design(frame, model, model["predictors"],
+                                            table, verbose=False)
+    block = model["outcomes"]["outcome"]
+    theirs = predict_rows(design, block["kept"], np.asarray(block["mu"]),
+                          np.asarray(block["sigma"]), np.asarray(block["coef"]),
+                          block["intercept"], 10)
+    ctrl, names, _unknown = _controls.rebuild(frame, model["controls"])
+    raw = {c: numeric_column(frame[c].tolist(), column=c) for c in lin.weights}
+    for i, want in enumerate(theirs):
+        mine = lin.constant
+        mine += sum(w * raw[c][i] for c, w in lin.weights.items())
+        mine += sum(w * ctrl[i, names.index(n)] for n, w in lin.controls.items())
+        assert mine == pytest.approx(want, abs=1e-8)
 
 
 def test_apply_matches_predictors_by_name_not_position(tmp_path):

@@ -34,7 +34,6 @@ keeps.
 """
 from __future__ import annotations
 
-import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,7 +43,8 @@ from ..helpers import tables
 from ..helpers.cliargs import CliSpec
 from ..helpers.model_spec import slug
 from ..helpers.progress import announce
-from ..stats._common import SECTIONS_DIR, reusable, write_section
+from ..stats._common import (SECTIONS_DIR, analysis_table_of, opaque_sets, reusable,
+                             sets_sidecar, write_section)
 from .render import pillow_missing_reason, render_wordcloud
 
 __all__ = ["CloudSpec", "stats_wordclouds", "theme_wordclouds",
@@ -55,6 +55,8 @@ __all__ = ["CloudSpec", "stats_wordclouds", "theme_wordclouds",
            "clouds_for_components", "clouds_for_frequencies_by_group",
            "clouds_for_theme_predictors", "clouds_for_themes",
            "clouds_for_frequencies", "clouds_for_neighbors", "skip_redundant",
+           "clouds_for_word_correlates", "clouds_for_attributions", "clouds_for_directions",
+           "clouds_for_attributed_texts", "keep_kinds",
            "FIGURES_DIR",
            "SECTION_SLUG", "ANALYSES"]
 
@@ -257,16 +259,18 @@ def _signed(words: Sequence[Word]) -> Tuple[List[Word], List[Word]]:
 
 def _pair(analysis: str, folder: str, fs: str, base: str, pos: List[Word],
           neg: List[Word], *, titles: Tuple[str, str], legends: Tuple[str, str],
-          notes: Tuple[str, str], stat: str) -> List[CloudSpec]:
+          notes: Tuple[str, str], stat: str, kind: str = "cloud",
+          subfolder: str = "") -> List[CloudSpec]:
     """The positive and the negative cloud of one result, as two specs."""
     out = []
+    where = f"{folder}/{slug(fs)}" + (f"/{subfolder}" if subfolder else "")
     for side, chosen, title, legend, note in (
             ("positive", pos, titles[0], legends[0], notes[0]),
             ("negative", neg, titles[1], legends[1], notes[1])):
         out.append(CloudSpec(
-            analysis=analysis, folder=f"{folder}/{slug(fs)}", set_name=fs,
+            analysis=analysis, folder=where, set_name=fs,
             name=f"{base}__{side}", title=title, legend=legend, words=chosen,
-            note="" if chosen else note, stat=stat))
+            note="" if chosen else note, stat=stat, kind=kind))
     return out
 
 
@@ -438,6 +442,220 @@ def clouds_for_group_differences(rows: Sequence[Row], *, max_p: float
                 f"{shown_p} < {max_p:g} ({fs}).",
                 stat=f"{g1} vs {g2}: d"))
     return out
+
+
+def clouds_for_word_correlates(rows: Sequence[Row], *, analysis: str, max_p: float,
+                               table: str = "") -> List[CloudSpec]:
+    """
+    Two clouds per outcome per target per feature set from a
+    ``<analysis>_word_correlates`` table: the words whose relative
+    frequency goes with a higher held-out prediction and with a lower one,
+    sized by r, only those under ``max_p`` on the adjusted p. A
+    ``residual`` target is the words going with what the model missed;
+    a classifier's ``p_<class>`` target is the words going with that
+    class's held-out probability.
+    """
+    if not rows:
+        return []
+    heading, folder = ANALYSES.get(
+        analysis, (analysis.replace("_", " ").capitalize(), slug(analysis)))
+    out: List[CloudSpec] = []
+    keyed = _grouped(rows, "subset", "feature_set", "outcome", "target")
+    source = f" Drawn from `{table}`." if table else ""
+    for (sv, fs, outcome, target), group in keyed.items():
+        words = []
+        for r in group:
+            q = _num(r.get("p_adj"))
+            rv = _num(r.get("r"))
+            if q is not None and q < max_p and rv:
+                words.append((r.get("ngram", ""), rv))
+        pos, neg = _signed(words)
+        where = f" [{sv}]" if sv else ""
+        tag = f"__{slug(sv)}" if sv else ""
+        if target == "prediction":
+            kind, what_up, what_down = ("correlate", "higher predicted scores",
+                                        "lower predicted scores")
+            against = "the held-out prediction"
+        elif target == "residual":
+            kind, what_up, what_down = ("residual", "what the model under-predicts",
+                                        "what the model over-predicts")
+            against = "the residual (observed minus held-out prediction)"
+        else:
+            kind, what_up, what_down = ("correlate", f"a higher chance of {target[2:]}",
+                                        f"a lower chance of {target[2:]}")
+            against = f"the held-out probability of {target[2:]}"
+        legend = (f"Bigger and darker = larger |r| between the word's relative "
+                  f"frequency and {against}; only adjusted p < {max_p:g}.{source}")
+        out += _pair(
+            heading, folder, fs, f"{slug(outcome)}__{slug(target)}{tag}", pos, neg,
+            titles=(f"{heading}: {outcome} — words going with {what_up} ({fs}){where}",
+                    f"{heading}: {outcome} — words going with {what_down} ({fs}){where}"),
+            legends=(legend, legend),
+            notes=(f"no word went with {what_up} for {outcome} at adjusted p < {max_p:g} ({fs}).",
+                   f"no word went with {what_down} for {outcome} at adjusted p < {max_p:g} ({fs}).",),
+            stat=f"{outcome} ({target}): r", kind=kind, subfolder="words")
+    return out
+
+
+def clouds_for_attributions(rows: Sequence[Row], *, analysis: str, size_by: str = "mean",
+                            top_words: int = 80, table: str = "") -> List[CloudSpec]:
+    """
+    Two clouds per outcome per feature set from a ``<analysis>_token_
+    attributions`` table: the words whose share, in context, pushes the
+    prediction up, and those that push it down, sized by their mean share
+    (``size_by="mean"``) or their total share over the corpus.
+    """
+    if not rows:
+        return []
+    heading, folder = ANALYSES.get(
+        analysis, (analysis.replace("_", " ").capitalize(), slug(analysis)))
+    column = "mean_contribution" if size_by == "mean" else "total_contribution"
+    noun = "mean share when it occurs" if size_by == "mean" else "total share over the corpus"
+    out: List[CloudSpec] = []
+    source = f" Drawn from `{table}`." if table else ""
+    for (sv, fs, outcome, target), group in _grouped(rows, "subset", "feature_set", "outcome",
+                                                     "target").items():
+        words = [(r.get("word", ""), v) for r in group if (v := _num(r.get(column)))]
+        # each side gets its own strongest words: cut by |share| before the
+        # split, one sign could take the whole budget and leave the other
+        # cloud with two words (it did)
+        pos, neg = _signed(words)
+        pos, neg = pos[:max(0, int(top_words))], neg[:max(0, int(top_words))]
+        where = f" [{sv}]" if sv else ""
+        tag = f"__{slug(sv)}" if sv else ""
+        what = (f"the predicted {outcome}" if target == "prediction"
+                else f"the log-odds of {target[6:]}" if target.startswith("logit_")
+                else target)
+        legend = (f"Bigger and darker = larger {noun} of {what}: the exact share of "
+                  f"the word's tokens in the prediction.{source}")
+        out += _pair(
+            heading, folder, fs, f"{slug(outcome)}__attribution{tag}", pos, neg,
+            titles=(f"{heading}: {outcome} — words that push {what} up ({fs}){where}",
+                    f"{heading}: {outcome} — words that push {what} down ({fs}){where}"),
+            legends=(legend, legend),
+            notes=(f"no word pushed {what} up often enough to count ({fs}).",
+                   f"no word pushed {what} down often enough to count ({fs})."),
+            stat=f"{outcome}: share", kind="attribution", subfolder="words")
+    return out
+
+
+def clouds_for_directions(rows: Sequence[Row], *, analysis: str, top_words: int = 80,
+                          table: str = "") -> List[CloudSpec]:
+    """
+    Two clouds per outcome per feature set from a ``<analysis>_word_
+    directions`` table: of every word a word-vector model knows, those a
+    text of that one word would push the prediction up, and down, sized
+    by that push. The whole vocabulary, not only the words that occurred.
+    """
+    if not rows:
+        return []
+    heading, folder = ANALYSES.get(
+        analysis, (analysis.replace("_", " ").capitalize(), slug(analysis)))
+    out: List[CloudSpec] = []
+    source = f" Drawn from `{table}`." if table else ""
+    for (sv, fs, outcome, target), group in _grouped(rows, "subset", "feature_set", "outcome",
+                                                     "target").items():
+        words = [(r.get("word", ""), v) for r in group if (v := _num(r.get("direction")))]
+        pos, neg = _signed(words)
+        pos, neg = pos[:max(0, int(top_words))], neg[:max(0, int(top_words))]
+        where = f" [{sv}]" if sv else ""
+        tag = f"__{slug(sv)}" if sv else ""
+        what = (f"the predicted {outcome}" if target == "prediction"
+                else f"the log-odds of {target[6:]}" if target.startswith("logit_")
+                else target)
+        legend = (f"Bigger and darker = larger push on {what} by a text of that one word, "
+                  f"over every word the model knows.{source}")
+        out += _pair(
+            heading, folder, fs, f"{slug(outcome)}__direction{tag}", pos, neg,
+            titles=(f"{heading}: {outcome} — words the model reads as higher {what} ({fs}){where}",
+                    f"{heading}: {outcome} — words the model reads as lower {what} ({fs}){where}"),
+            legends=(legend, legend),
+            notes=(f"no word in the vocabulary pushes {what} up ({fs}).",
+                   f"no word in the vocabulary pushes {what} down ({fs})."),
+            stat=f"{outcome}: direction", kind="direction", subfolder="words")
+    return out
+
+
+def clouds_for_attributed_texts(rows: Sequence[Row], *, analysis: str, table: str = ""
+                                ) -> List[CloudSpec]:
+    """
+    One shaded text per attributed text from an ``<analysis>_attributed_
+    texts`` table: its words in reading order, each weighted by its share
+    in the prediction, under the set's ``texts/`` folder. Special tokens
+    are left out of the picture (their share is in the table).
+    """
+    if not rows:
+        return []
+    from ..stats.attribution import SPECIALS
+
+    heading, folder = ANALYSES.get(
+        analysis, (analysis.replace("_", " ").capitalize(), slug(analysis)))
+    out: List[CloudSpec] = []
+    keyed = _grouped(rows, "subset", "feature_set", "outcome", "target", "text_id")
+    for (sv, fs, outcome, target, text_id), group in keyed.items():
+        ordered = sorted(group, key=lambda r: (int(_num(r.get("sentence")) or 0),
+                                               int(_num(r.get("window")) or 0),
+                                               int(_num(r.get("position")) or 0)))
+        words = [(r.get("word", ""), _num(r.get("contribution")) or 0.0)
+                 for r in ordered if r.get("word") != SPECIALS]
+        if not words:
+            continue
+        rank = _num(group[0].get("rank"))
+        pred = group[0].get("prediction", "")
+        if _num(pred) is not None:
+            pred = f"{_num(pred):.3f}"
+        place = ""
+        if rank:
+            place = (f"{int(rank)} highest" if rank > 0 else f"{int(-rank)} lowest")
+        where = f" [{sv}]" if sv else ""
+        what = (f"{outcome}" if target == "prediction"
+                else f"the log-odds of {target[6:]}" if target.startswith("logit_")
+                else target)
+        out.append(CloudSpec(
+            analysis=heading, folder=f"{folder}/{slug(fs)}/texts", set_name=fs,
+            kind="text", name=f"{slug(outcome)}__{slug(target)}__{slug(str(text_id))}",
+            title=f"{heading}: {what} — text {text_id}"
+                  + (f", predicted {pred}" if pred not in ("", None) else "")
+                  + (f" ({place})" if place else "") + f" ({fs}){where}",
+            legend=("Each word shaded by its share in the prediction: blue pushes "
+                    "the score up, red down, darker is a larger share."
+                    + (f" Drawn from `{table}`." if table else "")),
+            words=words, stat=f"{outcome}: share"))
+    return out
+
+
+def keep_kinds(specs: Sequence[CloudSpec], kinds: str, opaque: Dict[str, bool]
+               ) -> List[CloudSpec]:
+    """
+    Which clouds to draw. ``all`` draws every one. ``auto`` leaves out the
+    result and component clouds of a feature set whose columns are not
+    words (embeddings, model scores): a cloud of `e238` is not a reading
+    of anything. One sentence per such set takes their place, so the
+    report says why there is no picture rather than showing nothing.
+    """
+    if kinds == "all":
+        return list(specs)
+    if kinds != "auto":
+        raise ValueError("kinds must be 'auto' or 'all'")
+    kept: List[CloudSpec] = []
+    said: set = set()
+    for s in specs:
+        if s.kind in ("cloud", "component") and opaque.get(s.set_name):
+            key = (s.analysis, s.set_name)
+            if key not in said:
+                said.add(key)
+                kept.append(CloudSpec(
+                    analysis=s.analysis, folder=s.folder.split("/components")[0],
+                    set_name=s.set_name, name=f"{slug(s.set_name)}__not_drawn",
+                    title="", legend="", words=[], kind="cloud",
+                    note=(f"{s.set_name}'s features are not words (an embedding "
+                          f"dimension, a model's score), so its coefficient and "
+                          f"component clouds are not drawn; the words that track "
+                          f"its predictions are, below. `wordcloud_kinds: all` "
+                          f"draws them anyway.")))
+            continue
+        kept.append(s)
+    return kept
 
 
 def clouds_for_components(rows: Sequence[Row], *, analysis: str,
@@ -775,8 +993,14 @@ def _draw_all(specs: Sequence[CloudSpec], root: Path, *, max_words: int,
             continue
         if on_progress is not None:
             on_progress(i, len(todo), f"drawing {png.name}")
-        render_wordcloud(spec.words, png, title=spec.title, legend=spec.legend,
-                         max_words=max_words, verbose=verbose)
+        if spec.kind == "text":
+            from .highlights import render_highlighted_text
+
+            render_highlighted_text(spec.words, png, title=spec.title, legend=spec.legend,
+                                    verbose=verbose)
+        else:
+            render_wordcloud(spec.words, png, title=spec.title, legend=spec.legend,
+                             max_words=max_words, verbose=verbose)
         drawn += 1
     return drawn, reused
 
@@ -840,6 +1064,24 @@ def _section_md(specs: Sequence[CloudSpec], skipped: str = "") -> str:
             for s in group:
                 if s.words and s.kind == "cloud":
                     lines += _picture(s)
+            words = [s for s in group if s.words
+                     and s.kind in ("correlate", "residual", "attribution", "direction")]
+            if words:
+                lines += ["What its predictions track in words -- the words going "
+                          "with the held-out prediction, with the residual (what "
+                          "the model missed), the words whose share in the "
+                          "prediction pushes it up or down and, for a word-vector "
+                          "model, every word it knows by the push it would give. The "
+                          "table each is drawn from is the record; see the section "
+                          "above.", ""]
+                for s in words:
+                    lines += _picture(s)
+            texts = [s for s in group if s.words and s.kind == "text"]
+            if texts:
+                lines += ["The texts scored highest and lowest, word by word -- each "
+                          "word shaded by its share in the prediction:", ""]
+                for s in texts:
+                    lines += _picture(s)
             components = [s for s in group if s.words and s.kind == "component"]
             if components:
                 lines += [f"What each component of {set_name} is made of:", ""]
@@ -858,30 +1100,10 @@ def _section_md(specs: Sequence[CloudSpec], skipped: str = "") -> str:
     return "\n".join(lines)
 
 
-def _sidecar(table_csv) -> Tuple[Optional[Dict[str, List[str]]], Dict[str, str]]:
-    """The assemble step's sets and the source file of each, when written --
-    beside a file, or in the database beside the table."""
-    payload = tables.read_sidecar(table_csv, "sets")
-    if not payload:
-        return None, {}
-    sets = {str(k): [str(c) for c in v] for k, v in (payload.get("sets") or {}).items()}
-    sources = {str(k): str(v) for k, v in (payload.get("sources") or {}).items()}
-    return sets, sources
-
-
-def _analysis_table(stats_dir: Path):
-    """The analysis table the assemble step wrote: named in its manifest
-    (a file, or a table in a database), else the file beside the stats."""
-    manifest = stats_dir / "assemble_manifest.json"
-    try:
-        named = json.loads(manifest.read_text(encoding="utf-8")).get("table")
-    except (OSError, ValueError):
-        named = None
-    if named:
-        ref = tables.parse_ref(str(named))
-        if tables.exists(ref):
-            return ref
-    return tables.parse_ref(stats_dir / "analysis_table.csv")
+# the assemble sidecar and the analysis table are read the same way by the
+# stats stage; one reader for both, in stats._common
+_sidecar = sets_sidecar
+_analysis_table = analysis_table_of
 
 
 def _components_by_set(stats_dir: Path, encoding: str) -> Dict[str, List[str]]:
@@ -940,6 +1162,8 @@ def stats_wordclouds(
     max_p: float = 0.05,
     component_words: int = 30,
     group_col: str = "",
+    kinds: str = "auto",
+    size_by: str = "mean",
     enabled: bool = True,
     overwrite_existing: bool = False,
     encoding: str = "utf-8-sig",
@@ -969,6 +1193,14 @@ def stats_wordclouds(
     group_col : str, default ""
         The metadata column whose levels get a frequency cloud each. Empty
         draws none.
+    kinds : {"auto", "all"}, default "auto"
+        ``auto`` draws the clouds that read best for each feature set: a set
+        whose features are not words (embeddings, model scores) gets the
+        word clouds of what its predictions track and not a cloud of
+        ``e238``; ``all`` draws every kind for every set.
+    size_by : {"mean", "total"}, default "mean"
+        What sizes an attribution cloud: a word's mean share when it occurs,
+        or its total share over the corpus.
     enabled : bool, default True
         Off draws nothing and writes nothing -- the switch behind
         ``wordclouds: false`` in a pipeline.
@@ -1015,6 +1247,7 @@ def stats_wordclouds(
     sets, sources = _sidecar(table_csv) if have_table else (None, {})
     components = _components_by_set(stats_dir, encoding)
     allowed = _feature_filter(sets, components)
+    opaque = opaque_sets(stats_dir, sets=sets, sources=sources) if sets else {}
 
     specs: List[CloudSpec] = []
 
@@ -1037,6 +1270,33 @@ def stats_wordclouds(
     p = stats_dir / "classifier_coefficients.csv"
     if p.is_file():
         take(p, clouds_for_classifier(_rows(p, encoding), allowed))
+    # the words behind a prediction model, from the tables the explain step
+    # named: a CSV here, or a table in the database
+    from ..stats.explain import read_manifest
+
+    for name, address in (read_manifest(stats_dir).get("tables") or {}).items():
+        if not tables.exists(address):
+            continue
+        if name.endswith("_word_correlates"):
+            made = clouds_for_word_correlates(
+                _rows(address, encoding), analysis=name[:-len("_word_correlates")],
+                max_p=max_p, table=name)
+        elif name.endswith("_token_attributions"):
+            made = clouds_for_attributions(
+                _rows(address, encoding), analysis=name[:-len("_token_attributions")],
+                size_by=size_by, top_words=max_words, table=name)
+        elif name.endswith("_attributed_texts"):
+            made = clouds_for_attributed_texts(
+                _rows(address, encoding), analysis=name[:-len("_attributed_texts")], table=name)
+        elif name.endswith("_word_directions"):
+            made = clouds_for_directions(
+                _rows(address, encoding), analysis=name[:-len("_word_directions")],
+                top_words=max_words, table=name)
+        else:
+            continue
+        for spec in made:
+            spec.inputs = [address]
+        specs.extend(made)
     loadings_cache: Dict[str, Optional[object]] = {}
 
     def theme_loadings(fs: str):
@@ -1105,6 +1365,7 @@ def stats_wordclouds(
                 s.inputs = [path] + ([table_csv] if have_table else [])
             specs.extend(made)
 
+    specs = keep_kinds(specs, str(kinds or "auto").strip().lower(), opaque)
     drawn, reused = _draw_all(specs, root, max_words=max_words,
                               overwrite_existing=overwrite_existing,
                               verbose=verbose, on_progress=on_progress)

@@ -1077,24 +1077,38 @@ def set_description_rows(rows: int) -> None:
     _reserved_description_rows = max(0, int(rows))
 
 
+#: The most lines a description under a list may take. Three is the house
+#: rule for help text (two is the aim); anything longer is shortened with an
+#: ellipsis rather than allowed to push the list up the screen, and the
+#: reservation below the list is held at this same cap so the block never
+#: grows past it whichever row is pointed at.
+DESCRIPTION_LINES = 3
+
+
 def description_rows(choices: Sequence["Choice"], *,
-                     width: Optional[int] = None, cap: int = 6) -> int:
+                     width: Optional[int] = None, cap: int = DESCRIPTION_LINES) -> int:
     """The lines the tallest description among ``choices`` will take, capped
-    so one essay of a help text cannot eat the list's room."""
+    at :data:`DESCRIPTION_LINES` (which is also what the text itself is cut
+    to), so one essay of a help text cannot eat the list's room."""
     tallest = 0
     for choice in choices:
         if choice.help:
-            lines = wrap_description(choice.help, width=width).count("\n") + 1
+            lines = wrap_description(choice.help, width=width, max_lines=cap).count("\n") + 1
             tallest = max(tallest, lines)
     return min(tallest, cap)
 
 #: Never show fewer than this, however small the terminal claims to be, and
-#: however much wants the space above. Five was enough to prove a list
-#: scrolls and nothing like enough to *use* one: picking two text columns out
-#: of 150 through a five-row porthole is not a thing anyone should be asked
-#: to do (a real report). The painter above trims what it prints to keep
-#: this many rows free, so this floor is the backstop rather than the plan.
-_MIN_VISIBLE_ROWS = 12
+#: however much wants the space above. The painter trims what it prints
+#: above a list to keep room for :data:`LIST_ROOM` rows (a porthole of five
+#: onto 150 columns was a real report), so this floor is the backstop for a
+#: terminal too short for even that -- and there, a smaller window with its
+#: "N more below" marker is the honest answer; a screen that overflows and
+#: scrolls is not.
+_MIN_VISIBLE_ROWS = 6
+
+#: Rows a list is owed when the screen is being laid out: what the painter
+#: keeps free above it, and what decides whether the banner has to shrink.
+LIST_ROOM = 12
 
 
 def visible_rows(lines: Optional[int] = None) -> int:
@@ -1216,12 +1230,28 @@ def scroll_long_lists() -> bool:
         for token in tokens:
             if tuple(token[:2]) == ("", "\n"):
                 rows.append([])
-            else:
-                rows[-1].append(token)
+                continue
+            style, text = token[0], token[1]
+            if isinstance(text, str) and "\n" in text:
+                # a wrapped description is one token with newlines inside
+                # it. counted as one row it was padded as one row, so the
+                # block grew by the lines the count had missed and the
+                # screen scrolled by exactly that many (a real report:
+                # "the yellow text moves up a couple of lines")
+                pieces = text.split("\n")
+                for i, piece in enumerate(pieces):
+                    if i:
+                        rows.append([])
+                    rows[-1].append((style, piece) + tuple(token[2:]))
+                continue
+            rows[-1].append(token)
 
         count = len(getattr(self, "filtered_choices", []) or [])
         choices, tail = rows[:count], rows[count:]
-        tail = _padded_tail(tail, _reserved_description_rows)
+        # the tail is the breath of air and the description under it; the
+        # reservation is the description's lines, the blank is on top
+        tail = _padded_tail(tail, _reserved_description_rows + 1
+                            if _reserved_description_rows else 0)
         pointed = int(getattr(self, "pointed_at", 0) or 0)
 
         # the pointed row turns the highlight color *whole*. questionary only
@@ -1280,9 +1310,11 @@ def scroll_long_lists() -> bool:
             out += row
             out.append(("", "\n"))
         out += [("class:instruction", f"   ▼ {below} more below" if below else " ")]
+        # every tail row on its own line, blank rows included -- the blank
+        # above the description used to vanish here, so a windowed list sat
+        # one row tighter than a list that fit
         for row in tail:
-            if out and tuple(out[-1][:2]) != ("", "\n"):
-                out.append(("", "\n"))
+            out.append(("", "\n"))
             out += row
         return out
 
@@ -1346,9 +1378,10 @@ def style_descriptions_separately() -> bool:
     return True
 
 
-def wrap_description(text: str, *, width: Optional[int] = None) -> str:
+def wrap_description(text: str, *, width: Optional[int] = None,
+                     max_lines: int = DESCRIPTION_LINES) -> str:
     """
-    Fold a choice's description so all of it is visible.
+    Fold a choice's description so it is read whole, on a few lines.
 
     questionary renders a description as a single run of text and does not wrap
     it, so anything longer than the terminal is simply cut -- and the sentence
@@ -1358,7 +1391,10 @@ def wrap_description(text: str, *, width: Optional[int] = None) -> str:
 
     Continuation lines are indented to sit under the first rather than returning
     to column zero, so the block reads as one paragraph attached to the option
-    instead of as unrelated text under the list.
+    instead of as unrelated text under the list. Past ``max_lines`` the text is
+    shortened with an ellipsis: the block under a list is held at a fixed
+    height so the screen never moves, and a help text that needs more than
+    three lines belongs in the guide.
     """
     import textwrap
 
@@ -1366,6 +1402,9 @@ def wrap_description(text: str, *, width: Optional[int] = None) -> str:
     if columns < 20:                     # a terminal this narrow is beyond help
         return text
     lines = textwrap.wrap(" ".join(str(text).split()), width=columns)
+    if max_lines and len(lines) > max_lines:
+        lines = lines[:max_lines]
+        lines[-1] = lines[-1][:max(0, columns - 1)].rstrip() + "…"
     return ("\n" + " " * len(_DESCRIPTION_PREFIX)).join(lines)
 
 

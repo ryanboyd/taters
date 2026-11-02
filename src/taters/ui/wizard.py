@@ -2891,22 +2891,33 @@ def ask_analysis(prompter: Prompter, src: SourceSpec,
         if state["stop"] or not any(a in _PREDICTION_ANALYSES for a in spec.analyses):
             spec.pca = "off"
             return False
-        feeding = [(r, name) for r, name in tables
+        # `tables` pairs each step with its *label*; the setting stores the
+        # table's *name* -- the file stem the analyses know the set by
+        # (doc_term_matrix_count, transformer_embeddings). storing the label
+        # here wrote "Document-term matrix" into a preset, and the run
+        # stopped at the first analysis: "pca names feature set(s) that do
+        # not exist" (a real report). the composer's own naming, so the two
+        # agree the way the options screen already does
+        stems = {r.id: name for (r, _label), (name, _l) in zip(
+            tables, table_names(steps, src.source, src.level or None, src.group_by,
+                                picked))}
+        feeding = [(r, label) for r, label in tables
                    if not state["chosen"] or r.id in state["chosen"]]
-        wide = [(r, name) for r, name in feeding if r.id in _WIDE_STEPS]
+        wide = [(r, label) for r, label in feeding if r.id in _WIDE_STEPS]
         if not wide:
             spec.pca = "off"
             return False
-        which = ", ".join(name for _r, name in wide)
+        which = ", ".join(label for _r, label in wide)
         prompter.reason(
             f"A model over hundreds of columns ({which}) fits noise as readily as "
             f"signal. Principal components keep what varies across texts and drop "
             f"the rest.")
         current = spec.pca if spec.pca != "off" else (
-            "all" if len(feeding) == len(wide) else [name for _r, name in wide])
+            "all" if len(feeding) == len(wide)
+            else [stems.get(r.id, label) for r, label in wide])
         spec.pca = _pick_pca(prompter, "Reduce the features to principal components (PCA) "
                                        "before fitting", current,
-                             [(name, r.label) for r, name in feeding])
+                             [(stems.get(r.id, label), r.label) for r, label in feeding])
         return True
 
     def ask_adjust() -> bool:
@@ -3071,6 +3082,43 @@ def apply_analysis(spec: AnalysisSpec, src: SourceSpec,
         # it down is just an ordinary per-step override, which outranks it.
         overrides.setdefault("stats_assemble", {})["feature_csvs"] = [
             "{{" + _recipes.by_id(rid).save_as + "}}" for rid in spec.tables]
+
+
+def drop_from_analysis(prompter: Prompter, spec: AnalysisSpec, dropped: Sequence[str],
+                       steps: Sequence[_recipes.Recipe], src: SourceSpec,
+                       selected: List[str], var_values: Dict[str, Any],
+                       overrides: Dict[str, Dict[str, Any]]) -> None:
+    """
+    Take the steps the preflight dropped out of the analysis answers too.
+
+    The analysis stage asks which tables feed the statistics and which are
+    reduced to components before the preflight asks whether to keep a step
+    whose package is missing. Someone ticked word vectors, named them in
+    the PCA list, then said "leave it out" when gensim turned out to be
+    missing -- and the run stopped at the ridge with "pca names feature
+    set(s) that do not exist: word_vectors" (a real report). An answer that
+    names a step the pipeline no longer has is scrubbed here, by the same
+    rule the analyses apply: a setting may only name sets that exist.
+    """
+    gone = set(dropped)
+    spec.tables = [t for t in spec.tables if t not in gone]
+    spec.extra_features = [t for t in spec.extra_features if t not in gone]
+    if isinstance(spec.pca, list):
+        live = {name for name, _label in table_names(steps, src.source, src.level or None,
+                                                     src.group_by, spec.tables or None)}
+        kept = [name for name in spec.pca if name in live]
+        if kept != list(spec.pca):
+            left = ", ".join(n for n in spec.pca if n not in live)
+            spec.pca = kept or "off"
+            prompter.note(f"  {left}: left out of the pipeline, so not reduced to "
+                          f"components either" + ("" if kept else "; PCA is off") + ".",
+                          style="dim")
+    # the earlier application wrote these from the old answers; an
+    # answer that became empty would otherwise leave its old value behind
+    var_values.pop("stats_pca", None)
+    overrides.get("stats_assemble", {}).pop("feature_csvs", None)
+    overrides.get("stats_assemble", {}).pop("filter_csvs", None)
+    apply_analysis(spec, src, selected, var_values, overrides)
 
 
 def _init_stages(prompter: Prompter, analyses: Optional[bool] = None) -> None:
@@ -5267,6 +5315,7 @@ def run_wizard(prompter: Prompter, *, cwd: Optional[Path] = None,
         # missing -- and getting asked that again on the way back from naming
         # the pipeline would be its own small mystery.
         if rebuild:
+            before = list(selected)
             try:
                 selected, steps, var_specs, source_kwargs = _derive(
                     prompter, src, selected, providers)
@@ -5282,6 +5331,10 @@ def run_wizard(prompter: Prompter, *, cwd: Optional[Path] = None,
                 at = "features"
                 continue
             rebuild = False
+            dropped = [rid for rid in before if rid not in selected]
+            if dropped and analysis.analyses:
+                drop_from_analysis(prompter, analysis, dropped, steps, src, selected,
+                                   var_values, overrides)
 
         if at == "options":
             prompter.stage("options", "Options", status="active")

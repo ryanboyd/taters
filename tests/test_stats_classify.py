@@ -335,6 +335,49 @@ def test_the_predictions_carry_both_the_model_and_the_held_out_verdict(
         assert 1 <= int(r["fold_cond"]) <= 5
     # the two should disagree somewhere, or one of them isn't what it claims
     assert any(r["pred_cond"] != r["oof_pred_cond"] for r in rows)
+    # and a held-out probability per class, named like apply's p_ columns:
+    # the winner's probability is one of them, and they sum to one
+    assert {"oof_p_cond_no", "oof_p_cond_yes"} <= set(rows[0])
+    for r in rows:
+        assert float(r["oof_p_cond_no"]) + float(r["oof_p_cond_yes"]) == \
+            pytest.approx(1.0, abs=1e-4)
+        assert r[f"oof_p_cond_{r['oof_pred_cond']}"] == r["oof_prob_cond"]
+
+
+def test_a_classifier_collapses_to_one_logit_per_class(tmp_path):
+    """The same linearization as the ridge, on the class-versus-rest
+    logit: for two classes the second holds the fit and the first is its
+    negation, so the two logits are exact opposites."""
+    import json
+
+    import numpy as np
+    import pandas as pd
+
+    from taters.stats._common import numeric_column
+    from taters.stats._fit_common import effective_weights
+
+    table = _table(tmp_path, n=120, seed=6)
+    fit_classifier_csv(table_csv=table, outcome_cols=["cond"],
+                       feature_sets={"lang": ["sig", "noise"]},
+                       out_dir=tmp_path / "stats", verbose=False)
+    model = json.loads((tmp_path / "stats" / "models" / "classifier__lang__cond.json")
+                       .read_text(encoding="utf-8"))
+    block = model["outcomes"]["cond"]
+    yes = effective_weights(model, "cond", klass="yes")
+    no = effective_weights(model, "cond", klass="no")
+    assert set(yes.weights) == {"sig", "noise"} and not yes.controls
+    assert no.constant == pytest.approx(-yes.constant)
+    frame = pd.read_csv(table, dtype=str, keep_default_na=False)
+    x = np.column_stack([numeric_column(frame[c].tolist(), column=c)
+                         for c in model["predictors"]])[:, block["kept"]]
+    intercept, coef = block["models"][0]["intercept"], np.asarray(block["models"][0]["coef"])
+    logit = ((x - np.asarray(block["mu"])) / np.asarray(block["sigma"])) @ coef + intercept
+    for i in range(len(frame)):
+        mine = yes.constant + sum(w * numeric_column(frame[c].tolist(), column=c)[i]
+                                  for c, w in yes.weights.items())
+        assert mine == pytest.approx(logit[i], abs=1e-8)
+    with pytest.raises(ValueError, match="needs one of its classes"):
+        effective_weights(model, "cond")
 
 
 # ------------------------------------------------------------- refusals

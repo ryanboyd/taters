@@ -572,6 +572,115 @@ def load_model_doc(model_json: PathLike, *, kind: str, fmt: int, noun: str,
     return path, model, broken
 
 
+@dataclass(frozen=True)
+class Linearized:
+    """
+    A fitted model as one weight per raw input column.
+
+    ``prediction = constant + Σ weights[col]·x[col] + Σ controls[name]·c[name]``
+    over the raw feature columns and the control design columns, exactly
+    what the scorer computes through standardization and any reduction in
+    front -- just collapsed, so a question like "which embedding dimension,
+    and so which token, moved this score" has one vector to answer it with.
+    For a classifier this is the class-versus-rest logit, not a probability.
+    """
+
+    weights: Dict[str, float]
+    controls: Dict[str, float]
+    constant: float
+    reduced: bool
+
+
+def _control_design_names(spec) -> List[str]:
+    """The design column a control recipe entry becomes: ``age`` for a
+    continuous one, ``gender=male`` for a level of a categorical one."""
+    return [e["column"] if "level" not in e else f"{e['column']}={e['level']}"
+            for e in (spec or [])]
+
+
+def effective_weights(model: dict, outcome: str, *,
+                      klass: Optional[str] = None) -> Linearized:
+    """
+    Collapse a saved ridge or classifier to :class:`Linearized`.
+
+    The chain is linear at every step -- the PCA standardization and
+    projection, then the model's own standardization, then the
+    coefficients -- so the whole of it is one dot product plus a constant.
+    Walking ``kept`` by predictor *name* is what makes this right whatever
+    the design holds: a control's term is reported on its own, a raw column
+    gets its share directly, and a component's share is pushed back through
+    the projection onto the raw features it was made of.
+
+    ``klass`` picks the class of a classifier; for a two-class outcome the
+    second class has the fit and the first is its negation.
+    """
+    import numpy as np
+
+    block = model["outcomes"][outcome]
+    predictors = list(model["predictors"])
+    kept = list(block["kept"])
+    mu = np.asarray(block["mu"], dtype=float)
+    sigma = np.asarray(block["sigma"], dtype=float)
+    sign = 1.0
+    if "models" in block:
+        classes = list(block["classes"])
+        if klass is None or klass not in classes:
+            raise ValueError(f"the classifier for {outcome} needs one of its classes "
+                             f"({', '.join(classes)}), not {klass!r}")
+        c_i = classes.index(klass)
+        models = block["models"]
+        if len(models) == 2 and models[1] is None:
+            # two classes, one fit, and it is the second class's (see
+            # `_probabilities`): the first class is the other side of it
+            entry = models[0]
+            sign = 1.0 if c_i == 1 else -1.0
+        else:
+            entry = models[c_i]
+        coef = np.asarray(entry["coef"], dtype=float) * sign
+        intercept = float(entry["intercept"]) * sign
+    else:
+        coef = np.asarray(block["coef"], dtype=float)
+        intercept = float(block["intercept"])
+    design_w = coef / sigma
+    constant = intercept - float((design_w * mu).sum())
+
+    control_names = set(_control_design_names(model.get("controls")))
+    reductions = list(model.get("reductions") or [])
+    if model.get("reduction"):
+        reductions.append(model["reduction"])
+    component_of = {c: (r_i, j) for r_i, r in enumerate(reductions)
+                    for j, c in enumerate(r.get("components") or [])}
+    weights: Dict[str, float] = {}
+    controls: Dict[str, float] = {}
+    w_comp = [np.zeros(len(r.get("components") or [])) for r in reductions]
+    for w, idx in zip(design_w, kept, strict=True):
+        name = predictors[idx]
+        if name in control_names:
+            controls[name] = controls.get(name, 0.0) + float(w)
+        elif name in component_of:
+            r_i, j = component_of[name]
+            w_comp[r_i][j] += w
+        else:
+            weights[name] = weights.get(name, 0.0) + float(w)
+    for r, wc in zip(reductions, w_comp, strict=True):
+        if not wc.any():
+            continue
+        axes = r["axes"]
+        features = list(r["features"])
+        # c_j = Σ_k ((x_k − mu_k)/sigma_k) P[k, j], so a component's weight
+        # lands on each raw feature as P[k, ·]·w / sigma_k, and the centering
+        # goes to the constant
+        g = np.asarray(axes["projection"], dtype=float) @ wc
+        s1 = np.asarray(axes["sigma"], dtype=float)
+        m1 = np.asarray(axes["mu"], dtype=float)
+        per_raw = g / s1
+        for k, pos in enumerate(axes["kept"]):
+            weights[features[pos]] = weights.get(features[pos], 0.0) + float(per_raw[k])
+        constant -= float((per_raw * m1).sum())
+    return Linearized(weights=weights, controls=controls, constant=constant,
+                      reduced=bool(reductions))
+
+
 def score_design(table, model, predictors, input_csv, verbose: bool):
     """
     The design matrix for a table being scored, in the model's own order.

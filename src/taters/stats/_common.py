@@ -14,8 +14,9 @@ functions live in the sibling modules.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Sequence, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from ..helpers.atomic import atomic_write
 
@@ -29,6 +30,9 @@ SECTIONS_DIR = "_sections"
 SECTION_ORDER = {"assemble": 10, "group-differences": 20,
                  "correlations": 30, "ridge": 40, "text-predictor": 45,
                  "classifier": 50,
+                 # what the prediction models track in words: after the
+                 # models it explains, before the pictures of it
+                 "prediction-words": 55,
                  # these are just pictures of everything above, so they go last.
                  "word-clouds": 60}
 
@@ -379,6 +383,22 @@ def components_appendix(pca_notes) -> str:
             "The features below are principal components, not the original "
             "measures. Read the loadings beside these results before any "
             "number that names one.\n\n" + "\n".join(pca_notes))
+
+
+def write_section_if_changed(stats_dir: PathLike, slug: str, markdown: str) -> bool:
+    """:func:`write_section`, but only when the text differs from what is
+    there -- so an unchanged re-run leaves the fragment's mtime alone and
+    nothing downstream is rebuilt for nothing. Returns whether it wrote."""
+    order = SECTION_ORDER.get(slug)
+    if order is None:
+        raise ValueError(
+            f"unknown report section {slug!r}; known: {sorted(SECTION_ORDER)}")
+    path = Path(stats_dir) / SECTIONS_DIR / f"{order:02d}-{slug}.md"
+    text = markdown.rstrip() + "\n"
+    if path.is_file() and path.read_text(encoding="utf-8") == text:
+        return False
+    write_section(stats_dir, slug, markdown)
+    return True
 
 
 def write_section(stats_dir: PathLike, slug: str, markdown: str) -> Path:
@@ -903,3 +923,100 @@ def sample_warnings(metrics_rows, metrics_header, *, model: str = "ridge") -> li
     if lines:
         lines = ["", "### About the sample", ""] + lines
     return lines
+
+
+# ---------------------------------------------------------------------------
+# What the analysis table is made of, and which of its sets are not words
+# ---------------------------------------------------------------------------
+
+def analysis_table_of(stats_dir) -> Any:
+    """The analysis table the assemble step wrote: named in its manifest (a
+    file, or a table in a database), else the file beside the stats."""
+    import json as _json
+
+    from ..helpers import tables
+
+    stats_dir = Path(stats_dir)
+    manifest = stats_dir / "assemble_manifest.json"
+    try:
+        named = _json.loads(manifest.read_text(encoding="utf-8")).get("table")
+    except (OSError, ValueError):
+        named = None
+    if named:
+        ref = tables.parse_ref(str(named))
+        if tables.exists(ref):
+            return ref
+    return tables.parse_ref(stats_dir / "analysis_table.csv")
+
+
+def sets_sidecar(table_csv) -> Tuple[Optional[Dict[str, List[str]]], Dict[str, str]]:
+    """The assemble step's sets and the source table of each, when written --
+    beside a file, or in the database beside the table."""
+    from ..helpers import tables
+
+    payload = tables.read_sidecar(table_csv, "sets")
+    if not payload:
+        return None, {}
+    sets = {str(k): [str(c) for c in v] for k, v in (payload.get("sets") or {}).items()}
+    sources = {str(k): str(v) for k, v in (payload.get("sources") or {}).items()}
+    return sets, sources
+
+
+#: Steps whose feature columns mean nothing to a reader on their own: an
+#: embedding dimension, a word-vector dimension, a model's score. A ridge
+#: over them is explained in words some other way (see `stats.explain`),
+#: never by a cloud of `e238`. Matched against a record's ``call``
+#: (``module:function``), so the names are the steps' function names.
+def _opaque_steps() -> Tuple[str, ...]:
+    from .attribution import ATTRIBUTABLE_STEPS
+
+    return ATTRIBUTABLE_STEPS + ("score_with_model", "score_model", "apply_text_predictor")
+
+
+#: An embedding column as the analysis table spells it: `e12` or `e_12`,
+#: with the merge step's `__mean` tail when there is one.
+_EMBEDDING_COLUMN = re.compile(r"^e_?\d+(?:__[a-z]+)?$")
+
+
+def opaque(set_name: str, columns: Sequence[str], source_record: Optional[dict] = None) -> bool:
+    """
+    Whether a feature set's columns say nothing to a person -- so that a
+    cloud of its coefficients would be a cloud of `e238`.
+
+    The source table's provenance settles it when there is one: a set that
+    came from an embedding or model-scoring step is opaque whatever its
+    columns are called. Without a record, the columns decide: every column
+    an embedding dimension (behind the assemble step's collision prefix or
+    not) means opaque. Controls and ids are not columns of a set.
+    """
+    from ..helpers.feature_columns import SEPARATOR
+
+    if source_record:
+        call = str(source_record.get("call") or "")
+        if any(step in call for step in _opaque_steps()):
+            return True
+    prefix = f"{set_name}{SEPARATOR}"
+    bare = [c[len(prefix):] if c.startswith(prefix) else c for c in columns]
+    bare = [c for c in bare if c]
+    return bool(bare) and all(_EMBEDDING_COLUMN.match(c) for c in bare)
+
+
+def opaque_sets(stats_dir, *, sets: Optional[Dict[str, List[str]]] = None,
+                sources: Optional[Dict[str, str]] = None) -> Dict[str, bool]:
+    """Every feature set of a results folder, and whether it is opaque: read
+    from the assemble sidecar and each source table's provenance record."""
+    from ..helpers import provenance, tables
+
+    if sets is None:
+        sets, sources = sets_sidecar(analysis_table_of(stats_dir))
+    out: Dict[str, bool] = {}
+    for name, cols in (sets or {}).items():
+        record = None
+        src = (sources or {}).get(name)
+        if src:
+            try:
+                record = provenance.read(tables.parse_ref(src.replace("\\", "/")))
+            except Exception:
+                record = None
+        out[name] = opaque(name, cols, record)
+    return out

@@ -584,6 +584,37 @@ _WORDCLOUD_VARS: Dict[str, dict] = {
         "default": 80,
         "desc": "The most words in any one cloud.",
     },
+    "wordcloud_kinds": {
+        "default": "auto",
+        "desc": "auto draws the clouds that read best for each feature set; all "
+                "draws every kind, coefficient clouds of embeddings included.",
+    },
+}
+#: Explaining a prediction model in words: on for the sets a coefficient
+#: cloud cannot explain (embeddings, model scores), off for sets that are
+#: words already, and switchable either way.
+_EXPLAIN_VARS: Dict[str, dict] = {
+    "explain_predictions": {
+        "default": "auto",
+        "desc": "Explain prediction models in words: auto does it for feature sets "
+                "that aren't words, all does every set, off none.",
+    },
+    "explain_how": {
+        "default": "both",
+        "desc": "correlates: words that track the held-out predictions; "
+                "attributions: each token's exact share (re-reads every text through "
+                "the encoder); both.",
+    },
+    "explain_size_by": {
+        "default": "mean",
+        "desc": "What sizes an attribution cloud: a word's mean share when it occurs, "
+                "or its total share over the corpus.",
+    },
+    "explain_top_texts": {
+        "default": 5,
+        "desc": "How many of the highest and of the lowest scored texts are written out "
+                "and drawn word by word, per outcome.",
+    },
 }
 _ACOUSTICS_VARS = {
     "acoustics_mode": {"default": "simple",
@@ -3796,7 +3827,7 @@ RECIPES: List[Recipe] = [
         scope="global",
         save_as="ridge_model",
         requires=frozenset({"analysis_table_csv"}),
-        auto_with=("stats_wordclouds", "stats_report"),
+        auto_with=("stats_explain", "stats_wordclouds", "stats_report"),
         sources=TABULAR,
         gpu_use="cpu",
         tags=("stats",),
@@ -3837,7 +3868,7 @@ RECIPES: List[Recipe] = [
         scope="global",
         save_as="classifier_model",
         requires=frozenset({"analysis_table_csv"}),
-        auto_with=("stats_wordclouds", "stats_report"),
+        auto_with=("stats_explain", "stats_wordclouds", "stats_report"),
         sources=TABULAR,
         gpu_use="cpu",
         tags=("stats",),
@@ -3872,6 +3903,48 @@ RECIPES: List[Recipe] = [
               **_STATS_PCA_VARS},
     ),
     Recipe(
+        id="stats_explain",
+        label="Explain the predictions in words",
+        help="For a prediction model whose features aren't words (embeddings, "
+             "model scores), the words that track its held-out predictions and "
+             "its residuals, as tables the clouds are drawn from",
+        call="potato.stats.explain_predictions",
+        target="taters.stats.explain:explain_predictions",
+        scope="global",
+        save_as="stats_explain",
+        user_facing=False,
+        requires=frozenset({"analysis_table_csv"}),
+        sources=TABULAR,
+        gpu_use="cpu",
+        tags=("stats",),
+        stage="analyze",
+        # the tokens are the n-gram steps' own, so these ride along with
+        # their defaults even when no n-gram step is in the pipeline
+        param_when=dict(_ENGINE_PARAM_WHEN),
+        library={"stoplist_paths": "stoplists"},
+        library_defaults={"stoplist_paths": _DEFAULT_STOPLISTS},
+        with_={
+            "stats_dir": "{{var:stats_dir}}",
+            "texts": "{{var:results_root}}gathered/texts.csv",
+            "out_tables": "{{var:results_root}}{{var:stats_dir}}",
+            "which": "{{var:explain_predictions}}",
+            "how": "{{var:explain_how}}",
+            "size_by": "{{var:explain_size_by}}",
+            "top_texts": "{{var:explain_top_texts}}",
+            "p_adjust": "{{var:stats_p_adjust}}",
+            "lemmatize": "{{var:lemmatize}}",
+            "keep_punctuation": "{{var:keep_punctuation}}",
+            "pos_tagged": "{{var:pos_tagged}}",
+            **_ENGINE_WITH,
+            "workers": "{{var:workers}}",
+            "overwrite_existing": "{{var:overwrite_existing}}",
+        },
+        hidden=("texts", "out_tables", "which", "how", "size_by", "top_texts"),
+        vars={**_STATS_DIR_VAR, **_EXPLAIN_VARS, **_STATS_ADJUST_VAR, **_ENGINE_VARS,
+              "lemmatize": _LEMMATIZE_VAR, "keep_punctuation": _KEEP_PUNCTUATION_VAR,
+              "pos_tagged": _POS_TAGGED_VAR},
+    ),
+    Recipe(
         id="stats_wordclouds",
         label="Word clouds of the results",
         help="Draws a word cloud for every result: the features predicting "
@@ -3895,12 +3968,15 @@ RECIPES: List[Recipe] = [
             "stats_dir": "{{var:stats_dir}}",
             "enabled": "{{var:wordclouds}}",
             "max_words": "{{var:wordcloud_words}}",
+            "kinds": "{{var:wordcloud_kinds}}",
+            "size_by": "{{var:explain_size_by}}",
             "group_col": "{{var:stats_group_col}}",
             "overwrite_existing": "{{var:overwrite_existing}}",
         },
         # answered by the analysis stage, like the group-differences step's.
-        hidden=("group_col",),
-        vars={**_STATS_DIR_VAR, **_WORDCLOUD_VARS, **_STATS_GROUP_VAR},
+        hidden=("group_col", "size_by"),
+        vars={**_STATS_DIR_VAR, **_WORDCLOUD_VARS, **_STATS_GROUP_VAR,
+              "explain_size_by": _EXPLAIN_VARS["explain_size_by"]},
     ),
     Recipe(
         id="stats_report",

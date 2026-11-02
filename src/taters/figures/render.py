@@ -184,8 +184,8 @@ def _padded(p: Placement) -> Tuple[int, int, int, int]:
 
 def _spiral_search(bw: int, bh: int, cx: float, cy: float, r_max: float,
                    theta0: float, area: Tuple[int, int, int, int],
-                   placed: Sequence[Placement], max_steps: int
-                   ) -> Optional[Tuple[int, int]]:
+                   placed: Sequence[Placement], max_steps: int,
+                   aspect: float = 1.0) -> Optional[Tuple[int, int]]:
     """
     The first spot on an outward spiral where a ``bw`` by ``bh`` box fits.
 
@@ -199,13 +199,16 @@ def _spiral_search(bw: int, bh: int, cx: float, cy: float, r_max: float,
     small word was declared unplaceable while three quarters of the canvas
     stood empty (34 of 80 dropped, on the first real picture). Returns
     ``None`` once the spiral leaves the canvas or runs out of steps.
+    ``aspect`` stretches the spiral sideways: a round spiral in a frame
+    nearly twice as wide as it is tall filled the height and left the sides
+    empty, so the spiral is an ellipse of the frame's own shape.
     """
     step = max(2.0, bh / 4.0, r_max / 40.0)
     pitch = step / (2 * math.pi)
     theta, r = theta0, 0.0
     taken = [_padded(p) for p in placed]
     for _ in range(max_steps):
-        x0 = round(cx + r * math.cos(theta) - bw / 2)
+        x0 = round(cx + r * aspect * math.cos(theta) - bw / 2)
         y0 = round(cy + r * math.sin(theta) - bh / 2)
         box = (x0, y0, x0 + bw, y0 + bh)
         if _inside(box, area) and not any(_overlaps(box, t) for t in taken):
@@ -258,7 +261,10 @@ def layout(words: Sequence[Word], sizes: Sequence[int], measure: Measure, *,
     area = (0, int(top_margin), int(width), int(height))
     cx = width / 2.0
     cy = top_margin + (height - top_margin) / 2.0
-    r_max = math.hypot(width, height - top_margin) / 2.0
+    # the spiral is stretched to the frame's shape, so its radius is
+    # measured against the height and the stretch reaches the width
+    aspect = max(0.25, min(4.0, width / max(1, height - top_margin)))
+    r_max = math.hypot(width / aspect, height - top_margin) / 2.0
     order = sorted(range(len(words)), key=lambda i: (-sizes[i], words[i][0]))
     placed: List[Placement] = []
     dropped: List[str] = []
@@ -273,7 +279,7 @@ def layout(words: Sequence[Word], sizes: Sequence[int], measure: Measure, *,
             spot = None
             if bw <= width and bh <= height - top_margin:
                 spot = _spiral_search(bw, bh, cx, cy, r_max, theta0, area,
-                                      placed, max_steps)
+                                      placed, max_steps, aspect)
             if spot is not None:
                 placed.append(Placement(text, weight, size,
                                         spot[0] + pad, spot[1] + pad, w, h))
@@ -371,6 +377,72 @@ def fit_budget(words: Sequence[Word], sizes: Sequence[int], measure: Measure,
     return [max(int(min_font), int(round(s * factor))) for s in sizes]
 
 
+#: How far across the drawing area a cloud reaches in its longer direction.
+#: Every cloud is scaled to this, so a picture of five words and a picture
+#: of eighty fill the same frame; the ink budget above is only the first
+#: guess the loop starts from.
+EXTENT = 0.94
+#: The largest word may be this share of the drawing height. A picture of
+#: three words filled to the extent would otherwise be three banners.
+MAX_WORD_SHARE = 0.4
+#: How many layouts the fit loop may try before it keeps the best it saw.
+FIT_PASSES = 5
+
+
+def _reach(lay: Layout) -> float:
+    """How much of the drawing area the cloud's bounding box spans, in the
+    direction it spans most: 1.0 is edge to edge."""
+    if not lay.placed:
+        return 0.0
+    boxes = [_padded(p) for p in lay.placed]
+    bw = max(b[2] for b in boxes) - min(b[0] for b in boxes)
+    bh = max(b[3] for b in boxes) - min(b[1] for b in boxes)
+    return max(bw / max(1, lay.width), bh / max(1, lay.height - lay.top_margin))
+
+
+def fit_layout(words: Sequence[Word], sizes: Sequence[int], measure: Measure, *,
+               width: int, height: int, top_margin: int = 0, min_font: int = 12,
+               seed: int = 0, extent: float = EXTENT,
+               passes: int = FIT_PASSES) -> Layout:
+    """
+    The layout scaled so the cloud spans ``extent`` of the drawing area.
+
+    :func:`fit_budget` guesses sizes from the ink; the spiral then packs
+    them as it packs them, and a sparse cloud came out small in the middle
+    of its frame while a dense one reached the edges. The owner wants every
+    figure the same shape, so after each layout the bounding box is
+    measured and every size is scaled by the same factor towards the
+    extent, up to ``passes`` times, keeping the proportions between words.
+    A layout that dropped words is scaled down rather than up. The best
+    layout seen is returned: no words dropped first, then the reach closest
+    to the extent. The largest word stops at :data:`MAX_WORD_SHARE` of the
+    drawing height and nothing goes below ``min_font``.
+    """
+    sizes = [int(s) for s in sizes]
+    cap = max(int(min_font), int((height - top_margin) * MAX_WORD_SHARE))
+    best: Optional[Tuple[Tuple[int, float], Layout]] = None
+    for _ in range(max(1, int(passes))):
+        lay = layout(words, sizes, measure, width=width, height=height,
+                     top_margin=top_margin, min_font=min_font, seed=seed)
+        reach = _reach(lay)
+        score = (len(lay.dropped), abs(reach - extent))
+        if best is None or score < best[0]:
+            best = (score, lay)
+        if not words:
+            break
+        factor = extent / reach if reach > 0 else 0.8
+        if lay.dropped:
+            factor = min(factor, 0.9)
+        elif abs(factor - 1.0) < 0.03:
+            break
+        factor = min(factor, cap / max(max(sizes), 1))
+        scaled = [max(int(min_font), int(round(s * factor))) for s in sizes]
+        if scaled == sizes:
+            break
+        sizes = scaled
+    return best[1]
+
+
 class _Fonts:
     """One FreeType face per size, loaded on first use -- ``truetype`` is the
     slow call, and a cloud asks for a few dozen sizes many times over."""
@@ -387,10 +459,45 @@ class _Fonts:
         return self._cache[size]
 
 
+#: Labels longer than this are shown on two lines. A dictionary category
+#: like ``Policy_Position_Laver_Garry__Values_Liberal`` is one word to the
+#: layout, half the canvas wide at any readable size, and was being dropped.
+LABEL_BREAK = 22
+
+
+def display_label(text: str) -> str:
+    """
+    The label as the picture shows it: the table's name made readable.
+
+    ``__`` (the dictionary-category separator) becomes ``: ``, ``_`` a
+    space, and a label past :data:`LABEL_BREAK` cells is broken into two
+    lines at the space nearest its middle. The table keeps the raw name;
+    this is presentation only.
+    """
+    shown = str(text).replace("__", ": ").replace("_", " ").strip()
+    if len(shown) <= LABEL_BREAK or " " not in shown:
+        return shown
+    middle = len(shown) // 2
+    cuts = [i for i, ch in enumerate(shown) if ch == " "]
+    at = min(cuts, key=lambda i: abs(i - middle))
+    return shown[:at] + "\n" + shown[at + 1:]
+
+
 def _ink(font, text: str) -> Tuple[int, int, int, int]:
     """The tight box around the ink of ``text``: ``(left, top, right,
     bottom)`` relative to the drawing anchor. Descenders are inside it, so a
     box that does not overlap another does not touch it on the page either."""
+    if "\n" in text:
+        # a two-line label: the union of its lines' boxes, stacked
+        lines = text.split("\n")
+        boxes = [font.getbbox(ln) for ln in lines]
+        gap = max(2, int(font.size * 0.15))
+        line_h = max(b[3] - b[1] for b in boxes) + gap
+        left = min(b[0] for b in boxes)
+        right = max(b[2] for b in boxes)
+        top = boxes[0][1]
+        bottom = top + line_h * (len(lines) - 1) + (boxes[-1][3] - boxes[-1][1])
+        return (int(left), int(top), int(right), int(bottom))
     return tuple(int(v) for v in font.getbbox(text))
 
 
@@ -425,6 +532,47 @@ def _wrap(font, text: str, max_width: int, max_lines: int) -> List[str]:
 
 
 DEFAULT_LEGEND = "Size and shade follow the weight; blue = positive, red = negative."
+
+#: The caption band: the title's type size and the lines reserved for it,
+#: then the legend's. The band is the same height on every picture whether
+#: the title takes one line or two, so the drawing area under it is the
+#: same size on every figure and a longer name never shrinks the cloud.
+TITLE_SIZE, TITLE_LINES = 22, 2
+LEGEND_SIZE, LEGEND_LINES = 15, 2
+CAPTION_GAP = 6
+MARGIN = 16
+TITLE_INK = (40, 40, 40)
+LEGEND_INK = (110, 110, 110)
+
+
+def _line_height(font) -> int:
+    """One caption line: the face's ascent plus descent, which is the same
+    for every line of text in that face, unlike the ink of a given line."""
+    ascent, descent = font.getmetrics()
+    return int(ascent + descent)
+
+
+def caption_band(fonts: "_Fonts") -> int:
+    """The height of the caption band, the same for every picture."""
+    band = MARGIN
+    for size, lines in ((TITLE_SIZE, TITLE_LINES), (LEGEND_SIZE, LEGEND_LINES)):
+        band += lines * (_line_height(fonts[size]) + CAPTION_GAP)
+    return band + MARGIN // 2
+
+
+def draw_caption(draw, fonts: "_Fonts", width: int, title: str,
+                 legend: Optional[str]) -> None:
+    """Write the title and legend at the top, each line on the face's own
+    line height from the top-left anchor, so a line without descenders
+    sits where a line with them would."""
+    y = MARGIN
+    for text, size, color, lines in ((title, TITLE_SIZE, TITLE_INK, TITLE_LINES),
+                                     (legend, LEGEND_SIZE, LEGEND_INK, LEGEND_LINES)):
+        font = fonts[size]
+        step = _line_height(font) + CAPTION_GAP
+        for line in (_wrap(font, str(text), width - 2 * MARGIN, lines) if text else []):
+            draw.text((MARGIN, y), line, font=font, fill=color)
+            y += step
 
 
 def render_wordcloud(words: Union[Sequence[Word], Mapping[str, float]],
@@ -481,26 +629,16 @@ def render_wordcloud(words: Union[Sequence[Word], Mapping[str, float]],
     announce(on_progress, f"drawing word cloud: {title}")
 
     fonts = _Fonts(ImageFont, Path(font_path) if font_path else DEFAULT_FONT)
-    pairs = _as_pairs(words, max_words)
+    pairs = [(display_label(t), w) for t, w in _as_pairs(words, max_words)]
     legend = DEFAULT_LEGEND if legend is None else legend
 
     img = Image.new("RGB", (int(width), int(height)), (255, 255, 255))
     draw = ImageDraw.Draw(img)
 
-    # the caption band comes first, because the cloud gets laid out below it.
-    margin = 16
-    band = margin
-    caption = []
-    for text, size, color, max_lines in ((title, 22, (40, 40, 40), 1),
-                                          (legend, 15, (110, 110, 110), 3)):
-        if not text:
-            continue
-        font = fonts[size]
-        for line in _wrap(font, str(text), width - 2 * margin, max_lines):
-            left, top, right, bottom = _ink(font, line)
-            caption.append((line, font, color, margin - left, band - top))
-            band += (bottom - top) + 6
-    band += margin // 2 if caption else 0
+    # the caption band is a fixed height, so the cloud is laid out in the
+    # same frame on every picture; the loop then scales the cloud to that
+    # frame, so five words and eighty fill it alike
+    band = caption_band(fonts)
 
     def measure(text: str, size: int) -> Tuple[int, int]:
         left, top, right, bottom = _ink(fonts[size], text)
@@ -509,17 +647,28 @@ def render_wordcloud(words: Union[Sequence[Word], Mapping[str, float]],
     sizes = scale_sizes([w for _, w in pairs], min_font, max_font)
     sizes = fit_budget(pairs, sizes, measure, width=width, height=height,
                        top_margin=band, min_font=min_font)
-    lay = layout(pairs, sizes, measure, width=width, height=height,
-                 top_margin=band, min_font=min_font, seed=seed)
+    lay = fit_layout(pairs, sizes, measure, width=width, height=height,
+                     top_margin=band, min_font=min_font, seed=seed)
 
-    for text, font, color, x, y in caption:
-        draw.text((x, y), text, font=font, fill=color)
+    draw_caption(draw, fonts, width, title, legend)
     max_abs = max((abs(w) for _, w in pairs), default=1.0)
     for p in lay.placed:
         font = fonts[p.size]
         left, top, _r, _b = _ink(font, p.text)
-        draw.text((p.x - left, p.y - top), p.text, font=font,
-                  fill=color_for(p.weight, max_abs))
+        color = color_for(p.weight, max_abs)
+        if "\n" in p.text:
+            # each line on its own baseline, centered under the other
+            lines = p.text.split("\n")
+            gap = max(2, int(font.size * 0.15))
+            boxes = [font.getbbox(ln) for ln in lines]
+            line_h = max(b[3] - b[1] for b in boxes) + gap
+            widest = max(b[2] - b[0] for b in boxes)
+            for i, (ln, b) in enumerate(zip(lines, boxes)):
+                dx = (widest - (b[2] - b[0])) // 2
+                draw.text((p.x - b[0] + dx, p.y - top + i * line_h), ln, font=font,
+                          fill=color)
+        else:
+            draw.text((p.x - left, p.y - top), p.text, font=font, fill=color)
 
     if verbose and lay.dropped:
         print(f"[figures] {len(lay.dropped)} word(s) did not fit in "

@@ -439,7 +439,10 @@ the report ends with them: the features predicting a higher and a lower score,
 correlated positively and negatively with each outcome, higher in one group than
 another, loading on each component. Size and shade follow the statistic, blue is
 positive and red is negative. They're the quickest first read of a result there
-is; the tables are what you cite. The
+is; the tables are what you cite. A prediction model fitted on embeddings gets
+something better than a cloud of `e238`: the words whose frequency tracks its
+held-out predictions, and the words behind what it missed (see
+[What the predictions track in words](stats.md#what-the-predictions-track-in-words)). The
 [statistics guide](stats.md#word-clouds) lists exactly what gets drawn from
 what.
 

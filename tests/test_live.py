@@ -109,18 +109,31 @@ def test_no_stages_means_no_rail():
 # Rendering, through the real widgets
 # ---------------------------------------------------------------------------
 
-def test_the_rail_is_drawn_above_the_question(staged):
+def test_the_rail_is_drawn_above_the_question(staged, capsys):
+    """The rail is printed with the banner, above the notes, so the screen
+    reads banner, rail, notes, question -- it used to be part of the
+    question's own region, which put every note above it."""
+    staged.set_header("BANNER-MARKER")
+    staged.note("  a note about this screen")
     _, drawn = render(staged, "\r", lambda p: p.select(
         "Which features do you want to extract?",
         [Choice("a", "Dictionaries"), Choice("b", "Readability")],
     ))
+    painted = ANSI.sub("", capsys.readouterr().out)
     for probe in (f"{glyphs.TICK} Source", f"{glyphs.ACTIVE} Features", "○ Options"):
-        assert probe in drawn, f"{probe!r} missing from the rendered frame"
+        assert probe in painted, f"{probe!r} missing from the painted screen"
+    assert probe not in drawn, "the rail is not part of the live region any more"
     # one line, so it carries position and nothing else. the detail it used to
     # print alongside each stage now lives only on the screen that owns it.
-    assert "./essays" not in drawn
-    rail = [ln for ln in drawn.split("\n") if f"{glyphs.TICK} Source" in ln]
+    assert "./essays" not in painted
+    rail = [ln for ln in painted.split("\n") if f"{glyphs.TICK} Source" in ln]
     assert len(rail) == 1 and "○ Options" in rail[0], rail
+    # the note was printed once when it was said; the screen that matters
+    # is the last paint, which starts at the banner
+    screen = painted[painted.rindex("BANNER-MARKER"):]
+    order = [screen.index("BANNER-MARKER"), screen.index(f"{glyphs.TICK} Source"),
+             screen.index("a note about this screen")]
+    assert order == sorted(order), "banner, then rail, then the notes"
 
 
 def test_the_key_hints_match_the_question_type(staged):
@@ -614,6 +627,11 @@ def test_a_long_description_is_wrapped_rather_than_cut():
 
     assert len(lines) > 1, "a description far wider than the terminal did not wrap"
     assert wrapped.split() == text.split(), "wrapping lost or altered words"
+    # past the house cap the text is shortened, visibly, rather than left to
+    # grow the block under the list: the block's height is what keeps the
+    # screen still, and help that needs an essay belongs in the guide
+    essay = wrap_description("word " * 300, width=80)
+    assert essay.count("\n") + 1 == 3 and essay.endswith("…")
 
     # the first line sits after the prefix questionary writes; the rest line up
     # under it, so the block reads as one paragraph rather than loose text
@@ -1206,11 +1224,11 @@ def test_the_reason_sits_between_the_rail_and_the_question(staged):
         [Choice("t", "One speaker"), Choice("d", "Several speakers")]))
 
     lines = [ln for ln in drawn.split("\n")]
-    rail = next(i for i, ln in enumerate(lines) if f"{glyphs.TICK} Source" in ln)
     reason = next(i for i, ln in enumerate(lines) if "needs a transcript" in ln)
     question = next(i for i, ln in enumerate(lines)
                     if "How should Taters produce" in ln)
-    assert rail < reason < question, (rail, reason, question)
+    assert reason < question, (reason, question)
+    assert f"{glyphs.TICK} Source" not in drawn, "the rail is printed above, not drawn here"
 
 
 def test_the_reason_is_not_dressed_like_a_note(staged):
@@ -1344,8 +1362,8 @@ def test_the_hub_hands_the_live_renderer_the_banner_function():
     from taters.ui import hub as hub_mod
 
     src = inspect.getsource(hub_mod.run_hub)
-    assert "set_header(banner)" in src
-    assert "set_header(banner())" not in src
+    assert "set_header(banner," in src
+    assert "set_header(banner()" not in src
 
 
 def test_annotations_and_tones_reach_the_terminal_in_color(staged):
@@ -1873,16 +1891,16 @@ def _painted(p):
 def test_a_huge_note_is_trimmed_so_the_list_keeps_its_room():
     """The report this fixes: a spreadsheet of 150 columns printed all 150
     above a list of those same 150, leaving five rows to pick from."""
-    from taters.ui.prompts import _MIN_VISIBLE_ROWS
+    from taters.ui.prompts import LIST_ROOM
 
     p = _sized(rows=30)
     p.note("  study.csv: 156 column(s) — " +
            ", ".join(f"Img{i}_Valence_mean" for i in range(60)))
-    p._reserve_rows = _MIN_VISIBLE_ROWS
+    p._reserve_rows = LIST_ROOM
 
     lines = _painted(p)
     assert len(lines) < 12, "the note still swallowed the screen"
-    assert "study.csv: 156 column(s)" in lines[1], "its head survived"
+    assert any("study.csv: 156 column(s)" in ln for ln in lines[:4]), "its head survived"
     assert any("more line(s)" in ln for ln in lines), \
         "a trimmed note has to say it was trimmed"
 
@@ -1901,12 +1919,12 @@ def test_a_screen_with_no_list_is_never_trimmed():
 
 def test_the_oldest_notes_are_the_ones_that_go():
     """The newest note is the one about the question on screen."""
-    from taters.ui.prompts import _MIN_VISIBLE_ROWS
+    from taters.ui.prompts import LIST_ROOM
 
     p = _sized(rows=26)
     for i in range(8):
         p.note(f"  note number {i}")
-    p._reserve_rows = _MIN_VISIBLE_ROWS
+    p._reserve_rows = LIST_ROOM
 
     text = "\n".join(_painted(p))
     assert "note number 7" in text, "the most recent note is the relevant one"
@@ -1968,7 +1986,7 @@ def test_the_description_block_is_held_at_the_tallest_descriptions_height():
     rows = pr.description_rows([short, tall, none], width=80)
     assert rows >= 3
     assert pr.description_rows([none]) == 0
-    assert pr.description_rows([Choice("d", "D", "y " * 2000)], width=80) == 6, \
+    assert pr.description_rows([Choice("d", "D", "y " * 2000)], width=80) == 3, \
         "capped, so one essay cannot eat the list"
 
     # the renderer pads what questionary emitted up to the reservation...
@@ -2109,3 +2127,145 @@ def test_a_table_taller_than_the_screen_shows_its_head_and_says_so():
     assert "row 0" in text and "row 39" not in text
     assert "more row(s)" in text
     assert len(lines) <= 20
+
+
+# ---------------------------------------------------------------------------
+# Tighter: the layout holds still and fits
+# ---------------------------------------------------------------------------
+
+def test_every_key_hint_fits_an_eighty_column_terminal():
+    """A hint that wraps is a hint that scrolls the screen, and the way out
+    is at its end, where a clipped line loses it first. One screen used to
+    carry "[←→] change type" twice and end in "[esc] b"."""
+    from rich.cells import cell_len
+
+    from taters.ui import live as live_mod
+
+    for name, hint in live_mod._KEY_HINTS.items():
+        assert cell_len(hint) + 2 <= live_mod.HINT_WIDTH, (name, cell_len(hint), hint)
+        assert hint.count("[←→]") <= 1, name
+        assert hint.endswith("[esc] back"), name
+
+
+def test_a_cycling_tick_screen_says_change_type_once(staged):
+    _, drawn = render(staged, "\x1b[B \x1b[A\r", lambda p: p.checkbox(
+        "Tick", [Choice("a", "A"), Choice("b", "B")], cycle=lambda v, d: "numbers"))
+    hint = next(ln for ln in drawn.split("\n") if "[esc] back" in ln)
+    assert hint.count("[←→]") == 1 and "[esc] back" in hint
+
+
+def test_the_done_row_carries_no_description(staged):
+    """The hint bar says what Done does; a description saying it again cost
+    every tick screen three rows."""
+    _, drawn = render(staged, "\x1b[B \x1b[A\r", lambda p: p.checkbox(
+        "Tick", [Choice("a", "A"), Choice("b", "B")]))
+    assert "Description:" not in drawn
+
+
+def test_the_hint_sits_right_under_the_list_not_on_the_bottom_row(staged):
+    """The question's windows used to stretch to the terminal, parking the
+    key hint on the last row with a gulf of blank screen above it."""
+    _, drawn = render(staged, "\r", lambda p: p.select(
+        "Pick", [Choice("a", "Alpha", "The first letter."),
+                 Choice("b", "Beta", "The second letter.")]))
+    first = drawn.split("? Pick")[1] if "? Pick" in drawn else drawn
+    lines = [ln.rstrip() for ln in first.split("\n")]
+    desc = next(i for i, ln in enumerate(lines) if "Description:" in ln)
+    hint = next(i for i, ln in enumerate(lines) if "[esc] back" in ln)
+    assert hint - desc == 2, (desc, hint, lines[desc:hint + 1])
+    assert lines[desc + 1] == ""
+
+
+def test_a_question_that_wraps_is_counted_as_the_rows_it_takes():
+    p = LivePrompter.__new__(LivePrompter)
+    p._console = type("C", (), {"width": 80})()
+    assert p._question_rows_for("Short?") == 1
+    assert p._question_rows_for("x" * 76) == 1
+    assert p._question_rows_for("x" * 78) == 2
+    assert p._question_rows_for("Which archetype dictionaries should this step use? "
+                                "[space] ticks, [enter] approves.") == 2
+
+
+def test_a_short_terminal_gets_the_one_line_banner_and_a_tall_one_the_potato():
+    """On 24 rows the full banner, a rail, a reason and a list of twelve do
+    not fit; the banner gives way first, before the list gives up rows."""
+    p = _sized(rows=24)
+    p.set_header("BANNER\n" * 6, compact="  TATERS v1\n")
+    p.reason("Because of the thing that happened earlier in the run.")
+    p._reserve_rows = 12
+    p._desc_rows = 2
+    assert p._use_compact_header()
+    lines = _painted(p)
+    assert lines[0].strip() == "TATERS v1" and "BANNER" not in "\n".join(lines)
+    tall = _sized(rows=50)
+    tall.set_header("BANNER\n" * 6, compact="  TATERS v1\n")
+    tall._reserve_rows = 12
+    tall._desc_rows = 2
+    assert not tall._use_compact_header()
+    assert "BANNER" in "\n".join(_painted(tall))
+    # a report screen (no list) keeps the potato however short the window
+    report = _sized(rows=20)
+    report.set_header("BANNER\n" * 6, compact="  TATERS v1\n")
+    report._reserve_rows = 0
+    assert not report._use_compact_header()
+
+
+def test_a_windowed_list_keeps_its_height_between_rows_with_and_without_help():
+    """The scroll-by-a-line bug, measured: a wrapped description is one
+    token with newlines inside it, and counted as one row it was padded as
+    one row -- so the block under the list grew by the lines the count had
+    missed, and the screen moved every time the pointer crossed between a
+    row with help and one without."""
+    import taters.ui.prompts as pr
+    from questionary.prompts.common import Choice as QChoice
+    from questionary.prompts.common import InquirerControl
+    from taters.ui.prompts import QuestionaryPrompter
+
+    QuestionaryPrompter()
+    before, reserved = pr.visible_rows, pr._reserved_description_rows
+    pr.visible_rows = lambda lines=None: 6
+    long_help = "an explanation " * 20
+    choices = [QChoice(f"Opt {i}", str(i), description=long_help if i % 2 else None)
+               for i in range(14)]
+    try:
+        pr.set_description_rows(pr.description_rows(
+            [Choice(str(i), f"Opt {i}", long_help if i % 2 else "") for i in range(14)],
+            width=80))
+        heights = set()
+        for at in (0, 1, 6, 7, 12, 13):
+            control = InquirerControl(choices, show_description=True)
+            control.pointed_at = at
+            text = "".join("\n" if tuple(t[:2]) == ("", "\n") else t[1]
+                           for t in control._get_choice_tokens())
+            heights.add(text.count("\n"))
+        assert len(heights) == 1, heights
+    finally:
+        pr.visible_rows = before
+        pr.set_description_rows(reserved)
+
+
+def test_a_single_pick_with_retypable_rows_gets_its_own_hint(staged):
+    """The group-column question is one pick, not a tick screen; its hint
+    must not offer [space]."""
+    _, drawn = render(staged, "\r", lambda p: p.select(
+        "Which column separates the groups?",
+        [Choice("a", "condition", annotation="labels")], cycle=lambda v, d: "numbers"))
+    hint = next(ln for ln in drawn.split("\n") if "[esc] back" in ln)
+    assert "[←→] change type" in hint and "[space]" not in hint
+
+
+def test_a_report_taller_than_the_window_gets_the_one_line_banner():
+    """A report screen is never trimmed, so when it is taller than the
+    window the banner is what gives way, not the report."""
+    p = _sized(rows=20)
+    p.set_header("BANNER\n" * 6, compact="  TATERS v1\n")
+    p._reserve_rows = 0
+    for i in range(18):
+        p.note(f"  row {i} of a long report")
+    assert p._use_compact_header()
+    assert "BANNER" not in "\n".join(_painted(p))
+    short = _sized(rows=40)
+    short.set_header("BANNER\n" * 6, compact="  TATERS v1\n")
+    short._reserve_rows = 0
+    short.note("  one line")
+    assert not short._use_compact_header()

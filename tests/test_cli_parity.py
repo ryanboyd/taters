@@ -17,6 +17,7 @@ MODULES = [
     "taters.stats.assemble", "taters.stats.group_differences",
     "taters.stats.correlations", "taters.stats.ridge", "taters.stats.classify",
     "taters.stats.pca", "taters.stats.report", "taters.stats.describe",
+    "taters.stats.explain",
     "taters.figures.wordclouds",
     "taters.text.analyze_readability", "taters.text.analyze_lexical_richness",
     "taters.text.analyze_entropy",
