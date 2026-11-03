@@ -65,16 +65,17 @@ def write_stats_report(
     stats_dir = Path(stats_dir)
     out_path = Path(out_md) if out_md else stats_dir / "report.md"
     sections_dir = stats_dir / SECTIONS_DIR
-    from ._common import reusable
+    from ._common import leftover, reusable
 
-    if reusable(out_path, *(sorted(sections_dir.glob("*.md"))
-                            if sections_dir.is_dir() else []),
-                overwrite_existing=overwrite_existing, verbose=verbose,
+    # a section written by an earlier run in this folder (an analysis this
+    # run did not ask for) is not this run's result
+    fragments = [p for p in (sorted(sections_dir.glob("*.md")) if sections_dir.is_dir() else [])
+                 if not leftover(p, stats_dir)]
+    if reusable(out_path, *fragments, overwrite_existing=overwrite_existing, verbose=verbose,
                 what="the report"):
         if verbose:
             print(f"Report already exists; returning existing file: {out_path}")
         return out_path
-    fragments = sorted(sections_dir.glob("*.md")) if sections_dir.is_dir() else []
     if not fragments:
         raise FileNotFoundError(
             f"no report sections found under {sections_dir}. Run at least "

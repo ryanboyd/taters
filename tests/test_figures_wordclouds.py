@@ -108,6 +108,18 @@ def test_direction_clouds_rank_the_vocabulary_each_way():
     assert len(kept) == 2
 
 
+def test_auto_keeps_the_coefficient_cloud_of_a_set_with_a_readable_member():
+    """`all` over word vectors and a readable table: the coefficient cloud
+    has words in it, so it stays; `all` over opaque tables alone goes."""
+    spec = wc.CloudSpec(analysis="Ridge", folder="ridge-regression/all", set_name="all",
+                        name="o__positive", title="t", legend="l", words=[("length", 0.4)],
+                        stat="o: β", kind="cloud")
+    mixed = wc.keep_kinds([spec], "auto", {"word_vectors": True, "lengths": False})
+    assert [s.name for s in mixed] == ["o__positive"]
+    alone = wc.keep_kinds([spec], "auto", {"word_vectors": True, "embeds": True})
+    assert [s.name for s in alone] == ["all__not_drawn"]
+
+
 def test_auto_keeps_the_word_clouds_of_an_opaque_set_and_explains_the_missing_ones():
     specs = wc.clouds_for_ridge(_ridge_rows(), _allow_all)
     specs[0].set_name = "embeds"
@@ -603,3 +615,28 @@ def test_neighbor_pictures_and_index_land_beside_the_model(tmp_path):
     assert "“zebra” is not in the model's vocabulary." in index
     off = wc.neighbor_wordclouds(table, tmp_path / "off", enabled=False, verbose=False)
     assert not off.exists()
+
+
+def test_a_table_older_than_the_analysis_table_is_not_drawn(tmp_path):
+    """A results folder is reused and never cleared: last week's correlation
+    table sat beside today's analysis table and its clouds went into
+    today's report (a real folder). Older than the table means an earlier
+    run."""
+    pytest.importorskip("PIL")
+    import os
+
+    stats = tmp_path / "stats_results"
+    stats.mkdir()
+    header = "feature_set,feature,score_r,score_p,score_p_adj,score_n\n"
+    stale = stats / "correlations_pearson.csv"
+    stale.write_text(header + "dict,gravy,0.5,0.001,0.002,40\n", encoding="utf-8")
+    table = stats / "analysis_table.csv"
+    table.write_text("text_id,gravy,score\nt1,1,2\n", encoding="utf-8")
+    old = table.stat().st_mtime - 3600
+    os.utime(stale, (old, old))
+    folder = wc.stats_wordclouds(stats, verbose=False)
+    assert not list(folder.rglob("*.png")), "last week's table drew nothing"
+    # the same table, written after the analysis table, is this run's
+    os.utime(stale, None)
+    folder = wc.stats_wordclouds(stats, verbose=False)
+    assert any("correlations" in p.as_posix() for p in folder.rglob("*.png"))

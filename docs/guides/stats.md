@@ -767,7 +767,13 @@ applied with concept dictionaries also has `sim_<dictionary>__<category>`
 columns, cosines between the text and a concept, which are not sums over
 the words; their term in the prediction is read from the analysis table
 into one `[features]` row per text, so the text still adds up and the
-summary names the columns.
+summary names the columns. The same row holds the term of any readable
+table in the model's set: the usual fit is one model over *all* the
+feature tables together, and that set is explained through the tables that
+can be read token by token (a `table` column in the attributed texts says
+which), with every other table's term folded into the row. Two attributable
+tables in one set both read the text, and the shaded texts are drawn once
+per table.
 
 The same idea reaches further still. A ridge over *any* feature set is
 already a weighted sum of named columns, so each feature's share in each
@@ -837,7 +843,10 @@ the report, drawing the words behind its predictions instead; **all** draws
 every kind for every set, the `e238` cloud included, for anyone who wants it.
 A cloud is
 redrawn only when the table it came from is newer than it is, so a re-run of
-an unchanged pipeline redraws nothing.
+an unchanged pipeline redraws nothing. A results folder is reused run after
+run and nothing clears it, so a table, model or report section older than
+the analysis table belongs to an earlier run: the clouds, the explain step
+and the report leave those out, and only what this run analyzed is shown.
 
 **In Taters:** `python -m taters.figures.wordclouds stats --stats_dir
 stats_results` redraws the statistics clouds from the tables, with

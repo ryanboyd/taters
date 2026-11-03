@@ -40,7 +40,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tupl
 from ..helpers import tables
 
 __all__ = ["Origin", "set_origin", "column_index", "merge_pieces", "SPECIALS", "FEATURES",
-           "Unit", "Backend", "backend_for", "ATTRIBUTABLE_STEPS", "Attribution",
+           "Unit", "Backend", "Composite", "backend_for", "ATTRIBUTABLE_STEPS", "Attribution",
            "attribute"]
 
 #: The row a text's special tokens ([CLS], [SEP], <s>, </s>) are summed into:
@@ -87,30 +87,9 @@ class Origin:
 
 
 def _resolve(address: Optional[str], root: Optional[Path]) -> Optional[Any]:
-    """
-    The table an address names, as a ref -- found again under ``root`` by
-    its name when the recorded path does not resolve here.
+    from ._common import resolve_source
 
-    A sidecar written on Windows and read from WSL (or a run folder moved
-    whole) records a path that does not exist on this side, and the table
-    is right there under ``features/``. The same fallback the theme
-    loadings use.
-    """
-    if not address:
-        return None
-    text = str(address).replace("\\", "/")
-    try:
-        ref = tables.parse_ref(text)
-        if ref.is_db or ref.path.is_file():
-            return ref
-    except (TypeError, ValueError):
-        return None
-    if root is not None:
-        name = text.rsplit("/", 1)[-1]
-        for found in sorted(Path(root).rglob(name)):
-            if found.is_file():
-                return tables.parse_ref(found)
-    return None
+    return resolve_source(address, root)
 
 
 def _record(address: Optional[str], root: Optional[Path] = None) -> Optional[dict]:
@@ -258,6 +237,7 @@ class Unit:
     vector: Any
     sentence: Optional[int] = None
     window: Optional[int] = None
+    table: str = ""
 
 
 class Backend:
@@ -293,6 +273,85 @@ class Backend:
     def vocabulary(self) -> Optional[Iterator[Tuple[List[str], List[Optional[int]], Any]]]:
         """``(words, counts, vectors[n, d])`` in chunks, or ``None``."""
         return None
+
+    def locate(self, name: str, table: str = "") -> Optional[int]:
+        """Which entry of a unit's vector an analysis-table column is."""
+        return column_index(name, table, self.columns)
+
+
+class Composite(Backend):
+    """
+    One feature set's attributable tables read together.
+
+    A model is fitted over a set that may span several tables (``all``,
+    ``dictionary+embeddings``). Each attributable member reads the text into
+    its own units; here their vectors are laid side by side, each member's
+    entries at its own offset and zero elsewhere, so a text is still the sum
+    of its units and :func:`attribute` needs no second case. A column is
+    located member by member, by the table's own name (the assemble step's
+    collision prefix is the table's), so two tables that both have a
+    ``wv_1`` cannot be confused.
+    """
+
+    def __init__(self, members: Sequence[Tuple[str, Backend]]):
+        self.members = list(members)
+        self.offsets: List[int] = []
+        self.columns = []
+        for _table, b in self.members:
+            self.offsets.append(len(self.columns))
+            self.columns += list(b.columns)
+        self.exact = all(b.exact for _t, b in self.members) and bool(self.members)
+        self.why = "; ".join(b.why for _t, b in self.members if b.why)
+        self.kind = "+".join(dict.fromkeys(b.kind for _t, b in self.members))
+        self.model_label = " + ".join(b.model_label for _t, b in self.members)
+        self.device_name = ", ".join(dict.fromkeys(b.device_name for _t, b in self.members
+                                                   if b.device_name))
+        self.reason = "; ".join(b.reason for _t, b in self.members if b.reason)
+
+    def describe(self) -> str:
+        if len(self.members) == 1:
+            return self.members[0][1].describe()
+        return "; ".join(f"{t}: {b.describe()}" for t, b in self.members)
+
+    def locate(self, name: str, table: str = "") -> Optional[int]:
+        for (t, b), offset in zip(self.members, self.offsets):
+            i = b.locate(name, t)
+            if i is not None:
+                return offset + i
+        return None
+
+    def _widen(self, units: List[Unit], offset: int, width: int) -> List[Unit]:
+        import numpy as np
+
+        for u in units:
+            full = np.zeros(len(self.columns), dtype=np.float64)
+            full[offset:offset + width] = u.vector
+            u.vector = full
+        return units
+
+    def read(self, texts: Sequence[str]) -> List[List[Unit]]:
+        out: List[List[Unit]] = [[] for _ in texts]
+        for (t, b), offset in zip(self.members, self.offsets):
+            for i, units in enumerate(b.read(texts)):
+                for u in units:
+                    u.table = t
+                out[i] += self._widen(units, offset, len(b.columns))
+        return out
+
+    def vocabulary(self):
+        """The one member's vocabulary, widened; none when no member or more
+        than one has words of its own."""
+        import numpy as np
+
+        having = [(b, o) for (_t, b), o in zip(self.members, self.offsets)
+                  if b.vocabulary() is not None]
+        if len(having) != 1:
+            return None
+        b, offset = having[0]
+        for words, counts, block in b.vocabulary():
+            full = np.zeros((block.shape[0], len(self.columns)), dtype=np.float64)
+            full[:, offset:offset + block.shape[1]] = block
+            yield words, counts, full
 
 
 def _raw_columns(origin: Origin, pattern: "re.Pattern[str]") -> List[str]:
@@ -772,13 +831,15 @@ def attribute(texts: Any, *, backend: Backend,
                               "prediction": predicted.get(label, {}).get(text_id),
                               "recomputed": float(recomputed[j])}
                     for u, c in zip(units, C):
-                        out.texts.append({**common, "sentence": u.sentence, "window": u.window,
-                                          "position": u.position, "token": u.token,
-                                          "word": u.word, "contribution": float(c[j])})
+                        out.texts.append({**common, "table": u.table, "sentence": u.sentence,
+                                          "window": u.window, "position": u.position,
+                                          "token": u.token, "word": u.word,
+                                          "contribution": float(c[j])})
                     if label in extra and text_id in extra[label]:
-                        out.texts.append({**common, "sentence": None, "window": None,
-                                          "position": len(units) + 1, "token": FEATURES,
-                                          "word": FEATURES, "contribution": float(add[j])})
+                        out.texts.append({**common, "table": "", "sentence": None,
+                                          "window": None, "position": len(units) + 1,
+                                          "token": FEATURES, "word": FEATURES,
+                                          "contribution": float(add[j])})
             out.n_texts += 1
             reporter.finish(text_id)
             reporter.consumed()

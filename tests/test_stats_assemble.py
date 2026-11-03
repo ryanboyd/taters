@@ -642,3 +642,26 @@ def test_a_table_from_before_the_declaration_is_read_through_its_analyzer(tmp_pa
     sets = json.loads((tmp_path / "stats" / "analysis_table_sets.json").read_text())
     assert sets["bookkeeping"] == {"matrix": ["token_count"]}
     assert sets["sets"]["matrix"] == ["potato", "gravy"]
+
+
+def test_the_report_leaves_out_sections_older_than_the_analysis_table(tmp_path):
+    """A section written by an analysis an earlier run asked for and this
+    one did not (the folder is reused) was concatenated into this run's
+    report. Older than the analysis table means an earlier run."""
+    import os
+
+    from taters.stats.report import write_stats_report
+
+    stats = tmp_path / "stats_results"
+    (stats / "_sections").mkdir(parents=True)
+    stale = stats / "_sections" / "30-correlations.md"
+    stale.write_text("## Correlations\n\nlast week\n", encoding="utf-8")
+    fresh = stats / "_sections" / "40-ridge.md"
+    fresh.write_text("## Ridge\n\ntoday\n", encoding="utf-8")
+    table = stats / "analysis_table.csv"
+    table.write_text("text_id,x,y\nt1,1,2\n", encoding="utf-8")
+    old = table.stat().st_mtime - 3600
+    os.utime(stale, (old, old))
+    out = write_stats_report(stats_dir=stats, verbose=False)
+    text = out.read_text(encoding="utf-8")
+    assert "today" in text and "last week" not in text

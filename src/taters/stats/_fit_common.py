@@ -205,24 +205,15 @@ def combine_sets(sets, reductions, mode: str):
 
 def members_of(set_names: Sequence[str], sources: Sequence[str]) -> Dict[str, List[str]]:
     """
-    Which source tables each fitted set is made of.
+    Which source tables each fitted set is made of (see `_common.set_members`).
 
-    ``all`` is every table the sidecar knows; ``dictionary+readability`` its
-    two members; anything else -- a single table, a hand-named set, a run
-    with no sidecar -- is one set of its own. This is the ``n_feature_sets``
-    column: how many tables went into the model, so a row reading 0.41 can
-    be seen at a glance to be three tables' worth and not one.
+    This is the ``n_feature_sets`` column: how many tables went into the
+    model, so a row reading 0.41 can be seen at a glance to be three
+    tables' worth and not one.
     """
-    known = set(sources)
-    out: Dict[str, List[str]] = {}
-    for name in set_names:
-        if name == "all" and sources:
-            out[name] = list(sources)
-        elif "+" in name and all(part in known for part in name.split("+")):
-            out[name] = name.split("+")
-        else:
-            out[name] = [name]
-    return out
+    from ._common import set_members
+
+    return {name: set_members(name, sources) for name in set_names}
 
 
 def comparison_lines(metrics_rows, metrics_header, *, score: str,

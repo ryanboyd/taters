@@ -43,7 +43,8 @@ from ..helpers import tables
 from ..helpers.cliargs import CliSpec
 from ..helpers.model_spec import slug
 from ..helpers.progress import announce
-from ..stats._common import (SECTIONS_DIR, analysis_table_of, opaque_sets, reusable,
+from ..stats._common import (SECTIONS_DIR, analysis_table_of, leftover, opaque_sets,
+                             opaque_share, reusable,
                              sets_sidecar, write_section)
 from .render import pillow_missing_reason, render_wordcloud
 
@@ -591,8 +592,14 @@ def clouds_for_attributed_texts(rows: Sequence[Row], *, analysis: str, table: st
     heading, folder = ANALYSES.get(
         analysis, (analysis.replace("_", " ").capitalize(), slug(analysis)))
     out: List[CloudSpec] = []
-    keyed = _grouped(rows, "subset", "feature_set", "outcome", "target", "text_id")
-    for (sv, fs, outcome, target, text_id), group in keyed.items():
+    # a set over several attributable tables reads each text once per
+    # table (two tokenizations, two models), so the picture is per table
+    keyed = _grouped(rows, "subset", "feature_set", "table", "outcome", "target", "text_id")
+    tables_of: Dict[tuple, set] = {}
+    for (sv, fs, table_, outcome, target, text_id) in keyed:
+        tables_of.setdefault((sv, fs, outcome, target), set()).add(table_)
+    for (sv, fs, table_, outcome, target, text_id), group in keyed.items():
+        several = len(tables_of[(sv, fs, outcome, target)]) > 1
         ordered = sorted(group, key=lambda r: (int(_num(r.get("sentence")) or 0),
                                                int(_num(r.get("window")) or 0),
                                                int(_num(r.get("position")) or 0)))
@@ -613,10 +620,12 @@ def clouds_for_attributed_texts(rows: Sequence[Row], *, analysis: str, table: st
                 else target)
         out.append(CloudSpec(
             analysis=heading, folder=f"{folder}/{slug(fs)}/texts", set_name=fs,
-            kind="text", name=f"{slug(outcome)}__{slug(target)}__{slug(str(text_id))}",
+            kind="text", name=f"{slug(outcome)}__{slug(target)}__{slug(str(text_id))}"
+                              + (f"__{slug(table_)}" if several else ""),
             title=f"{heading}: {what} — text {text_id}"
                   + (f", predicted {pred}" if pred not in ("", None) else "")
-                  + (f" ({place})" if place else "") + f" ({fs}){where}",
+                  + (f" ({place})" if place else "")
+                  + (f", read through {table_}" if several else "") + f" ({fs}){where}",
             legend=("Each word shaded by its share in the prediction: blue pushes "
                     "the score up, red down, darker is a larger share."
                     + (f" Drawn from `{table}`." if table else "")),
@@ -640,7 +649,8 @@ def keep_kinds(specs: Sequence[CloudSpec], kinds: str, opaque: Dict[str, bool]
     kept: List[CloudSpec] = []
     said: set = set()
     for s in specs:
-        if s.kind in ("cloud", "component") and opaque.get(s.set_name):
+        n_opaque, n_members = opaque_share(s.set_name, opaque)
+        if s.kind in ("cloud", "component") and n_members and n_opaque == n_members:
             key = (s.analysis, s.set_name)
             if key not in said:
                 said.add(key)
@@ -1256,25 +1266,31 @@ def stats_wordclouds(
             s.inputs = [path]
         specs.extend(made)
 
+    def current(path: Path) -> bool:
+        # a table left by an earlier run in this folder is not this run's
+        # result, however good its picture would look
+        return path.is_file() and not leftover(path, stats_dir)
+
     p = stats_dir / "group_differences_pairwise.csv"
-    if p.is_file():
+    if current(p):
         take(p, clouds_for_group_differences(_rows(p, encoding), max_p=max_p))
     for method in ("pearson", "spearman"):
         p = stats_dir / f"correlations_{method}.csv"
-        if p.is_file():
+        if current(p):
             take(p, clouds_for_correlations(_rows(p, encoding), max_p=max_p,
                                             method=method))
     p = stats_dir / "ridge_coefficients.csv"
-    if p.is_file():
+    if current(p):
         take(p, clouds_for_ridge(_rows(p, encoding), allowed))
     p = stats_dir / "classifier_coefficients.csv"
-    if p.is_file():
+    if current(p):
         take(p, clouds_for_classifier(_rows(p, encoding), allowed))
     # the words behind a prediction model, from the tables the explain step
     # named: a CSV here, or a table in the database
-    from ..stats.explain import read_manifest
+    from ..stats.explain import EXPLAIN_MANIFEST, read_manifest
 
-    for name, address in (read_manifest(stats_dir).get("tables") or {}).items():
+    manifest = {} if leftover(stats_dir / EXPLAIN_MANIFEST, stats_dir) else read_manifest(stats_dir)
+    for name, address in (manifest.get("tables") or {}).items():
         if not tables.exists(address):
             continue
         if name.endswith("_word_correlates"):
@@ -1307,6 +1323,8 @@ def stats_wordclouds(
         return loadings_cache[fs]
 
     for p in sorted(stats_dir.glob("*_pca_loadings*.csv")):
+        if not current(p):
+            continue
         analysis = p.name.split("_pca_loadings")[0]
         rows = _rows(p, encoding)
         take(p, clouds_for_components(rows, analysis=analysis,

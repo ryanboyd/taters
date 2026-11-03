@@ -39,8 +39,9 @@ from ..helpers import tables
 from ..helpers.cliargs import CliSpec
 from ..helpers.model_spec import slug
 from ..helpers.progress import FlightReporter, announce, count_rows
-from ._common import (SECTION_ORDER, adjust_pvalues, analysis_table_of,
-                      opaque_sets, reusable, sets_sidecar, write_section_if_changed)
+from ._common import (SECTION_ORDER, adjust_pvalues, analysis_table_of, leftover,
+                      opaque_sets, opaque_share, reusable, set_members, sets_sidecar,
+                      write_section_if_changed)
 
 __all__ = ["explain_predictions", "Target", "targets_in", "word_correlates",
            "read_manifest", "EXPLAIN_MANIFEST", "SECTION_SLUG"]
@@ -147,6 +148,10 @@ def targets_in(stats_dir: PathLike, *, encoding: str = "utf-8-sig",
     out: List[Target] = []
     for analysis in _ANALYSES:
         for model_path in _model_files(stats_dir, analysis):
+            # the models of a set fitted in an earlier run sit beside
+            # today's; a model older than the analysis table is theirs
+            if leftover(model_path, stats_dir):
+                continue
             doc = _read_model(model_path)
             if doc is None:
                 continue
@@ -160,9 +165,11 @@ def targets_in(stats_dir: PathLike, *, encoding: str = "utf-8-sig",
             key = "text_id" if "text_id" in rows[0] else list(rows[0])[0]
             fs = str(doc.get("feature_set") or "")
             subset = str(doc.get("subset") or "")
+            # a set is one table, several, or all of them; one member a
+            # reader cannot read is enough to want the words
             common = dict(analysis=analysis, feature_set=fs, subset=subset,
                           outcome=outcome, model=model_path,
-                          opaque=bool(opaque.get(fs, False)))
+                          opaque=opaque_share(fs, opaque)[0] > 0)
             if analysis == "ridge":
                 col = f"oof_pred_{outcome}"
                 if col not in rows[0]:
@@ -600,8 +607,9 @@ def explain_predictions(
 _ATTRIBUTION_COLUMNS = ["subset", "feature_set", "outcome", "target", "word",
                         "mean_contribution", "total_contribution", "sd", "count", "docs",
                         "share_of_abs_total"]
-_TEXT_COLUMNS = ["subset", "feature_set", "outcome", "target", "text_id", "rank", "prediction",
-                 "recomputed", "sentence", "window", "position", "token", "word", "contribution"]
+_TEXT_COLUMNS = ["subset", "feature_set", "table", "outcome", "target", "text_id", "rank",
+                 "prediction", "recomputed", "sentence", "window", "position", "token", "word",
+                 "contribution"]
 _SUMMARY_COLUMNS = ["subset", "feature_set", "outcome", "target", "kind", "model", "method",
                     "exact", "constant", "n_texts", "skipped", "max_gap", "device", "note"]
 _DIRECTION_COLUMNS = ["subset", "feature_set", "outcome", "target", "word", "direction",
@@ -659,16 +667,28 @@ def _attribute_all(stats_dir: Path, chosen: Sequence[Target], *, sources: Dict[s
     for (analysis, fs, subset), group in by_set.items():
         if analysis in reused:
             continue
-        origin = attr.set_origin(fs, sources, root=stats_dir.parent)
-        if origin.problem:
-            status[(analysis, fs, subset)] = {"status": f"not attributed: {origin.problem}"}
+        # the set's member tables: every one made by an attributable step
+        # reads the text into units; the others' columns are read from the
+        # analysis table into the [features] row, so the text still adds up
+        members = []
+        problems = []
+        tables_ = set_members(fs, list(sources))
+        for table in tables_:
+            origin = attr.set_origin(table, sources, root=stats_dir.parent)
+            why = origin.problem
+            if not why:
+                announce(on_progress, f"loading the {origin.kind} model behind {table} to "
+                                      f"attribute the predictions")
+                one = attr.backend_for(origin, device=device, verbose=verbose)
+                if one.exact:
+                    members.append((table, one))
+                    continue
+                why = one.why
+            problems.append(f"{table}: {why}" if len(tables_) > 1 else why)
+        if not members:
+            status[(analysis, fs, subset)] = {"status": "not attributed: " + "; ".join(problems)}
             continue
-        announce(on_progress, f"loading the {origin.kind} model behind {fs} to attribute "
-                              f"the predictions")
-        backend = attr.backend_for(origin, device=device, verbose=verbose)
-        if not backend.exact:
-            status[(analysis, fs, subset)] = {"status": f"not attributed: {backend.why}"}
-            continue
+        backend = attr.Composite(members)
         # one weight vector per target over the unit columns, by name; a
         # weighted column that is not a sum over units (a cosine to a
         # concept) keeps its term per text, read from the analysis table
@@ -693,7 +713,7 @@ def _attribute_all(stats_dir: Path, chosen: Sequence[Target], *, sources: Dict[s
                 scores = t.values
             w = np.zeros(len(backend.columns))
             for name, value in lin.weights.items():
-                i = attr.column_index(name, fs, backend.columns)
+                i = backend.locate(name)
                 if i is None:
                     other.setdefault(label, {})[name] = float(value)
                 else:
@@ -766,7 +786,8 @@ def _attribute_all(stats_dir: Path, chosen: Sequence[Target], *, sources: Dict[s
                 if row["target"] != label:
                     continue
                 bucket["texts"].append({
-                    "subset": subset, "feature_set": fs, "outcome": t.outcome,
+                    "subset": subset, "feature_set": fs, "table": row["table"],
+                    "outcome": t.outcome,
                     "target": target_name, "text_id": row["text_id"],
                     "rank": rank_of.get(row["text_id"], ""),
                     "prediction": row["prediction"],

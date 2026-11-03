@@ -1001,21 +1001,105 @@ def opaque(set_name: str, columns: Sequence[str], source_record: Optional[dict] 
     return bool(bare) and all(_EMBEDDING_COLUMN.match(c) for c in bare)
 
 
+def leftover(path, stats_dir) -> bool:
+    """
+    Whether a file in a results folder is older than the analysis table,
+    and so belongs to an earlier run.
+
+    A results folder is reused run after run and nothing clears it, so the
+    models, tables and report sections of a set analyzed last week sit
+    beside today's, and every consumer that globbed the folder folded them
+    in: a word-vectors-only run reported last week's correlations and drew
+    its clouds (a real folder, eight stale sets). The assemble step starts
+    every analysis run by writing the table, and every analysis that
+    follows writes after it, so anything older than the table was not made
+    by this run. A table in a database has no time; nothing is a leftover
+    then, and neither is anything when the table is not there at all.
+    """
+    table = analysis_table_of(stats_dir)
+    try:
+        if table.is_db or not table.path.is_file():
+            return False
+        return Path(path).stat().st_mtime < table.path.stat().st_mtime - 1
+    except (AttributeError, OSError):
+        return False
+
+
+def resolve_source(address: Optional[str], root=None):
+    """
+    The table a recorded address names, as a ref -- found again under
+    ``root`` by its name when the recorded path does not resolve here.
+
+    A sidecar written on Windows and read from WSL (or a run folder moved
+    whole) records a path that does not exist on this side, and the table
+    is right there under ``features/``. ``None`` when it is nowhere.
+    """
+    from ..helpers import tables
+
+    if not address:
+        return None
+    text = str(address).replace("\\", "/")
+    try:
+        ref = tables.parse_ref(text)
+        if ref.is_db or ref.path.is_file():
+            return ref
+    except (TypeError, ValueError):
+        return None
+    if root is not None:
+        name = text.rsplit("/", 1)[-1]
+        for found in sorted(Path(root).rglob(name)):
+            if found.is_file():
+                return tables.parse_ref(found)
+    return None
+
+
+def set_members(name: str, known: Sequence[str]) -> List[str]:
+    """
+    Which source tables a fitted set is made of.
+
+    ``all`` is every table the sidecar knows; ``dictionary+readability`` its
+    two members; anything else -- a single table, a hand-named set, a run
+    with no sidecar -- is one set of its own.
+    """
+    known = list(known)
+    if name == "all" and known:
+        return known
+    if "+" in name and all(part in known for part in name.split("+")):
+        return name.split("+")
+    return [name]
+
+
+def opaque_share(name: str, by_table: Dict[str, bool]) -> Tuple[int, int]:
+    """
+    How many of a fitted set's member tables are opaque, out of how many.
+
+    A model is fitted over a *set*, which is one table, several joined by
+    ``+``, or ``all`` of them; the opaque decision is per table. A set with
+    any opaque member has columns a reader cannot read, so its predictions
+    are explained in words; a set whose every member is opaque has no
+    readable coefficient cloud at all.
+    """
+    members = set_members(name, list(by_table))
+    return sum(1 for m in members if by_table.get(m)), len(members)
+
+
 def opaque_sets(stats_dir, *, sets: Optional[Dict[str, List[str]]] = None,
                 sources: Optional[Dict[str, str]] = None) -> Dict[str, bool]:
     """Every feature set of a results folder, and whether it is opaque: read
     from the assemble sidecar and each source table's provenance record."""
-    from ..helpers import provenance, tables
+    from ..helpers import provenance
 
     if sets is None:
         sets, sources = sets_sidecar(analysis_table_of(stats_dir))
     out: Dict[str, bool] = {}
     for name, cols in (sets or {}).items():
         record = None
-        src = (sources or {}).get(name)
-        if src:
+        # the record's path is the writing machine's; the table is found
+        # again by name under the run folder when it is not here
+        ref = resolve_source((sources or {}).get(name), root=Path(stats_dir).parent)
+        if ref is not None:
             try:
-                record = provenance.read(tables.parse_ref(src.replace("\\", "/")))
+                record = provenance.read(ref)
             except Exception:
                 record = None
         out[name] = opaque(name, cols, record)

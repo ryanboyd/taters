@@ -52,8 +52,23 @@ def _corpus(path: Path, n=40, seed=3) -> Path:
     return path
 
 
+def _plain_table(tmp_path: Path, src: Path, name: str = "lengths") -> Path:
+    """A second, readable feature table with no provenance record: the
+    length of each text, which a ridge over "all" will weigh too."""
+    rows = list(csv.DictReader(src.open(encoding="utf-8")))
+    out = tmp_path / "features" / f"{name}.csv"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(["text_id", "length"])
+        for r in rows:
+            w.writerow([r["text_id"], len(r["text"].split())])
+    return out
+
+
 def _pipeline(tmp_path: Path, *, weighting="tokens", normalize_words=False, pca="off",
-              concept_dicts=(), bookkeeping="aside", analysis="ridge", n=40):
+              concept_dicts=(), bookkeeping="aside", analysis="ridge", n=40,
+              feature_sets="per_table", extra_tables=()):
     src = _corpus(tmp_path / "study.csv", n=n)
     model = _model(tmp_path / "m", weighting=weighting, concept_dicts=concept_dicts)
     features = tmp_path / "features"
@@ -61,13 +76,23 @@ def _pipeline(tmp_path: Path, *, weighting="tokens", normalize_words=False, pca=
         model_json=model, csv_path=src, text_cols=["text"], id_cols=["text_id"],
         out_features_csv=features / "word_vectors.csv", normalize_words=normalize_words,
         rounding=10, verbose=False)
+    tables_ = [str(out)]
+    for extra in extra_tables:
+        if extra == "plain":
+            tables_.append(str(_plain_table(tmp_path, src)))
+        else:
+            # a second word-vector table from a model of its own
+            second = _model(tmp_path / "m2", weighting=weighting, stem="wv2")
+            tables_.append(str(apply_word_vectors(
+                model_json=second, csv_path=src, text_cols=["text"], id_cols=["text_id"],
+                out_features_csv=features / "word_vectors_2.csv", rounding=10, verbose=False)))
     stats = tmp_path / "stats_results"
-    assemble_analysis_table(feature_csvs=[str(out)], metadata_csv=src, key_cols=["text_id"],
+    assemble_analysis_table(feature_csvs=tables_, metadata_csv=src, key_cols=["text_id"],
                             metadata_cols=["score", "side"], bookkeeping=bookkeeping,
                             out_dir=stats, verbose=False)
     if analysis == "ridge":
         fit_ridge_csv(table_csv=stats / "analysis_table.csv", outcome_cols=["score"],
-                      feature_sets="per_table", pca=pca,
+                      feature_sets=feature_sets, pca=pca,
                       pca_components=2 if pca != "off" else 0,
                       out_dir=stats, rounding=10, verbose=False)
     else:
@@ -272,3 +297,106 @@ def test_the_unit_vectors_are_the_text_vector_in_parts(tmp_path):
     assert sif[0] > sif[4], "car is the commonest word, so it weighs least"
     assert np.allclose(VECTORS[0], wv.unit_vectors(model, ["cat"], weighting="tokens",
                                                    normalize_words=False)[0])
+
+
+def test_a_set_over_every_table_is_explained_through_its_attributable_member(tmp_path):
+    """The wizard's default fits one model over `all` tables. That set is
+    not a table and had no record, so nothing was explained (a real run).
+    A set resolves to its members: the word vectors read the text into
+    units, and the readable table's term goes to the [features] row."""
+    stats, texts, _m = _pipeline(tmp_path, feature_sets=None, extra_tables=["plain"])
+    by_table = opaque_sets(stats)
+    assert by_table == {"word_vectors": True, "lengths": False}
+    _explain(stats, texts, top_texts=2)
+    manifest = json.loads((stats / "explain_manifest.json").read_text(encoding="utf-8"))
+    # the fitter's default: each table alone and all together
+    decisions = {d["feature_set"]: d for d in manifest["sets"]}
+    assert set(decisions) == {"word_vectors", "lengths", "all"}
+    assert decisions["all"]["opaque"] and decisions["all"]["explained"]
+    assert not decisions["lengths"]["opaque"] and not decisions["lengths"]["explained"]
+    summary = next(r for r in _read(stats / "ridge_attribution_summary.csv")
+                   if r["feature_set"] == "all")
+    assert summary["kind"] == "word_vectors" and float(summary["max_gap"]) < 1e-9
+    assert "length" in summary["note"] and attr.FEATURES in summary["note"]
+    rows = [r for r in _read(stats / "ridge_attributed_texts.csv") if r["feature_set"] == "all"]
+    assert "table" in rows[0] and {r["table"] for r in rows} == {"word_vectors", ""}
+    constant = float(summary["constant"])
+    for group in _by_text(rows).values():
+        total = sum(float(r["contribution"]) for r in group)
+        assert total == pytest.approx(float(group[0]["recomputed"]) - constant, abs=1e-6)
+        assert float(group[0]["recomputed"]) == pytest.approx(float(group[0]["prediction"]),
+                                                               abs=1e-6)
+    # the whole-vocabulary table still comes from the one model
+    directions = [r for r in _read(stats / "ridge_word_directions.csv")
+                  if r["feature_set"] == "all"]
+    assert sorted(r["word"] for r in directions) == sorted(VOCAB)
+
+
+def test_two_attributable_tables_read_the_text_together(tmp_path):
+    """Two word-vector tables in one set: both read the text, each unit's
+    vector sits at its own table's columns, and the text still adds up.
+    The shaded texts are drawn once per table."""
+    pytest.importorskip("PIL")
+    from taters.figures import wordclouds as wc
+
+    stats, texts, _m = _pipeline(tmp_path, feature_sets=None, extra_tables=["vectors"])
+    _explain(stats, texts, top_texts=1)
+    summary = next(r for r in _read(stats / "ridge_attribution_summary.csv")
+                   if r["feature_set"] == "all")
+    assert summary["kind"] == "word_vectors" and float(summary["max_gap"]) < 1e-9
+    assert summary["model"] == "wv + wv2" and "word_vectors_2:" in summary["method"]
+    rows = [r for r in _read(stats / "ridge_attributed_texts.csv") if r["feature_set"] == "all"]
+    assert {r["table"] for r in rows} == {"word_vectors", "word_vectors_2"}
+    constant = float(summary["constant"])
+    for group in _by_text(rows).values():
+        total = sum(float(r["contribution"]) for r in group)
+        assert total == pytest.approx(float(group[0]["recomputed"]) - constant, abs=1e-6)
+    # two vocabularies make no one ranking: each table alone has its own
+    directions = _read(stats / "ridge_word_directions.csv")
+    assert {r["feature_set"] for r in directions} == {"word_vectors", "word_vectors_2"}
+    folder = wc.stats_wordclouds(stats, verbose=False)
+    texts_pngs = sorted(p.name for p in (folder / "ridge-regression" / "all" / "texts").glob("*.png"))
+    assert len(texts_pngs) == 4 and all(n.endswith(("__word_vectors.png", "__word_vectors_2.png"))
+                                        for n in texts_pngs)
+
+
+def test_a_set_resolves_to_its_member_tables():
+    from taters.stats._common import opaque_share, set_members
+
+    by_table = {"word_vectors": True, "lengths": False}
+    assert set_members("all", by_table) == ["word_vectors", "lengths"]
+    assert set_members("word_vectors+lengths", by_table) == ["word_vectors", "lengths"]
+    assert set_members("lengths", by_table) == ["lengths"]
+    assert set_members("all", []) == ["all"]
+    assert opaque_share("all", by_table) == (1, 2)
+    assert opaque_share("word_vectors", by_table) == (1, 1)
+    assert opaque_share("lengths", by_table) == (0, 1)
+
+
+def test_a_sidecar_from_another_machine_still_makes_the_set_opaque(tmp_path):
+    """The sets sidecar names the source table by the writing machine's
+    path; read elsewhere the record was unreadable and the set counted as
+    words. The table is found again by name under the run folder."""
+    stats, texts, _m = _pipeline(tmp_path)
+    sets = json.loads((stats / "analysis_table_sets.json").read_text(encoding="utf-8"))
+    (name, real), = sets["sources"].items()
+    sets["sources"][name] = "C:\\Users\\someone\\study\\features\\" + Path(real).name
+    (stats / "analysis_table_sets.json").write_text(json.dumps(sets), encoding="utf-8")
+    assert opaque_sets(stats) == {"word_vectors": True}
+
+
+def test_models_older_than_the_analysis_table_are_leftovers(tmp_path):
+    """A results folder is reused and never cleared: the models of sets
+    fitted in an earlier run sit beside today's, and were being explained
+    (and read through their encoders) as if they were part of this run."""
+    import os
+    import shutil
+
+    stats, texts, _m = _pipeline(tmp_path)
+    stale = stats / "models" / "ridge__embeds__score.json"
+    shutil.copy(stats / "models" / "ridge__word_vectors__score.json", stale)
+    shutil.copy(stats / "ridge_predictions__word_vectors.csv", stats / "ridge_predictions__embeds.csv")
+    old = (stats / "analysis_table.csv").stat().st_mtime - 3600
+    os.utime(stale, (old, old))
+    sets = {t.feature_set for t in ex.targets_in(stats)}
+    assert sets == {"word_vectors"}
