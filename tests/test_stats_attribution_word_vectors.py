@@ -427,3 +427,24 @@ def test_a_text_is_written_out_only_for_the_outcomes_it_was_chosen_for(tmp_path)
     assert texts and all(r["rank"] != "" for r in texts)
     per_outcome = {o: {r["text_id"] for r in texts if r["outcome"] == o} for o in ("score", "other")}
     assert all(len(ids) == 4 for ids in per_outcome.values()), per_outcome
+
+
+def test_the_shaded_texts_also_come_as_one_page_per_outcome(tmp_path):
+    pytest.importorskip("PIL")
+    from taters.figures import wordclouds as wc
+
+    stats, texts, _m = _pipeline(tmp_path)
+    _explain(stats, texts, top_texts=2)
+    folder = wc.stats_wordclouds(stats, verbose=False)
+    page = folder / "ridge-regression" / "word_vectors" / "texts" / "score__prediction.html"
+    assert page.is_file()
+    text = page.read_text(encoding="utf-8")
+    assert text.count("<article>") == 4 and "the highest predicted score" in text
+    assert text.index("the highest predicted") < text.index("the lowest predicted")
+    section = (stats / "_sections" / "60-word-clouds.md").read_text(encoding="utf-8")
+    assert "texts/score__prediction.html" in section
+    # a page nothing draws any more is swept with the pictures
+    stray = page.parent / "old__prediction.html"
+    stray.write_text("x", encoding="utf-8")
+    wc.stats_wordclouds(stats, verbose=False)
+    assert page.is_file() and not stray.exists()

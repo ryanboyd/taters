@@ -11,6 +11,7 @@ share, on the same scale :mod:`render` uses for the clouds. Drawn from the
 from __future__ import annotations
 
 import colorsys
+import html
 from pathlib import Path
 from typing import Optional, Sequence, Tuple
 
@@ -19,7 +20,7 @@ from ..helpers.progress import announce
 from .render import (BLUE_HUE, DEFAULT_FONT, RED_HUE, _Fonts, _ink, _pillow,
                      caption_band, draw_caption)
 
-__all__ = ["render_highlighted_text", "background_for"]
+__all__ = ["render_highlighted_text", "render_highlighted_page", "background_for"]
 
 Word = Tuple[str, float]
 
@@ -71,6 +72,23 @@ def render_highlighted_text(words: Sequence[Word], out_png, *, title: str,
         text = str(token)
         if not text:
             continue
+        if text.strip() == "":
+            # the text's own line breaks, kept: one per newline, so a blank
+            # line between paragraphs stays blank. a tab is just a gap
+            breaks = text.count("\n")
+            if breaks and x > margin:
+                breaks -= 1
+                x = margin
+                y += line_height
+                lines_used += 1
+            for _ in range(breaks):
+                x = margin
+                y += line_height
+                lines_used += 1
+            if lines_used > max_lines:
+                cut = True
+                break
+            continue
         left, top, right, bottom = _ink(body, text)
         w = (right - left) + 10
         if x + w > width - margin and x > margin:
@@ -102,3 +120,59 @@ def render_highlighted_text(words: Sequence[Word], out_png, *, title: str,
     with atomic_write(out_png, mode="wb") as fh:
         img.save(fh, format="PNG", optimize=True)
     return out_png
+
+
+_PAGE_CSS = """
+body { font-family: Georgia, 'Times New Roman', serif; max-width: 52em; margin: 2em auto;
+       padding: 0 1em; color: #222; line-height: 1.9; }
+h1 { font-size: 1.3em; font-family: Helvetica, Arial, sans-serif; }
+h2 { font-size: 1.05em; font-family: Helvetica, Arial, sans-serif; margin: 2.2em 0 0.4em; }
+p.legend { color: #666; font-size: 0.9em; font-family: Helvetica, Arial, sans-serif; }
+article { break-inside: avoid; }
+span.w { padding: 0.1em 0.25em; border-radius: 3px; white-space: pre-wrap; }
+@media print { body { max-width: none; margin: 0; } h2 { break-after: avoid; } }
+"""
+
+
+def render_highlighted_page(entries: Sequence[Tuple[str, Sequence[Word]]], out_html,
+                            *, heading: str, legend: str = "") -> Path:
+    """
+    The shaded texts of one outcome on one page, as HTML.
+
+    The same words and the same shades as the pictures, with the text's
+    own line breaks kept, selectable, searchable, and printable to PDF from
+    any browser. Self-contained: no script, no stylesheet, no font fetched
+    from anywhere, so the file reads the same on any machine and nothing
+    is sent anywhere when it is opened. ``entries`` are ``(title, words)``
+    in the order they should appear.
+    """
+    out_html = Path(out_html)
+    parts = ["<!doctype html>", "<html lang=\"en\">", "<head>", "<meta charset=\"utf-8\">",
+             f"<title>{html.escape(heading)}</title>", f"<style>{_PAGE_CSS}</style>",
+             "</head>", "<body>", f"<h1>{html.escape(heading)}</h1>"]
+    if legend:
+        parts.append(f"<p class=\"legend\">{html.escape(legend)}</p>")
+    for title, words in entries:
+        max_abs = max((abs(w) for _t, w in words), default=0.0)
+        parts += ["<article>", f"<h2>{html.escape(str(title))}</h2>", "<p>"]
+        for token, weight in words:
+            text = str(token)
+            if not text:
+                continue
+            if text.strip() == "":
+                # the text's own line breaks: one per newline, a blank
+                # line between paragraphs stays blank
+                parts.append("<br>" * max(1, text.count("\n")) if "\n" in text else " ")
+                continue
+            r, g, b = background_for(weight, max_abs)
+            parts.append(f"<span class=\"w\" style=\"background:rgb({r},{g},{b})\" "
+                         f"title=\"{weight:+.4g}\">{html.escape(text)}</span> ")
+        parts += ["</p>", "</article>"]
+    parts += ["</body>", "</html>"]
+    document = "\n".join(parts) + "\n"
+    if out_html.is_file() and out_html.read_text(encoding="utf-8") == document:
+        return out_html
+    out_html.parent.mkdir(parents=True, exist_ok=True)
+    with atomic_write(out_html, mode="w", encoding="utf-8") as fh:
+        fh.write(document)
+    return out_html

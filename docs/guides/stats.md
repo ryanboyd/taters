@@ -827,8 +827,12 @@ What gets drawn:
   word-vector model, every word it knows by the direction it would push
   the prediction — all in a `words/` folder inside the set. The highest
   and lowest scored texts are drawn word by word in a `texts/` folder
-  beside it, each word shaded by its share. Each caption names the table
-  it was drawn from.
+  beside it, each word shaded by its share, with the text's own line
+  breaks kept. The same texts are also written as one HTML page per
+  outcome in that folder (`<outcome>__prediction.html`): the same words
+  and shades, selectable and searchable, with nothing fetched from
+  anywhere, so it prints to PDF from any browser. The report links it.
+  Each caption names the table it was drawn from.
 * **Most frequent terms** — the corpus as a whole, from the frequency list
   (`features/figures/wordclouds/ngram_frequencies/`), and, when the
   statistics have a group column and the document-term matrix is one of the

@@ -112,6 +112,11 @@ class CloudSpec:
     stat: str = ""
     kind: str = "cloud"
     inputs: List[Path] = field(default_factory=list)
+    #: for a shaded text: the page it belongs to (one per outcome, under
+    #: its folder), the page's heading, and where on it the text goes
+    page: str = ""
+    page_title: str = ""
+    page_order: Tuple = ()
 
     @property
     def relative_png(self) -> str:
@@ -654,6 +659,11 @@ def clouds_for_attributed_texts(rows: Sequence[Row], *, analysis: str, table: st
             kind="text", name=f"{slug(outcome)}__{slug(target)}__{slug(str(text_id))}"
                               + (f"__{slug(table_)}" if several else ""),
             title=shown, legend=legend,
+            page=f"{slug(outcome)}__{slug(target)}",
+            page_title=f"{heading}: {outcome} — the highest and lowest {what}, word by word "
+                       f"({_set_label(fs)}){where}",
+            # the highest first, from the top, then the lowest from the bottom
+            page_order=(0 if (rank or 0) > 0 else 1, abs(rank or 0), str(text_id), table_),
             words=words, stat=f"{outcome}: share"))
     return out
 
@@ -1115,6 +1125,12 @@ def _section_md(specs: Sequence[CloudSpec], skipped: str = "") -> str:
             if texts:
                 lines += ["The texts scored highest and lowest, word by word -- each "
                           "word shaded by its share in the prediction:", ""]
+                pages = list(dict.fromkeys((s.page, _page_path(s)) for s in texts if s.page))
+                if pages:
+                    lines += ["All of them on one page per outcome, the text selectable "
+                              "and printable: "
+                              + ", ".join(f"[{page}]({path})" for page, path in pages) + ".",
+                              ""]
                 for s in texts:
                     lines += _picture(s)
             components = [s for s in group if s.words and s.kind == "component"]
@@ -1412,7 +1428,8 @@ def stats_wordclouds(
     drawn, reused = _draw_all(specs, root, max_words=max_words,
                               overwrite_existing=overwrite_existing,
                               verbose=verbose, on_progress=on_progress)
-    swept = _sweep(root, specs)
+    pages = _write_text_pages(specs, root)
+    swept = _sweep(root, specs, pages)
     if specs:
         _write_section_if_changed(stats_dir, _section_md(specs))
     if verbose:
@@ -1423,7 +1440,29 @@ def stats_wordclouds(
     return root
 
 
-def _sweep(root: Path, specs: Sequence[CloudSpec]) -> int:
+def _write_text_pages(specs: Sequence[CloudSpec], root: Path) -> List[Path]:
+    """One HTML page per outcome with every shaded text of it, beside the
+    pictures: the same words and shades, selectable and printable."""
+    from .highlights import render_highlighted_page
+
+    groups: Dict[Tuple[str, str], List[CloudSpec]] = {}
+    for s in specs:
+        if s.kind == "text" and s.words and s.page:
+            groups.setdefault((s.folder, s.page), []).append(s)
+    out: List[Path] = []
+    for (folder, page), members in groups.items():
+        members.sort(key=lambda s: s.page_order)
+        out.append(render_highlighted_page(
+            [(s.title, s.words) for s in members], root / folder / f"{page}.html",
+            heading=members[0].page_title, legend=members[0].legend))
+    return out
+
+
+def _page_path(s: CloudSpec) -> str:
+    return (FIGURES_DIR / s.folder / f"{s.page}.html").as_posix()
+
+
+def _sweep(root: Path, specs: Sequence[CloudSpec], pages: Sequence[Path] = ()) -> int:
     """
     Remove the pictures under ``root`` that no current table draws.
 
@@ -1435,10 +1474,11 @@ def _sweep(root: Path, specs: Sequence[CloudSpec]) -> int:
     current ones; now the folder does too.
     """
     keep = {(root / s.folder / f"{s.name}.png").resolve() for s in specs if s.words}
+    keep |= {Path(p).resolve() for p in pages}
     swept = 0
     if not root.is_dir():
         return 0
-    for png in sorted(root.rglob("*.png")):
+    for png in sorted(list(root.rglob("*.png")) + list(root.rglob("*.html"))):
         if png.resolve() not in keep:
             try:
                 png.unlink()

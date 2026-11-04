@@ -63,3 +63,41 @@ def test_without_pillow_the_reason_is_a_sentence(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", no_pil)
     with pytest.raises(ImportError):
         hl.render_highlighted_text([("a", 1.0)], "x.png", title="x")
+
+
+def test_the_texts_own_line_breaks_are_kept(tmp_path):
+    """A newline unit starts a new line and a blank line stays blank, so a
+    text written in paragraphs is drawn in paragraphs."""
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    flat = [("one", 0.1), ("two", 0.2), ("three", 0.3), ("four", 0.1)]
+    broken = [("one", 0.1), ("two", 0.2), ("\n", 0.0), ("three", 0.3), ("four", 0.1)]
+    spaced = [("one", 0.1), ("two", 0.2), ("\n\n", 0.0), ("three", 0.3), ("four", 0.1)]
+    heights = []
+    for name, words in (("flat", flat), ("broken", broken), ("spaced", spaced)):
+        out = hl.render_highlighted_text(words, tmp_path / f"{name}.png", title="t", width=600)
+        with Image.open(out) as img:
+            heights.append(img.size[1])
+    assert heights[0] < heights[1] < heights[2]
+
+
+def test_the_page_holds_every_text_selectable_with_its_breaks_and_fetches_nothing(tmp_path):
+    out = hl.render_highlighted_page(
+        [("the highest predicted score (t2), 4.5", [("<b>", 0.5), ("fine", -0.2), ("\n\n", 0.0),
+                                                     ("day", 0.1)]),
+         ("the lowest predicted score (t1), 1.2", [("tired", -0.6)])],
+        tmp_path / "score__prediction.html", heading="Ridge: score — texts", legend="blue up")
+    text = out.read_text(encoding="utf-8")
+    assert text.startswith("<!doctype html>") and '<meta charset="utf-8">' in text
+    assert "&lt;b&gt;" in text and "<b>" not in text.split("<body>")[1], "escaped"
+    assert "<br><br>" in text, "a blank line stays blank"
+    assert text.count("<article>") == 2 and "tired" in text and "blue up" in text
+    assert "http" not in text and "<script" not in text and "<link" not in text
+    before = out.stat().st_mtime_ns
+    hl.render_highlighted_page(
+        [("the highest predicted score (t2), 4.5", [("<b>", 0.5), ("fine", -0.2), ("\n\n", 0.0),
+                                                     ("day", 0.1)]),
+         ("the lowest predicted score (t1), 1.2", [("tired", -0.6)])],
+        out, heading="Ridge: score — texts", legend="blue up")
+    assert out.stat().st_mtime_ns == before, "unchanged content is left alone"

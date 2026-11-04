@@ -154,6 +154,24 @@ def test_word_pieces_merge_into_the_word_a_person_reads():
         == [attr.SPECIALS, "ag", "reed", ".", attr.SPECIALS], "the guess, without the tokenizer"
 
 
+def test_pieces_are_decoded_the_tokenizers_way():
+    """Byte-level BPE spells a newline `Ċ` and é as `Ã©`; the shaded texts
+    showed those (a real run). Decoded through the tokenizer, a newline is
+    a unit of its own that no word absorbs, and café is café."""
+    from transformers import AutoTokenizer
+
+    pytest.importorskip("transformers")
+    try:
+        tok = AutoTokenizer.from_pretrained("roberta-base")
+    except Exception as e:  # pragma: no cover - offline
+        pytest.skip(f"roberta-base tokenizer not available: {e}")
+    pieces = tok.tokenize("Agreed.\nNext line\tcafé")
+    merged = attr.merge_pieces(["<s>", *pieces, "</s>"], specials=["<s>", "</s>"],
+                               scheme="bpe", decode=tok.convert_tokens_to_string)
+    assert [w for w, _p in merged] == [attr.SPECIALS, "agreed", ".", "\n", "next", "line",
+                                       "\t", "café", attr.SPECIALS]
+
+
 def test_the_piece_scheme_is_read_from_the_tokenizer():
     class Bpe:
         def get_vocab(self):

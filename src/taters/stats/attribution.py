@@ -194,8 +194,19 @@ def piece_scheme(tokenizer) -> str:
     return "wordpiece"
 
 
+def _bare(piece: str) -> str:
+    """A piece's text without its marker, for a merger given no decoder."""
+    if piece.startswith("##"):
+        return piece[2:]
+    if piece.startswith("Ġ") or piece.startswith("▁"):
+        return piece[1:]
+    return piece
+
+
 def merge_pieces(tokens: Sequence[str], specials: Sequence[str] = (),
-                 scheme: Optional[str] = None) -> List[Tuple[str, List[int]]]:
+                 scheme: Optional[str] = None,
+                 decode: Optional[Callable[[Sequence[str]], str]] = None
+                 ) -> List[Tuple[str, List[int]]]:
     """
     Group word pieces into the words a person reads: ``[(word, positions)]``.
 
@@ -205,9 +216,17 @@ def merge_pieces(tokens: Sequence[str], specials: Sequence[str] = (),
     :data:`SPECIALS`. The positions are what the shares are summed over.
     ``scheme`` is the tokenizer's (:func:`piece_scheme`); left out, it is
     guessed from the tokens, which a one-word sentence can fool.
+
+    ``decode`` turns pieces into text the tokenizer's own way. Byte-level
+    BPE spells a newline ``Ċ``, a tab ``ĉ`` and é as ``Ã©``, and the shaded
+    texts showed exactly that (a real run); decoded, a newline is a
+    newline -- a unit of its own, whitespace, never merged into a word --
+    and café is café. Without a decoder the marker is stripped and the
+    bytes are left as they are.
     """
     special = set(specials)
-    out: List[Tuple[str, List[int]]] = []
+    read = decode or (lambda pieces: "".join(_bare(p) for p in pieces))
+    out: List[Tuple[List[str], List[int]]] = []      # pieces, positions
     if scheme is None:
         scheme = ("bpe" if any(t.startswith("Ġ") or t.startswith("▁") for t in tokens)
                   else "wordpiece")
@@ -216,28 +235,46 @@ def merge_pieces(tokens: Sequence[str], specials: Sequence[str] = (),
     def wordy(text: str) -> bool:
         return any(ch.isalnum() for ch in text)
 
+    def previous_text() -> str:
+        return read(out[-1][0]) if out and out[-1][0] != [SPECIALS] else ""
+
     for i, tok in enumerate(tokens):
         if tok in special:
-            out.append((SPECIALS, [i]))
+            out.append(([SPECIALS], [i]))
             continue
-        if tok.startswith("##") and out and out[-1][0] != SPECIALS:
-            out[-1] = (out[-1][0] + tok[2:], out[-1][1] + [i])
+        text = read([tok])
+        if text.strip() == "":
+            # whitespace the text contains (a newline, a tab): its own unit
+            out.append(([tok], [i]))
+            continue
+        if tok.startswith("##") and previous_text():
+            out[-1] = (out[-1][0] + [tok], out[-1][1] + [i])
             continue
         if bpe:
+            before = previous_text()
             if tok.startswith("Ġ") or tok.startswith("▁"):
-                out.append((tok[1:], [i]))
-            elif (out and out[-1][0] != SPECIALS and not tok.startswith("<")
+                out.append(([tok], [i]))
+            elif (before and before.strip() != "" and not tok.startswith("<")
                   # a piece with no leading space continues the word -- unless
                   # it is punctuation, which byte-level BPE also writes without
                   # the space and which is not part of the word before it
                   # ("summer." and "fun," were turning up as words)
-                  and wordy(tok) and wordy(out[-1][0])):
-                out[-1] = (out[-1][0] + tok, out[-1][1] + [i])
+                  and wordy(text) and wordy(before)):
+                out[-1] = (out[-1][0] + [tok], out[-1][1] + [i])
             else:
-                out.append((tok, [i]))
+                out.append(([tok], [i]))
             continue
-        out.append((tok, [i]))
-    return [(w.lower(), p) for w, p in out if w]
+        out.append(([tok], [i]))
+    merged: List[Tuple[str, List[int]]] = []
+    for pieces, positions in out:
+        if pieces == [SPECIALS]:
+            merged.append((SPECIALS, positions))
+            continue
+        text = read(pieces)
+        word = text if text.strip() == "" else text.strip().lower()
+        if word:
+            merged.append((word, positions))
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -387,7 +424,9 @@ def _raw_columns(origin: Origin, pattern: "re.Pattern[str]") -> List[str]:
 def _units_from_states(sentences: List[List[Tuple[List[str], Any]]], *,
                        sentence_norms: List[float], token_counts: List[int],
                        weighting: str, normalize: bool, specials: Sequence[str],
-                       scheme: Optional[str] = None) -> List[Unit]:
+                       scheme: Optional[str] = None,
+                       decode: Optional[Callable[[Sequence[str]], str]] = None
+                       ) -> List[Unit]:
     """
     The encoders' units: per sentence, its windows of ``(tokens, states
     [positions, d])``, folded the way the extraction pooled them -- mean
@@ -425,7 +464,7 @@ def _units_from_states(sentences: List[List[Tuple[List[str], Any]]], *,
         for w_i, (tokens, arr) in enumerate(wins):
             weight = u[s_i] / (len(wins) * arr.shape[0]) / sentence_norms[s_i] * scale
             V = arr.astype(np.float64) * weight
-            for word, positions in merge_pieces(tokens, specials, scheme):
+            for word, positions in merge_pieces(tokens, specials, scheme, decode):
                 units.append(Unit(
                     position=positions[0], token=" ".join(tokens[p] for p in positions),
                     word=word, vector=V[positions].sum(axis=0),
@@ -460,6 +499,7 @@ class _TransformerBackend(Backend):
             self.model_label, device=device, verbose=verbose)
         self.specials = list(self.tokenizer.all_special_tokens)
         self.scheme = piece_scheme(self.tokenizer)
+        self.decode = self.tokenizer.convert_tokens_to_string
 
     def describe(self) -> str:
         return (f"{self.model_label}: mean over the tokens of layer {self.layers}, sentences "
@@ -491,7 +531,8 @@ class _TransformerBackend(Backend):
                 at += 1
             out.append(_units_from_states(
                 windows, sentence_norms=norms, token_counts=tc, weighting=self.weighting,
-                normalize=self.normalize, specials=self.specials, scheme=self.scheme))
+                normalize=self.normalize, specials=self.specials, scheme=self.scheme,
+                decode=self.decode))
         return out
 
 
@@ -528,6 +569,7 @@ class _SentenceTransformerBackend(Backend):
             return
         self.specials = list(self.model.tokenizer.all_special_tokens)
         self.scheme = piece_scheme(self.model.tokenizer)
+        self.decode = self.model.tokenizer.convert_tokens_to_string
 
     def describe(self) -> str:
         return (f"{self.model_label}: {self.modules}, sentences weighted equally"
@@ -568,7 +610,8 @@ class _SentenceTransformerBackend(Backend):
                 at += 1
             out.append(_units_from_states(
                 windows, sentence_norms=norms, token_counts=tc, weighting="equal",
-                normalize=self.normalize, specials=self.specials, scheme=self.scheme))
+                normalize=self.normalize, specials=self.specials, scheme=self.scheme,
+                decode=self.decode))
         return out
 
 
