@@ -793,9 +793,13 @@ def attribute(texts: Any, *, backend: Backend,
             yield str(row.get("text_id", "") or ""), str(row.get("text", "") or "")
 
     def handle(batch: List[Tuple[str, str]]) -> None:
+        # the batch is in flight from the moment the model reads it, not
+        # from when it comes back: the counter sat still through every
+        # encoder call and then jumped by a batch (the owner noticed)
+        for text_id, _text in batch:
+            reporter.start(text_id)
         read = backend.read([text for _tid, text in batch])
         for (text_id, _text), units in zip(batch, read):
-            reporter.start(text_id)
             if not units:
                 out.skipped += 1
                 reporter.finish(text_id)
