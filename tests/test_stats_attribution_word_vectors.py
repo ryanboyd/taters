@@ -400,3 +400,30 @@ def test_models_older_than_the_analysis_table_are_leftovers(tmp_path):
     os.utime(stale, (old, old))
     sets = {t.feature_set for t in ex.targets_in(stats)}
     assert sets == {"word_vectors"}
+
+
+def test_a_text_is_written_out_only_for_the_outcomes_it_was_chosen_for(tmp_path):
+    """Two outcomes: a text among the highest for one was written out for
+    the other too, with no rank, and drawn for it (forty unranked texts
+    in a real run). Every row now has a rank."""
+    src = _corpus(tmp_path / "study.csv", n=40)
+    rows = list(csv.DictReader(src.open(encoding="utf-8")))
+    with src.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(["text_id", "text", "score", "other", "side"])
+        for r in rows:
+            w.writerow([r["text_id"], r["text"], r["score"], len(r["text"]) % 7, r["side"]])
+    model = _model(tmp_path / "m")
+    out = apply_word_vectors(model_json=model, csv_path=src, text_cols=["text"],
+                             id_cols=["text_id"], out_features_csv=tmp_path / "f" / "wv.csv",
+                             rounding=10, verbose=False)
+    stats = tmp_path / "stats_results"
+    assemble_analysis_table(feature_csvs=[str(out)], metadata_csv=src, key_cols=["text_id"],
+                            metadata_cols=["score", "other"], out_dir=stats, verbose=False)
+    fit_ridge_csv(table_csv=stats / "analysis_table.csv", outcome_cols=["score", "other"],
+                  feature_sets="per_table", out_dir=stats, rounding=10, verbose=False)
+    _explain(stats, src, top_texts=2)
+    texts = _read(stats / "ridge_attributed_texts.csv")
+    assert texts and all(r["rank"] != "" for r in texts)
+    per_outcome = {o: {r["text_id"] for r in texts if r["outcome"] == o} for o in ("score", "other")}
+    assert all(len(ids) == 4 for ids in per_outcome.values()), per_outcome

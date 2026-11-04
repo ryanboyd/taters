@@ -746,13 +746,13 @@ def _attribute_all(stats_dir: Path, chosen: Sequence[Target], *, sources: Dict[s
             ranked = [(i + 1, tid) for i, (tid, _v) in enumerate(reversed(ordered[-k:]))]
             ranked += [(-(i + 1), tid) for i, (tid, _v) in enumerate(ordered[:k])]
             chosen_ids[label] = ranked
-        all_ids = {tid for ranked in chosen_ids.values() for _r, tid in ranked}
+        per_label = {label: [tid for _r, tid in ranked] for label, ranked in chosen_ids.items()}
         announce(on_progress, device_note(
             f"re-reading every text through {backend.model_label} to attribute the predictions",
             backend.device_name, backend.reason))
         result = attr.attribute(
             texts, backend=backend, weights=weights, predicted=predicted,
-            chosen_ids=sorted(all_ids), extra=extra, encoding=encoding, on_progress=on_progress)
+            chosen_ids=per_label, extra=extra, encoding=encoding, on_progress=on_progress)
         if not result.exact:
             status[(analysis, fs, subset)] = {"status": f"not attributed: {result.why}"}
             continue

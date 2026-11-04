@@ -640,3 +640,57 @@ def test_a_table_older_than_the_analysis_table_is_not_drawn(tmp_path):
     os.utime(stale, None)
     folder = wc.stats_wordclouds(stats, verbose=False)
     assert any("correlations" in p.as_posix() for p in folder.rglob("*.png"))
+    # and a picture no current table draws -- last run's shaded text of a
+    # text that is no longer among the highest -- is swept from the folder
+    old_png = folder / "ridge-regression" / "all" / "texts" / "score__prediction__t9.png"
+    old_png.parent.mkdir(parents=True)
+    old_png.write_bytes(b"not a picture")
+    wc.stats_wordclouds(stats, verbose=False)
+    assert not old_png.exists()
+    assert any("correlations" in p.as_posix() for p in folder.rglob("*.png"))
+
+
+def test_the_features_row_makes_no_picture_of_its_own():
+    """A set over word vectors and a readable table writes each text's
+    words under the word-vectors table and the readable table's term in a
+    `[features]` row with no table. Grouped by table, that row was drawn
+    as a second picture reading "[features]" (a real run)."""
+    from taters.stats.attribution import FEATURES
+
+    base = {"subset": "", "feature_set": "all", "outcome": "o", "target": "prediction",
+            "text_id": "t1", "rank": "1", "prediction": "2.0", "recomputed": "2.0",
+            "sentence": "", "window": ""}
+    rows = [{**base, "table": "word_vectors", "position": "1", "token": "cat", "word": "cat",
+             "contribution": "0.5"},
+            {**base, "table": "word_vectors", "position": "2", "token": "dog", "word": "dog",
+             "contribution": "-0.1"},
+            {**base, "table": "", "position": "3", "token": FEATURES, "word": FEATURES,
+             "contribution": "0.3"}]
+    specs = wc.clouds_for_attributed_texts(rows, analysis="ridge")
+    assert len(specs) == 1
+    assert specs[0].words == [("cat", 0.5), ("dog", -0.1)]
+    assert specs[0].name == "o__prediction__t1", "one table: no table suffix"
+
+
+def test_a_shaded_text_says_which_text_it_is_in_words():
+    """"(2 lowest)" and "read through word_vectors (all)" in a title meant
+    nothing to the owner. The title says "the 2nd lowest predicted score",
+    the set is "all feature tables", and the table is in the legend."""
+    base = {"subset": "", "feature_set": "all", "outcome": "score", "target": "prediction",
+            "recomputed": "2.0", "sentence": "", "window": "", "token": "cat", "word": "cat",
+            "contribution": "0.5", "position": "1"}
+    rows = [{**base, "text_id": "t1", "rank": "-2", "prediction": "1.25", "table": "word_vectors"},
+            {**base, "text_id": "t2", "rank": "1", "prediction": "4.5", "table": "word_vectors"},
+            {**base, "text_id": "t2", "rank": "1", "prediction": "4.5", "table": "embeds"}]
+    specs = {s.name: s for s in wc.clouds_for_attributed_texts(rows, analysis="ridge", table="t")}
+    low = specs["score__prediction__t1__word_vectors"]
+    assert low.title == "Ridge regression: score — the 2nd lowest predicted score (t1), 1.250"
+    high = specs["score__prediction__t2__embeds"]
+    assert high.title == "Ridge regression: score — the highest predicted score (t2), 4.500"
+    assert "read through" not in high.title and "(all)" not in high.title
+    assert "embeds table reads" in high.legend and "all feature tables" in high.legend
+    # and the other clouds name the set the same way
+    coef = [{"feature_set": "all", "model": "controls+language", "controls": "", "predictor": "x",
+             "score": "0.3"}]
+    (pos, _neg) = wc.clouds_for_ridge(coef, _allow_all)
+    assert "(all feature tables)" in pos.title and "(all)" not in pos.title

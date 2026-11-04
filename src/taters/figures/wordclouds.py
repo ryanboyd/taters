@@ -258,6 +258,19 @@ def _signed(words: Sequence[Word]) -> Tuple[List[Word], List[Word]]:
     return pos, neg
 
 
+def _set_label(fs: str) -> str:
+    """A feature set as a caption names it. The fitter calls the set made
+    of every table `all`, which in a title read as "(all)" and meant
+    nothing to a reader (a real report)."""
+    return "all feature tables" if fs == "all" else fs
+
+
+def _ordinal(n: int) -> str:
+    n = int(n)
+    suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
 def _pair(analysis: str, folder: str, fs: str, base: str, pos: List[Word],
           neg: List[Word], *, titles: Tuple[str, str], legends: Tuple[str, str],
           notes: Tuple[str, str], stat: str, kind: str = "cloud",
@@ -305,15 +318,15 @@ def clouds_for_ridge(rows: Sequence[Row], allowed: Callable[[str, str], bool]
             out += _pair(
                 heading, folder, fs, f"{slug(outcome)}{_tag(split, sv)}", pos, neg,
                 titles=(f"Ridge: {outcome} — features predicting higher scores "
-                        f"({fs}){where}",
+                        f"({_set_label(fs)}){where}",
                         f"Ridge: {outcome} — features predicting lower scores "
-                        f"({fs}){where}"),
+                        f"({_set_label(fs)}){where}"),
                 legends=(f"Bigger and darker = larger standardized coefficient. "
                          f"Blue: predicts a higher {outcome}.",
                          f"Bigger and darker = larger standardized coefficient. "
                          f"Red: predicts a lower {outcome}."),
-                notes=(f"no feature had a positive coefficient for {outcome} ({fs}).",
-                       f"no feature had a negative coefficient for {outcome} ({fs})."),
+                notes=(f"no feature had a positive coefficient for {outcome} ({_set_label(fs)}).",
+                       f"no feature had a negative coefficient for {outcome} ({_set_label(fs)})."),
                 stat=f"{outcome}: β")
     return out
 
@@ -341,15 +354,15 @@ def clouds_for_classifier(rows: Sequence[Row], allowed: Callable[[str, str], boo
             heading, folder, fs,
             f"{slug(outcome)}__{slug(klass)}{_tag(split, sv)}", pos, neg,
             titles=(f"Classifier: {outcome} = {klass} — features pushing toward "
-                    f"this class ({fs}){where}",
+                    f"this class ({_set_label(fs)}){where}",
                     f"Classifier: {outcome} = {klass} — features pushing away "
-                    f"from this class ({fs}){where}"),
+                    f"from this class ({_set_label(fs)}){where}"),
             legends=(f"Bigger and darker = larger standardized coefficient. "
                      f"Blue: pushes toward {klass}.",
                      f"Bigger and darker = larger standardized coefficient. "
                      f"Red: pushes away from {klass}."),
-            notes=(f"no feature pushed toward {outcome} = {klass} ({fs}).",
-                   f"no feature pushed away from {outcome} = {klass} ({fs})."),
+            notes=(f"no feature pushed toward {outcome} = {klass} ({_set_label(fs)}).",
+                   f"no feature pushed away from {outcome} = {klass} ({_set_label(fs)})."),
             stat=f"{outcome} = {klass}: coefficient")
     return out
 
@@ -391,14 +404,14 @@ def clouds_for_correlations(rows: Sequence[Row], *, max_p: float,
             out += _pair(
                 heading, folder, fs, f"{slug(outcome)}{_tag(split, sv)}", pos, neg,
                 titles=(f"Correlations: {outcome} — features correlated "
-                        f"positively ({fs}){where}",
+                        f"positively ({_set_label(fs)}){where}",
                         f"Correlations: {outcome} — features correlated "
-                        f"negatively ({fs}){where}"),
+                        f"negatively ({_set_label(fs)}){where}"),
                 legends=(legend, legend),
                 notes=(f"no feature was positively correlated with {outcome} at "
-                       f"p < {max_p:g}{adj} ({fs}).",
+                       f"p < {max_p:g}{adj} ({_set_label(fs)}).",
                        f"no feature was negatively correlated with {outcome} at "
-                       f"p < {max_p:g}{adj} ({fs})."),
+                       f"p < {max_p:g}{adj} ({_set_label(fs)})."),
                 stat=f"{outcome}: r")
     return out
 
@@ -433,14 +446,14 @@ def clouds_for_group_differences(rows: Sequence[Row], *, max_p: float
                 analysis=heading, folder=f"{folder}/{slug(fs)}", set_name=fs,
                 name=f"{base}__higher_in_{slug(higher)}",
                 title=f"Group differences: {g1} vs {g2} — higher in {higher} "
-                      f"({fs}){where}",
+                      f"({_set_label(fs)}){where}",
                 legend=f"Bigger and darker = larger Cohen's d; only pairs "
                        f"with {shown_p} < {max_p:g} are shown. "
                        f"{color}: higher in {higher}.",
                 words=chosen,
                 note="" if chosen else
                 f"no feature was higher in {higher} than in {other} at "
-                f"{shown_p} < {max_p:g} ({fs}).",
+                f"{shown_p} < {max_p:g} ({_set_label(fs)}).",
                 stat=f"{g1} vs {g2}: d"))
     return out
 
@@ -489,11 +502,11 @@ def clouds_for_word_correlates(rows: Sequence[Row], *, analysis: str, max_p: flo
                   f"frequency and {against}; only adjusted p < {max_p:g}.{source}")
         out += _pair(
             heading, folder, fs, f"{slug(outcome)}__{slug(target)}{tag}", pos, neg,
-            titles=(f"{heading}: {outcome} — words going with {what_up} ({fs}){where}",
-                    f"{heading}: {outcome} — words going with {what_down} ({fs}){where}"),
+            titles=(f"{heading}: {outcome} — words going with {what_up} ({_set_label(fs)}){where}",
+                    f"{heading}: {outcome} — words going with {what_down} ({_set_label(fs)}){where}"),
             legends=(legend, legend),
-            notes=(f"no word went with {what_up} for {outcome} at adjusted p < {max_p:g} ({fs}).",
-                   f"no word went with {what_down} for {outcome} at adjusted p < {max_p:g} ({fs}).",),
+            notes=(f"no word went with {what_up} for {outcome} at adjusted p < {max_p:g} ({_set_label(fs)}).",
+                   f"no word went with {what_down} for {outcome} at adjusted p < {max_p:g} ({_set_label(fs)}).",),
             stat=f"{outcome} ({target}): r", kind=kind, subfolder="words")
     return out
 
@@ -531,11 +544,11 @@ def clouds_for_attributions(rows: Sequence[Row], *, analysis: str, size_by: str 
                   f"the word's tokens in the prediction.{source}")
         out += _pair(
             heading, folder, fs, f"{slug(outcome)}__attribution{tag}", pos, neg,
-            titles=(f"{heading}: {outcome} — words that push {what} up ({fs}){where}",
-                    f"{heading}: {outcome} — words that push {what} down ({fs}){where}"),
+            titles=(f"{heading}: {outcome} — words that push {what} up ({_set_label(fs)}){where}",
+                    f"{heading}: {outcome} — words that push {what} down ({_set_label(fs)}){where}"),
             legends=(legend, legend),
-            notes=(f"no word pushed {what} up often enough to count ({fs}).",
-                   f"no word pushed {what} down often enough to count ({fs})."),
+            notes=(f"no word pushed {what} up often enough to count ({_set_label(fs)}).",
+                   f"no word pushed {what} down often enough to count ({_set_label(fs)})."),
             stat=f"{outcome}: share", kind="attribution", subfolder="words")
     return out
 
@@ -568,11 +581,11 @@ def clouds_for_directions(rows: Sequence[Row], *, analysis: str, top_words: int 
                   f"over every word the model knows.{source}")
         out += _pair(
             heading, folder, fs, f"{slug(outcome)}__direction{tag}", pos, neg,
-            titles=(f"{heading}: {outcome} — words the model reads as higher {what} ({fs}){where}",
-                    f"{heading}: {outcome} — words the model reads as lower {what} ({fs}){where}"),
+            titles=(f"{heading}: {outcome} — words the model reads as higher {what} ({_set_label(fs)}){where}",
+                    f"{heading}: {outcome} — words the model reads as lower {what} ({_set_label(fs)}){where}"),
             legends=(legend, legend),
-            notes=(f"no word in the vocabulary pushes {what} up ({fs}).",
-                   f"no word in the vocabulary pushes {what} down ({fs})."),
+            notes=(f"no word in the vocabulary pushes {what} up ({_set_label(fs)}).",
+                   f"no word in the vocabulary pushes {what} down ({_set_label(fs)})."),
             stat=f"{outcome}: direction", kind="direction", subfolder="words")
     return out
 
@@ -587,11 +600,15 @@ def clouds_for_attributed_texts(rows: Sequence[Row], *, analysis: str, table: st
     """
     if not rows:
         return []
-    from ..stats.attribution import SPECIALS
+    from ..stats.attribution import FEATURES, SPECIALS
 
     heading, folder = ANALYSES.get(
         analysis, (analysis.replace("_", " ").capitalize(), slug(analysis)))
     out: List[CloudSpec] = []
+    # the [features] row is the term of the set's columns no token carries;
+    # it has no table and no words, and grouped by table it made a picture
+    # of its own reading "[features]" (a real run). it stays in the table
+    rows = [r for r in rows if r.get("word") not in (SPECIALS, FEATURES)]
     # a set over several attributable tables reads each text once per
     # table (two tokenizations, two models), so the picture is per table
     keyed = _grouped(rows, "subset", "feature_set", "table", "outcome", "target", "text_id")
@@ -603,32 +620,40 @@ def clouds_for_attributed_texts(rows: Sequence[Row], *, analysis: str, table: st
         ordered = sorted(group, key=lambda r: (int(_num(r.get("sentence")) or 0),
                                                int(_num(r.get("window")) or 0),
                                                int(_num(r.get("position")) or 0)))
-        words = [(r.get("word", ""), _num(r.get("contribution")) or 0.0)
-                 for r in ordered if r.get("word") != SPECIALS]
+        words = [(r.get("word", ""), _num(r.get("contribution")) or 0.0) for r in ordered]
         if not words:
             continue
         rank = _num(group[0].get("rank"))
         pred = group[0].get("prediction", "")
         if _num(pred) is not None:
             pred = f"{_num(pred):.3f}"
-        place = ""
-        if rank:
-            place = (f"{int(rank)} highest" if rank > 0 else f"{int(-rank)} lowest")
         where = f" [{sv}]" if sv else ""
-        what = (f"{outcome}" if target == "prediction"
-                else f"the log-odds of {target[6:]}" if target.startswith("logit_")
+        what = (f"predicted {outcome}" if target == "prediction"
+                else f"log-odds of {target[6:]}" if target.startswith("logit_")
                 else target)
+        # "the 2nd lowest text" rather than "(2 lowest)", which read as nothing
+        if rank:
+            k = int(abs(rank))
+            end = "highest" if rank > 0 else "lowest"
+            place = (f"the {end} {what}" if k == 1 else f"the {_ordinal(k)} {end} {what}")
+        else:
+            place = f"text {text_id}"
+        shown = (f"{heading}: {outcome} — {place}"
+                 + (f" ({text_id})" if rank else "")
+                 + (f", {what} {pred}" if pred not in ("", None) and not rank
+                    else f", {pred}" if pred not in ("", None) else "")
+                 + where)
+        legend = ("Each word shaded by its share in the prediction: blue pushes the score "
+                  "up, red down, darker is a larger share."
+                  + (f" The words are those the {table_} table reads;" if several
+                     else " The")
+                  + f" model fitted on {_set_label(fs)}."
+                  + (f" Drawn from `{table}`." if table else ""))
         out.append(CloudSpec(
             analysis=heading, folder=f"{folder}/{slug(fs)}/texts", set_name=fs,
             kind="text", name=f"{slug(outcome)}__{slug(target)}__{slug(str(text_id))}"
                               + (f"__{slug(table_)}" if several else ""),
-            title=f"{heading}: {what} — text {text_id}"
-                  + (f", predicted {pred}" if pred not in ("", None) else "")
-                  + (f" ({place})" if place else "")
-                  + (f", read through {table_}" if several else "") + f" ({fs}){where}",
-            legend=("Each word shaded by its share in the prediction: blue pushes "
-                    "the score up, red down, darker is a larger share."
-                    + (f" Drawn from `{table}`." if table else "")),
+            title=shown, legend=legend,
             words=words, stat=f"{outcome}: share"))
     return out
 
@@ -862,7 +887,7 @@ def clouds_for_frequencies_by_group(table_rows: Sequence[Row],
             out.append(CloudSpec(
                 analysis=heading, folder=f"{folder}/{slug(fs)}", set_name=fs,
                 name=f"{slug(group_col)}-{slug(level)}",
-                title=f"Most frequent terms — {group_col} = {level} ({fs})",
+                title=f"Most frequent terms — {group_col} = {level} ({_set_label(fs)})",
                 legend=f"Bigger and darker = used more in the texts of "
                        f"{group_col} = {level}.",
                 words=words))
@@ -1387,13 +1412,40 @@ def stats_wordclouds(
     drawn, reused = _draw_all(specs, root, max_words=max_words,
                               overwrite_existing=overwrite_existing,
                               verbose=verbose, on_progress=on_progress)
+    swept = _sweep(root, specs)
     if specs:
         _write_section_if_changed(stats_dir, _section_md(specs))
     if verbose:
         print(f"[figures] {drawn} word cloud(s) drawn, {reused} already current"
-              f" -> {root}" if specs else
+              + (f", {swept} from an earlier run removed" if swept else "")
+              + f" -> {root}" if specs else
               "[figures] no statistics tables to draw word clouds from.")
     return root
+
+
+def _sweep(root: Path, specs: Sequence[CloudSpec]) -> int:
+    """
+    Remove the pictures under ``root`` that no current table draws.
+
+    The folder is this step's own and nothing else writes to it, yet a
+    results folder is reused run after run: the shaded texts of last run's
+    highest-scored texts, or the clouds of a set this run did not fit, sat
+    beside today's pictures and were as fresh to the eye (a real folder:
+    175 shaded texts where 50 were this run's). The report lists only the
+    current ones; now the folder does too.
+    """
+    keep = {(root / s.folder / f"{s.name}.png").resolve() for s in specs if s.words}
+    swept = 0
+    if not root.is_dir():
+        return 0
+    for png in sorted(root.rglob("*.png")):
+        if png.resolve() not in keep:
+            try:
+                png.unlink()
+                swept += 1
+            except OSError:
+                continue
+    return swept
 
 
 def theme_wordclouds(

@@ -741,7 +741,7 @@ def _wordy(text: str) -> bool:
 def attribute(texts: Any, *, backend: Backend,
               weights: Dict[str, Any],            # target label -> (w_eff[d], constant)
               predicted: Dict[str, Dict[str, float]],  # target label -> text_id -> ŷ
-              chosen_ids: Sequence[str],
+              chosen_ids: Any,                     # label -> text ids, or one list for every label
               extra: Optional[Dict[str, Dict[str, float]]] = None,  # label -> text_id -> term
               texts_per_call: int = 16, encoding: str = "utf-8-sig",
               on_progress: Optional[Callable[..., None]] = None) -> Attribution:
@@ -775,7 +775,13 @@ def attribute(texts: Any, *, backend: Backend,
     constants = np.array([float(weights[label][1]) for label in labels])
     for label in labels:
         out.words[label] = {}
-    chosen = set(str(c) for c in chosen_ids)
+    # which texts are written out unit by unit, per target: a text chosen
+    # for one outcome was being written out for every outcome, and drawn
+    # for each with no rank to say why (a real run: forty unranked texts)
+    if isinstance(chosen_ids, dict):
+        chosen = {label: {str(c) for c in ids} for label, ids in chosen_ids.items()}
+    else:
+        chosen = {label: {str(c) for c in chosen_ids} for label in labels}
     extra = extra or {}
 
     texts_ref = tables.parse_ref(texts)
@@ -825,8 +831,10 @@ def attribute(texts: Any, *, backend: Backend,
                     if rec.last_doc != text_id:
                         rec.docs += 1
                         rec.last_doc = text_id
-            if text_id in chosen:
+            if any(text_id in chosen.get(label, ()) for label in labels):
                 for j, label in enumerate(labels):
+                    if text_id not in chosen.get(label, ()):
+                        continue
                     common = {"target": label, "text_id": text_id,
                               "prediction": predicted.get(label, {}).get(text_id),
                               "recomputed": float(recomputed[j])}
