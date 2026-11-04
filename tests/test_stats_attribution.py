@@ -144,6 +144,27 @@ def test_word_pieces_merge_into_the_word_a_person_reads():
                               specials=["<s>", "</s>"])
     assert [w for w, _p in punct] == [attr.SPECIALS, "fun", ",", "summer", ".", "don't",
                                       attr.SPECIALS]
+    # RoBERTa writes no space marker on a sentence's first word, so a
+    # one-word sentence shows no marker at all; the scheme comes from the
+    # tokenizer, not the sentence ("ag" and "reed" were words in a real run)
+    first = ["<s>", "Ag", "reed", ".", "</s>"]
+    assert [w for w, _p in attr.merge_pieces(first, specials=["<s>", "</s>"], scheme="bpe")] \
+        == [attr.SPECIALS, "agreed", ".", attr.SPECIALS]
+    assert [w for w, _p in attr.merge_pieces(first, specials=["<s>", "</s>"])] \
+        == [attr.SPECIALS, "ag", "reed", ".", attr.SPECIALS], "the guess, without the tokenizer"
+
+
+def test_the_piece_scheme_is_read_from_the_tokenizer():
+    class Bpe:
+        def get_vocab(self):
+            return {"<s>": 0, "Ġthe": 1, "the": 2}
+
+    class WordPiece:
+        def get_vocab(self):
+            return {"[CLS]": 0, "the": 1, "##s": 2}
+
+    assert attr.piece_scheme(Bpe()) == "bpe"
+    assert attr.piece_scheme(WordPiece()) == "wordpiece"
 
 
 @pytest.mark.parametrize("weighting,normalize,layers,pca", [

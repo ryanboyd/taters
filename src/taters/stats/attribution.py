@@ -39,7 +39,8 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tupl
 
 from ..helpers import tables
 
-__all__ = ["Origin", "set_origin", "column_index", "merge_pieces", "SPECIALS", "FEATURES",
+__all__ = ["Origin", "set_origin", "column_index", "merge_pieces", "piece_scheme", "SPECIALS",
+           "FEATURES",
            "Unit", "Backend", "Composite", "backend_for", "ATTRIBUTABLE_STEPS", "Attribution",
            "attribute"]
 
@@ -174,8 +175,27 @@ def column_index(name: str, set_name: str, columns: Sequence[str]) -> Optional[i
 # Tokens into words
 # ---------------------------------------------------------------------------
 
-def merge_pieces(tokens: Sequence[str], specials: Sequence[str] = ()
-                 ) -> List[Tuple[str, List[int]]]:
+def piece_scheme(tokenizer) -> str:
+    """
+    How a tokenizer marks word pieces, read from its vocabulary once:
+    ``bpe`` when words start with ``Ġ`` or ``▁`` (byte-level BPE,
+    SentencePiece), ``wordpiece`` when continuations start with ``##``.
+
+    Read from the vocabulary, not from a sentence's own tokens: RoBERTa
+    writes no space marker on the first word of a sentence, so a sentence
+    of one word ("Agreed.") tokenized as ``Ag reed .`` showed no marker at
+    all, was taken for WordPiece, and came out as the words "ag" and
+    "reed" (a real run, 26 texts).
+    """
+    vocab = tokenizer.get_vocab() if hasattr(tokenizer, "get_vocab") else {}
+    for piece in vocab:
+        if piece.startswith("Ġ") or piece.startswith("▁"):
+            return "bpe"
+    return "wordpiece"
+
+
+def merge_pieces(tokens: Sequence[str], specials: Sequence[str] = (),
+                 scheme: Optional[str] = None) -> List[Tuple[str, List[int]]]:
     """
     Group word pieces into the words a person reads: ``[(word, positions)]``.
 
@@ -183,10 +203,15 @@ def merge_pieces(tokens: Sequence[str], specials: Sequence[str] = ()
     ``Ġ`` (a leading space) and continues without it; SentencePiece starts
     one with ``▁``. A special token is a word of its own named
     :data:`SPECIALS`. The positions are what the shares are summed over.
+    ``scheme`` is the tokenizer's (:func:`piece_scheme`); left out, it is
+    guessed from the tokens, which a one-word sentence can fool.
     """
     special = set(specials)
     out: List[Tuple[str, List[int]]] = []
-    bpe = any(t.startswith("Ġ") or t.startswith("▁") for t in tokens)
+    if scheme is None:
+        scheme = ("bpe" if any(t.startswith("Ġ") or t.startswith("▁") for t in tokens)
+                  else "wordpiece")
+    bpe = scheme == "bpe"
 
     def wordy(text: str) -> bool:
         return any(ch.isalnum() for ch in text)
@@ -361,8 +386,8 @@ def _raw_columns(origin: Origin, pattern: "re.Pattern[str]") -> List[str]:
 
 def _units_from_states(sentences: List[List[Tuple[List[str], Any]]], *,
                        sentence_norms: List[float], token_counts: List[int],
-                       weighting: str, normalize: bool, specials: Sequence[str]
-                       ) -> List[Unit]:
+                       weighting: str, normalize: bool, specials: Sequence[str],
+                       scheme: Optional[str] = None) -> List[Unit]:
     """
     The encoders' units: per sentence, its windows of ``(tokens, states
     [positions, d])``, folded the way the extraction pooled them -- mean
@@ -400,7 +425,7 @@ def _units_from_states(sentences: List[List[Tuple[List[str], Any]]], *,
         for w_i, (tokens, arr) in enumerate(wins):
             weight = u[s_i] / (len(wins) * arr.shape[0]) / sentence_norms[s_i] * scale
             V = arr.astype(np.float64) * weight
-            for word, positions in merge_pieces(tokens, specials):
+            for word, positions in merge_pieces(tokens, specials, scheme):
                 units.append(Unit(
                     position=positions[0], token=" ".join(tokens[p] for p in positions),
                     word=word, vector=V[positions].sum(axis=0),
@@ -434,6 +459,7 @@ class _TransformerBackend(Backend):
         self.model, self.tokenizer, _res, self.device_name, self.reason = load_encoder(
             self.model_label, device=device, verbose=verbose)
         self.specials = list(self.tokenizer.all_special_tokens)
+        self.scheme = piece_scheme(self.tokenizer)
 
     def describe(self) -> str:
         return (f"{self.model_label}: mean over the tokens of layer {self.layers}, sentences "
@@ -465,7 +491,7 @@ class _TransformerBackend(Backend):
                 at += 1
             out.append(_units_from_states(
                 windows, sentence_norms=norms, token_counts=tc, weighting=self.weighting,
-                normalize=self.normalize, specials=self.specials))
+                normalize=self.normalize, specials=self.specials, scheme=self.scheme))
         return out
 
 
@@ -501,6 +527,7 @@ class _SentenceTransformerBackend(Backend):
                           "vectors is not a sum of token shares")
             return
         self.specials = list(self.model.tokenizer.all_special_tokens)
+        self.scheme = piece_scheme(self.model.tokenizer)
 
     def describe(self) -> str:
         return (f"{self.model_label}: {self.modules}, sentences weighted equally"
@@ -541,7 +568,7 @@ class _SentenceTransformerBackend(Backend):
                 at += 1
             out.append(_units_from_states(
                 windows, sentence_norms=norms, token_counts=tc, weighting="equal",
-                normalize=self.normalize, specials=self.specials))
+                normalize=self.normalize, specials=self.specials, scheme=self.scheme))
         return out
 
 
