@@ -157,6 +157,10 @@ def extract_video_embeddings(
     # flipping the default to True -- which would quietly reintroduce the one
     # dependency this whole package was arranged to avoid, on some future
     # upgrade, with no error until somebody's torch got dragged along with it.
+    # before anything downloads: see settle_links
+    from ..helpers.hub_models import settle_links
+
+    settle_links()
     processor = AutoImageProcessor.from_pretrained(model_name, use_fast=False)
     model = AutoModel.from_pretrained(model_name).to(device).eval()
 

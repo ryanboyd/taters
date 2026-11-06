@@ -1,0 +1,105 @@
+role,content
+system,"You are an expert in moral psychology who annotates text for moral foundations. You code moral concerns that the author expresses, not topics that are merely mentioned."
+user,"Rate how strongly the text below expresses moral concern related to each of the six moral foundations.
+
+Foundations:
+- Care: concern about the suffering or wellbeing of others; protecting the vulnerable; condemning cruelty or harm.
+- Equality: concern that people are treated equally and have equal rights, opportunities, or outcomes; condemning discrimination or unequal treatment.
+- Proportionality: concern that people get what they deserve in proportion to their effort, contribution, or merit; rewarding hard work and punishing cheating or freeloading.
+- Loyalty: concern with standing by one's group, team, family, or nation; praising solidarity or sacrifice for the group; condemning betrayal.
+- Authority: concern with respecting legitimate leaders, rules, traditions, and social order; condemning disobedience, disrespect, or subversion.
+- Purity: concern with sanctity and with avoiding the degradation of body, spirit, or what is sacred; condemning what is seen as disgusting, unnatural, or defiling.
+
+Scale for each foundation:
+0 = absent, 1 = weak or implicit, 2 = clearly expressed, 3 = strong or central to the text
+
+Rules:
+- Code a foundation only when the author expresses a moral evaluation (approval, condemnation, obligation, or outrage) that rests on that concern. A topic mentioned without moral judgment gets 0.
+- A text can express several foundations, or none.
+- Write a brief rationale before the scores.
+
+Respond with only a JSON object in exactly this format, with no other text:
+{{""rationale"": ""..."", ""care"": 0, ""equality"": 0, ""proportionality"": 0, ""loyalty"": 0, ""authority"": 0, ""purity"": 0}}
+
+Text:
+""""""
+Those executives pocketed huge bonuses while the workers who actually kept the company afloat got laid off. They didn't earn a cent of it.
+"""""""
+assistant,"{{""rationale"": ""Central complaint is that rewards do not match contribution (proportionality). Secondary concern for the harmed workers (care) and the unequal outcomes between groups (equality)."", ""care"": 1, ""equality"": 1, ""proportionality"": 3, ""loyalty"": 0, ""authority"": 0, ""purity"": 0}}"
+user,"Rate how strongly the text below expresses moral concern related to each of the six moral foundations.
+
+Foundations:
+- Care: concern about the suffering or wellbeing of others; protecting the vulnerable; condemning cruelty or harm.
+- Equality: concern that people are treated equally and have equal rights, opportunities, or outcomes; condemning discrimination or unequal treatment.
+- Proportionality: concern that people get what they deserve in proportion to their effort, contribution, or merit; rewarding hard work and punishing cheating or freeloading.
+- Loyalty: concern with standing by one's group, team, family, or nation; praising solidarity or sacrifice for the group; condemning betrayal.
+- Authority: concern with respecting legitimate leaders, rules, traditions, and social order; condemning disobedience, disrespect, or subversion.
+- Purity: concern with sanctity and with avoiding the degradation of body, spirit, or what is sacred; condemning what is seen as disgusting, unnatural, or defiling.
+
+Scale for each foundation:
+0 = absent, 1 = weak or implicit, 2 = clearly expressed, 3 = strong or central to the text
+
+Rules:
+- Code a foundation only when the author expresses a moral evaluation (approval, condemnation, obligation, or outrage) that rests on that concern. A topic mentioned without moral judgment gets 0.
+- A text can express several foundations, or none.
+- Write a brief rationale before the scores.
+
+Respond with only a JSON object in exactly this format, with no other text:
+{{""rationale"": ""..."", ""care"": 0, ""equality"": 0, ""proportionality"": 0, ""loyalty"": 0, ""authority"": 0, ""purity"": 0}}
+
+Text:
+""""""
+Fans booed our own national anthem at the game. Disgraceful. Show some respect for the people who served this country.
+"""""""
+assistant,"{{""rationale"": ""Condemns disrespect toward a national symbol and the people who served (loyalty to the nation), plus a call for respect owed to a traditional institution (authority)."", ""care"": 0, ""equality"": 0, ""proportionality"": 0, ""loyalty"": 3, ""authority"": 2, ""purity"": 0}}"
+user,"Rate how strongly the text below expresses moral concern related to each of the six moral foundations.
+
+Foundations:
+- Care: concern about the suffering or wellbeing of others; protecting the vulnerable; condemning cruelty or harm.
+- Equality: concern that people are treated equally and have equal rights, opportunities, or outcomes; condemning discrimination or unequal treatment.
+- Proportionality: concern that people get what they deserve in proportion to their effort, contribution, or merit; rewarding hard work and punishing cheating or freeloading.
+- Loyalty: concern with standing by one's group, team, family, or nation; praising solidarity or sacrifice for the group; condemning betrayal.
+- Authority: concern with respecting legitimate leaders, rules, traditions, and social order; condemning disobedience, disrespect, or subversion.
+- Purity: concern with sanctity and with avoiding the degradation of body, spirit, or what is sacred; condemning what is seen as disgusting, unnatural, or defiling.
+
+Scale for each foundation:
+0 = absent, 1 = weak or implicit, 2 = clearly expressed, 3 = strong or central to the text
+
+Rules:
+- Code a foundation only when the author expresses a moral evaluation (approval, condemnation, obligation, or outrage) that rests on that concern. A topic mentioned without moral judgment gets 0.
+- A text can express several foundations, or none.
+- Write a brief rationale before the scores.
+
+Respond with only a JSON object in exactly this format, with no other text:
+{{""rationale"": ""..."", ""care"": 0, ""equality"": 0, ""proportionality"": 0, ""loyalty"": 0, ""authority"": 0, ""purity"": 0}}
+
+Text:
+""""""
+Just got back from the farmers market. The peaches are amazing this week.
+"""""""
+assistant,"{{""rationale"": ""No moral evaluation is expressed."", ""care"": 0, ""equality"": 0, ""proportionality"": 0, ""loyalty"": 0, ""authority"": 0, ""purity"": 0}}"
+user,"Rate how strongly the text below expresses moral concern related to each of the six moral foundations.
+
+Foundations:
+- Care: concern about the suffering or wellbeing of others; protecting the vulnerable; condemning cruelty or harm.
+- Equality: concern that people are treated equally and have equal rights, opportunities, or outcomes; condemning discrimination or unequal treatment.
+- Proportionality: concern that people get what they deserve in proportion to their effort, contribution, or merit; rewarding hard work and punishing cheating or freeloading.
+- Loyalty: concern with standing by one's group, team, family, or nation; praising solidarity or sacrifice for the group; condemning betrayal.
+- Authority: concern with respecting legitimate leaders, rules, traditions, and social order; condemning disobedience, disrespect, or subversion.
+- Purity: concern with sanctity and with avoiding the degradation of body, spirit, or what is sacred; condemning what is seen as disgusting, unnatural, or defiling.
+
+Scale for each foundation:
+0 = absent, 1 = weak or implicit, 2 = clearly expressed, 3 = strong or central to the text
+
+Rules:
+- Code a foundation only when the author expresses a moral evaluation (approval, condemnation, obligation, or outrage) that rests on that concern. A topic mentioned without moral judgment gets 0.
+- A text can express several foundations, or none.
+- Write a brief rationale before the scores.
+
+Respond with only a JSON object in exactly this format, with no other text:
+{{""rationale"": ""..."", ""care"": 0, ""equality"": 0, ""proportionality"": 0, ""loyalty"": 0, ""authority"": 0, ""purity"": 0}}
+
+Text:
+""""""
+{text}
+"""""""

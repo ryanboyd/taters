@@ -223,6 +223,17 @@ def run_whisper_diarization_repo(
     if verbose:
         print(f"Resolved device for whisper extraction: {resolved_device}")
 
+    # the same check the one-speaker transcript makes, before a long setup:
+    # a code Whisper does not know, or a language an English-only model
+    # cannot hear, said now rather than from inside the diarization script
+    from ..transcribe_with_whisper import language_problem
+
+    problem = language_problem(language, whisper_model)
+    if problem:
+        raise ValueError(problem)
+    if language:
+        language = str(language).strip().lower()
+
     audio_path = Path(audio_path).resolve()
     # default transcripts folder lives under the current working dir
     out_dir = Path(out_dir).resolve() if out_dir is not None else (Path.cwd() / "transcripts")
@@ -322,3 +333,11 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def validate_setting(name: str, value, settings: dict) -> str:
+    """The settings screen's question to this step; see
+    :func:`taters.audio.transcribe_with_whisper.validate_setting`."""
+    from ..transcribe_with_whisper import validate_setting as check
+
+    return check(name, value, settings)

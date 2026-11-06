@@ -191,6 +191,10 @@ def _config_of(source: str) -> Tuple[dict, str]:
 
         from ..helpers.settings import model_cache_dir
 
+        # before anything downloads: see settle_links
+        from ..helpers.hub_models import settle_links
+
+        settle_links()
         cfg = AutoConfig.from_pretrained(source, cache_dir=str(model_cache_dir()))
     except Exception as e:
         raise ValueError(f"{source!r} could not be read as a Hugging Face model "
@@ -431,6 +435,10 @@ def _load_classifier(source: str, device: str, verbose: bool):
         if reason:
             print(f"[transformers] {reason}")
     cache = {} if Path(source).is_dir() else {"cache_dir": str(model_cache_dir())}
+    # before anything downloads: see settle_links
+    from ..helpers.hub_models import settle_links
+
+    settle_links()
     tokenizer = AutoTokenizer.from_pretrained(source, **cache)
     model = AutoModelForSequenceClassification.from_pretrained(source, **cache)
     model.to(device_name)

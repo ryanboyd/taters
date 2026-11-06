@@ -221,6 +221,10 @@ def load_session(which: str, *, providers: Optional[Sequence[str]] = None):
 
     repo, filename = MODELS[which]
     try:
+        # before anything downloads: see settle_links
+        from ..helpers.hub_models import settle_links
+
+        settle_links()
         path = hf_hub_download(repo_id=repo, filename=filename)
     except Exception as exc:                      # pragma: no cover - network
         raise RuntimeError(

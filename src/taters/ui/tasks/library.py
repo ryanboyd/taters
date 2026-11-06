@@ -14,7 +14,7 @@ from .. import glyphs
 from ..prompts import Choice, GoBack
 from . import Task, TaskContext
 
-__all__ = ["TASK", "STOPLISTS_TASK", "MODELS_TASK", "ENCODERS_TASK"]
+__all__ = ["TASK", "STOPLISTS_TASK", "MODELS_TASK", "ENCODERS_TASK", "PROMPTS_TASK"]
 
 #: The kinds the dictionaries entry offers. Stop lists are deliberately not
 #: here -- they have their own Settings row, so someone hunting for "where do
@@ -64,6 +64,13 @@ def _run_encoders(ctx: TaskContext) -> None:
     manage_library(ctx.prompter, KINDS["encoders"])
 
 
+def _run_prompts(ctx: TaskContext) -> None:
+    from ...helpers.library import KINDS
+    from ..library import manage_library
+
+    manage_library(ctx.prompter, KINDS["prompts"])
+
+
 def _run_stoplists(ctx: TaskContext) -> None:
     from ...helpers.library import KINDS
     from ..library import manage_library
@@ -100,4 +107,12 @@ STOPLISTS_TASK = Task(
     help="Import, rename, export or delete the stop word lists the n-gram "
          "tools can apply",
     run=_run_stoplists,
+)
+
+PROMPTS_TASK = Task(
+    id="prompts",
+    label="Manage language model prompts",
+    help="Import, rename, export or delete the questions a language model "
+         "answers about every text",
+    run=_run_prompts,
 )

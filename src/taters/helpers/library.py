@@ -274,6 +274,18 @@ def _describe_model(path: Path) -> Tuple[str, str]:
     return info.display(), note
 
 
+def _prompt_problem(path: Path) -> str:
+    from ..text.generate_with_llm import prompt_problem
+
+    return prompt_problem(path)
+
+
+def _describe_prompt(path: Path) -> Tuple[str, str]:
+    from ..text.generate_with_llm import describe_prompt
+
+    return describe_prompt(path)
+
+
 KINDS: Dict[str, LibraryKind] = {
     "dictionaries": LibraryKind(
         id="dictionaries",
@@ -330,6 +342,17 @@ KINDS: Dict[str, LibraryKind] = {
              "line, optional TAB + POS-tag constraint). Each file becomes "
              "one cohesion column named by its filename.",
         suffixes=(".txt",),
+    ),
+    "prompts": LibraryKind(
+        id="prompts",
+        label="Language model prompts",
+        help="Questions for a language model to answer about every text: a "
+             ".csv of role/content turns (system, few-shot examples, the "
+             "question) or a .txt holding one question, with an optional "
+             "line declaring the fields to read out of the reply.",
+        suffixes=(".csv", ".txt"),
+        deep_check=_prompt_problem,
+        describe_entry=_describe_prompt,
     ),
     "stoplists": LibraryKind(
         id="stoplists",

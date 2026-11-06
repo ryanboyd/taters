@@ -1153,7 +1153,9 @@ def test_pca_off_and_all_are_the_first_two_rows():
                           "pca", ":some", [], ":done", ":done"])
     _o, var_values = wiz.ask_tuning(p, steps, var_specs, ask_gate=False,
                                     source="csv", selected=ids)
-    menu = next(cs for q, cs in p.offered if q == "pca:")
+    # asked in the row's own words, whatever the label is now
+    question = wiz._label_for(_r.by_id("stats_correlations"), "pca") + ":"
+    menu = next(cs for q, cs in p.offered if q == question)
     assert [c.value for c in menu][:2] == ["off", "all"]
     assert var_values["stats_pca"] == "off"
     assert "stays off" in p.text_output
@@ -1323,3 +1325,64 @@ def test_the_settings_screens_come_back_to_the_row_just_edited(tmp_path):
     assert defaults[2] == "vector_size"
     # and the list of steps points at the step just left
     assert p.select_defaults["What would you like to change?"] == "word_vectors_train"
+
+
+def test_a_language_code_whisper_does_not_know_is_said_where_it_is_typed():
+    """`jp` used to be accepted here and refused only after every video was
+    converted (a real run). The step is asked, says why, and the question
+    comes again."""
+    p, (_o, var_values) = _tuning([True, "transcribe", "language", "jp", "ja",
+                                   ":done", ":done"])
+    assert var_values["language"] == "ja"
+    assert "Japanese is 'ja'" in p.text_output
+    # and a language an English-only model cannot hear moves the model
+    assert var_values["whisper_model"] == "base"
+    assert "whisper model switched to base — base.en only knows English" in p.text_output
+
+
+def test_an_english_only_model_clears_a_language_it_cannot_hear():
+    p, (_o, var_values) = _tuning([True, "transcribe", "language", "ja",
+                                   "whisper_model", "small.en", ":done", ":done"])
+    assert var_values["whisper_model"] == "small.en" and var_values["language"] is None
+    assert "language cleared — small.en only knows English" in p.text_output
+
+
+def test_translating_with_turbo_is_flagged_and_left_as_chosen():
+    p, (_o, var_values) = _tuning([True, "transcribe", "translate", True,
+                                   "whisper_model", "large-v3-turbo", ":done", ":done"])
+    assert var_values["whisper_model"] == "large-v3-turbo" and var_values["translate"] is True
+    assert "not trained to translate" in p.text_output
+
+
+def test_a_distil_model_is_english_only_like_an_en_one():
+    p, (_o, var_values) = _tuning([True, "transcribe", "translate", True,
+                                   "whisper_model", "distil-large-v3", ":done", ":done"])
+    assert var_values["translate"] is False
+    assert "translate switched off — distil-large-v3 is English-only" in p.text_output
+
+
+def test_a_settings_question_asks_in_the_rows_own_words():
+    """The LLM step's `thinking` row says "think before answering"; the
+    question used to say "thinking:"."""
+    from taters.ui.recipes import by_id as recipe_of
+
+    recipe = recipe_of("generate_with_llm")
+    if wiz._spec_for(recipe) is None:
+        pytest.skip("the step does not import here")
+    assert wiz._label_for(recipe, "thinking") == "think before answering"
+    assert wiz._label_for(recipe, "context_length").endswith("0 = find out)")
+
+
+def test_a_library_pick_shows_on_its_row():
+    """A prompt picked for the LLM step is filed as the step's own override,
+    which the run uses; the row read the variable behind it instead and
+    said "all 10 of your prompts" (a real screen)."""
+    from taters.ui.recipes import by_id as recipe_of
+
+    recipe = recipe_of("generate_with_llm")
+    spec = wiz._spec_for(recipe)
+    if spec is None:
+        pytest.skip("the step does not import here")
+    current, _var, _w = wiz._live_value(recipe, spec.get("prompt_paths"), dict(recipe.vars),
+                                        {"generate_with_llm": {"prompt_paths": ["/x/Mood.txt"]}}, {})
+    assert current == ["/x/Mood.txt"]

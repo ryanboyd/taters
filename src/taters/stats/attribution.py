@@ -551,6 +551,10 @@ class _SentenceTransformerBackend(Backend):
         self.batch_size = int(batch_size)
         resolved, self.reason = resolve_device(device, backend="torch")
         self.device_name = resolved
+        # before anything downloads: see settle_links
+        from ..helpers.hub_models import settle_links
+
+        settle_links()
         self.model = SentenceTransformer(self.model_label, device=resolved)
         names = [type(m).__name__ for m in self.model._modules.values()]
         self.modules = " -> ".join(names)

@@ -99,6 +99,9 @@ class Taters:
     def apply_text_predictor(self, **kwargs):                   return self.text.apply_text_predictor(**kwargs)
     def import_hf_classifier(self, **kwargs):                   return self.text.import_hf_classifier(**kwargs)
     def apply_hf_classifier(self, **kwargs):                    return self.text.apply_hf_classifier(**kwargs)
+    def generate_with_llm(self, **kwargs):                     return self.text.generate_with_llm(**kwargs)
+    # its old name: pipelines saved before the rename call it
+    def ask_language_model(self, **kwargs):                     return self.text.generate_with_llm(**kwargs)
     def analyze_cohesion(self, **kwargs):                       return self.text.analyze_cohesion(**kwargs)
     def extract_sentence_embeddings(self, **kwargs):            return self.text.extract_sentence_embeddings(**kwargs)
     def convert_subtitles(self, **kwargs):                      return self.text.convert_subtitles(**kwargs)
@@ -295,6 +298,13 @@ class _TextAPI:
     def apply_hf_classifier(self, **kwargs):
         from .text.hf_classifier import apply_hf_classifier
         return _forward(apply_hf_classifier, kwargs)
+
+    def generate_with_llm(self, **kwargs):
+        from .text.generate_with_llm import generate_with_llm
+        return _forward(generate_with_llm, kwargs)
+
+    # its old name: pipelines saved before the rename call it
+    ask_language_model = generate_with_llm
 
     def apply_text_predictor(self, **kwargs):
         from .text.finetune_predictor import apply_text_predictor

@@ -34,7 +34,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 __all__ = [
     "GPU_USE", "WORKER_CAP", "DEVICE_CHOICES", "DEVICE_DEFAULT", "DEVICE_HELP",
     "resolve_device", "worker_cap", "add_device_argument", "hidden_gpu",
-    "CPU_FALLBACK_NOTE", "cuda_libraries_ok", "ensure_cuda_libraries",
+    "CPU_FALLBACK_NOTE", "cuda_libraries_ok", "ensure_cuda_libraries", "is_gpu_failure",
 ]
 
 
@@ -107,6 +107,33 @@ CPU_FALLBACK_NOTE = (
     "so torch working here proves nothing about faster-whisper. "
     'Pass device="cuda" to turn this fallback into an error.'
 )
+
+
+#: what a failure says when it is the GPU's own: CUDA and its libraries, the
+#: driver, the card's memory or architecture, a compute type the card lacks
+_GPU_WORDS = ("cuda", "cublas", "cudnn", "cufft", "curand", "cusparse", "nvrtc", "nccl",
+              "gpu", "nvidia", "driver", "out of memory", "kernel image",
+              "compute capability", "target device", "float16", "bfloat16", "compute type",
+              "libcu", ".dll", ".so")
+#: what a failure says when it is not, even though it mentions a device
+_NOT_GPU_WORDS = ("no space left on device", "winerror 1314", "not enough space")
+
+
+def is_gpu_failure(error: BaseException) -> bool:
+    """
+    Whether an error raised while putting a model on the GPU is the GPU's.
+
+    Only those are worth falling back to the CPU for. A download that
+    failed, a full disk, a model name that does not exist are not -- the CPU
+    would meet them too, or worse, meet them after the fact and hide them:
+    a Windows link-privilege error in a model download was reported as "the
+    GPU is visible but cannot be used" and a run went to the CPU for nothing
+    (a real run).
+    """
+    text = f"{type(error).__name__}: {error}".lower()
+    if any(w in text for w in _NOT_GPU_WORDS):
+        return False
+    return any(w in text for w in _GPU_WORDS)
 
 
 def _cuda_visible(backend: str) -> Tuple[bool, Optional[str]]:

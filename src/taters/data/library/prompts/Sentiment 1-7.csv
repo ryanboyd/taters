@@ -1,0 +1,5 @@
+role,content
+system,"You rate the overall sentiment of short texts for a research study. Be consistent: the same wording always gets the same rating."
+user,"Rate the overall sentiment of the text below from 1 (very negative) to 7 (very positive). 4 is neutral or mixed. Answer with the number only.
+
+{text}"

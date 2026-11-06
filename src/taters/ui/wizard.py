@@ -3153,6 +3153,9 @@ NEVER_TUNABLE = frozenset({
     # get silently ignored because the first step already wrote the file.
     "recursive", "id_from", "include_source_path", "joiner",
     "num_buckets", "max_open_bucket_files", "tmp_root",
+    # the LLM step's old reasoning switch, kept so saved pipelines still run;
+    # `thinking` is the setting now, and two rows for one choice confuse
+    "keep_reasoning",
 })
 
 
@@ -3379,8 +3382,8 @@ _TABLE_PICKERS: Dict[str, Callable] = {
 
 def _ask_one_param(prompter: Prompter, param: ParamSpec, current: Any,
                    widget: Optional[str] = None,
-                   tables: Optional[Callable[[], List[Tuple[str, str]]]] = None
-                   ) -> Any:
+                   tables: Optional[Callable[[], List[Tuple[str, str]]]] = None,
+                   label: Optional[str] = None) -> Any:
     """
     Render a single parameter, in whatever shape suits its type.
 
@@ -3395,7 +3398,8 @@ def _ask_one_param(prompter: Prompter, param: ParamSpec, current: Any,
     ``none_and_all`` or ``doc_term_matrix_count`` into a box is a test the
     person did not sign up for.
     """
-    label = param.name.replace("_", " ")
+    # the row's own words, so the question asks what the row said
+    label = label or param.name.replace("_", " ")
     _explain(prompter, param, current)
 
     param = replace(param, widget=widget or param.widget)
@@ -3549,11 +3553,14 @@ def _live_value(recipe: _recipes.Recipe, param: ParamSpec, var_specs: Dict[str, 
     you have just changed it reads as an edit that did not take.
     """
     current, var_name, widget = _current_value(recipe, param, var_specs)
-    if var_name is not None:
-        if var_name in var_values:
-            current = var_values[var_name]
-    elif param.name in overrides.get(recipe.id, {}):
+    # a step's own override outranks the variable behind it, as it does when
+    # the pipeline is composed: a library pick is filed that way, and the row
+    # read the variable instead -- "all 10 of your prompts" for a step that
+    # would run one (a real screen)
+    if param.name in overrides.get(recipe.id, {}):
         current = overrides[recipe.id][param.name]
+    elif var_name is not None and var_name in var_values:
+        current = var_values[var_name]
     return current, var_name, widget
 
 
@@ -3584,6 +3591,27 @@ def _spec_for(recipe: _recipes.Recipe, prompter: Optional[Prompter] = None
 # resolved at import for the same reason as live.py's markers: the glyph set
 # is settled once per process, and this is a hot string.
 INDENT = f"  {glyphs.INDENT} "
+
+
+def _label_for(recipe: _recipes.Recipe, name: str, key: Optional[str] = None) -> str:
+    """
+    The options screen's own word for a setting, where the parameter's name
+    is a programmer's one: the step's own label first, because a name can
+    mean different things in different steps, then the shared table.
+
+    Every lookup that can go by the PARAMETER does. A shared row arrives
+    keyed by the variable, and the two names need not match: the sweep's
+    `engine_nlp` reads the shared `engine`, so asking for labels["engine"]
+    handed the tagging-engine row the sweep's word for its OWN engine
+    parameter -- "which topic model — nltk". The variable name is only the
+    last resort, which is also how `pattern` gets called "which files to
+    read" in both menus instead of "txt pattern" in one.
+    """
+    setting = key or name
+    return (recipe.labels.get(name)
+            or _recipes.SETTING_LABELS.get(setting)
+            or _recipes.SETTING_LABELS.get(name)
+            or setting.replace("_", " "))
 
 
 def _setting_choice(recipe: _recipes.Recipe, param: ParamSpec, var_specs: Dict[str, dict],
@@ -3621,19 +3649,21 @@ def _setting_choice(recipe: _recipes.Recipe, param: ParamSpec, var_specs: Dict[s
     # its OWN engine parameter -- "which topic model — nltk". the variable
     # name is only the last resort, which is also how `pattern` gets called
     # "which files to read" in both menus instead of "txt pattern" in one.
-    setting = key or param.name
-    label = (recipe.labels.get(param.name)
-             or _recipes.SETTING_LABELS.get(setting)
-             or _recipes.SETTING_LABELS.get(param.name)
-             or setting.replace("_", " "))
+    label = _label_for(recipe, param.name, key)
     if indent:
         label = INDENT + label
+    # the setting's own plain description when a pipeline variable carries
+    # one: those are written for this screen, two lines at most. the
+    # docstring's is written for whoever calls the function, and its first
+    # sentence was all a row ever said ("Nucleus sampling when sampling").
+    var = key if key in var_specs else _var_behind(recipe, param.name)
+    plain = str((var_specs.get(var) or {}).get("desc") or "").strip() if var else ""
     return Choice(
         key or param.name,
         f"{label} — {shown}" if shown else label,
-        # just the first sentence. the whole description goes up when the
-        # setting is actually being answered; here it would bury the list.
-        help=(param.desc or "").strip().split(". ")[0],
+        # otherwise just the docstring's first sentence. the whole
+        # description goes up when the setting is actually being answered.
+        help=plain or (param.desc or "").strip().split(". ")[0],
         # the green tag that says this row is the same setting other steps
         # read -- change it here and it changes everywhere. we wrap it in
         # parentheses so it can't read as part of the VALUE ("model: base.en
@@ -3744,6 +3774,85 @@ def shared_rows(shared: Dict[str, Tuple[_recipes.Recipe, str]], var_specs, overr
             for var, recipe, param, indent in ordered]
 
 
+def _step_settings(recipe: _recipes.Recipe, var_specs: Dict[str, dict],
+                   overrides: Dict[str, Dict[str, Any]],
+                   var_values: Dict[str, Any]) -> Dict[str, Any]:
+    """Every setting of one step as it stands now: its own overrides, then
+    the pipeline variables its templates read, then their defaults."""
+    out: Dict[str, Any] = {}
+    for name, raw in recipe.with_.items():
+        if name in overrides.get(recipe.id, {}):
+            out[name] = overrides[recipe.id][name]
+            continue
+        var = _var_name(raw)
+        if var is None and isinstance(raw, list) and len(raw) == 1:
+            inner = _var_name(raw[0])
+            if inner is not None:
+                out[name] = [var_values.get(inner, (var_specs.get(inner) or {}).get("default"))]
+                continue
+        if var is not None:
+            out[name] = var_values.get(var, (var_specs.get(var) or {}).get("default"))
+        else:
+            out[name] = raw
+    return out
+
+
+def _setting_problem(prompter: Prompter, recipe: _recipes.Recipe, name: str, value: Any,
+                     var_specs: Dict[str, dict], overrides: Dict[str, Dict[str, Any]],
+                     var_values: Dict[str, Any]) -> str:
+    """
+    Why a value just typed will not do, asked of the step itself: a step's
+    module may define ``validate_setting(name, value, settings)``, which
+    returns the reason or ``""``. One question every step can answer, in the
+    step's own words, so the wizard keeps no list of what each one accepts.
+    """
+    import importlib
+    import sys
+
+    module_name = str(recipe.target or "").partition(":")[0]
+    if not module_name:
+        return ""
+    try:
+        if module_name not in sys.modules:
+            prompter.working("Checking the setting…")
+        check = getattr(importlib.import_module(module_name), "validate_setting", None)
+    except Exception:  # noqa: BLE001 - a step that will not import says so when it runs
+        return ""
+    if check is None:
+        return ""
+    settings = _step_settings(recipe, var_specs, overrides, var_values)
+    try:
+        return str(check(name, value, settings) or "")
+    except Exception:  # noqa: BLE001 - a check that breaks never blocks the answer
+        return ""
+
+
+def _step_summary(prompter: Prompter, recipe: _recipes.Recipe, var_specs: Dict[str, dict],
+                  overrides: Dict[str, Dict[str, Any]], var_values: Dict[str, Any]) -> str:
+    """
+    A few sentences from the step itself on what its settings add up to,
+    shown above its settings: a step's module may define
+    ``settings_summary(settings)``. The LLM step says what the model reads
+    at once and what that leaves for each text. Never blocks the screen.
+    """
+    import importlib
+
+    module_name = str(recipe.target or "").partition(":")[0]
+    if not module_name:
+        return ""
+    try:
+        summarize = getattr(importlib.import_module(module_name), "settings_summary", None)
+    except Exception:  # noqa: BLE001
+        return ""
+    if summarize is None:
+        return ""
+    prompter.working("Working out what fits…")
+    try:
+        return str(summarize(_step_settings(recipe, var_specs, overrides, var_values)) or "")
+    except Exception:  # noqa: BLE001 - a summary that breaks is left out, not shown broken
+        return ""
+
+
 def _edit(prompter: Prompter, recipe: _recipes.Recipe, param: ParamSpec,
           var_specs: Dict[str, dict], overrides: Dict[str, Dict[str, Any]],
           var_values: Dict[str, Any], is_shared: bool = False,
@@ -3824,10 +3933,19 @@ def _edit(prompter: Prompter, recipe: _recipes.Recipe, param: ParamSpec,
             overrides.setdefault(recipe.id, {})[param.name] = value
         return
 
-    try:
-        value = _ask_one_param(prompter, param, current, widget, tables)
-    except GoBack:
-        return
+    while True:
+        try:
+            value = _ask_one_param(prompter, param, current, widget, tables,
+                                   label=_label_for(recipe, param.name))
+        except GoBack:
+            return
+        problem = _setting_problem(prompter, recipe, param.name, value, var_specs,
+                                   overrides, var_values)
+        if not problem:
+            break
+        # said where it was typed, and asked again: `jp` for Japanese used to
+        # be accepted here and refused only after every video was converted
+        prompter.note(f"  {problem}.", style="yellow")
     if value == current:
         return
     if var_name:
@@ -3863,18 +3981,40 @@ def _edit(prompter: Prompter, recipe: _recipes.Recipe, param: ParamSpec,
     # follows; picking an English-only model turns translation off. either
     # way we end up composing a pipeline that can actually run, and we tell
     # the person what moved and why right when they moved it.
+    from ..audio.transcribe_with_whisper import (english_only, multilingual_counterpart,
+                                                 translation_caveat)
+
     if param.name == "translate" and value is True:
         model = _live_var("whisper_model")
-        if isinstance(model, str) and model.endswith(".en"):
-            var_values["whisper_model"] = model[:-3]
-            prompter.note(f"  whisper model switched to {model[:-3]} — "
+        if isinstance(model, str) and english_only(model):
+            var_values["whisper_model"] = multilingual_counterpart(model)
+            prompter.note(f"  whisper model switched to {multilingual_counterpart(model)} — "
                           f"{model} is English-only and cannot translate.",
                           style="yellow")
+        elif isinstance(model, str) and translation_caveat(model):
+            prompter.note(f"  {translation_caveat(model)}.", style="yellow")
     if param.name == "whisper_model" and isinstance(value, str) \
-            and value.endswith(".en") and _live_var("translate") is True:
-        var_values["translate"] = False
-        prompter.note(f"  translate switched off — {value} is English-only.",
-                      style="yellow")
+            and _live_var("translate") is True:
+        if english_only(value):
+            var_values["translate"] = False
+            prompter.note(f"  translate switched off — {value} is English-only.",
+                          style="yellow")
+        elif translation_caveat(value):
+            prompter.note(f"  {translation_caveat(value)}.", style="yellow")
+    # the same between a spoken language and the English-only models:
+    # choosing Japanese is choosing a model that can hear it
+    spoken = _live_var("language")
+    spoken = str(spoken).strip().lower() if spoken else ""
+    if param.name == "language" and spoken not in ("", "en"):
+        model = _live_var("whisper_model")
+        if isinstance(model, str) and english_only(model):
+            var_values["whisper_model"] = multilingual_counterpart(model)
+            prompter.note(f"  whisper model switched to {multilingual_counterpart(model)} — "
+                          f"{model} only knows English.", style="yellow")
+    if param.name == "whisper_model" and isinstance(value, str) and english_only(value) \
+            and spoken not in ("", "en"):
+        var_values["language"] = None
+        prompter.note(f"  language cleared — {value} only knows English.", style="yellow")
 
     if (param.name == "engine" and value == "stanza") or \
             (param.name == "tokenizer" and value == "stanza"):
@@ -4004,6 +4144,9 @@ def tune_one_step(
                 ))
 
         prompter.note("")
+        summary = _step_summary(prompter, recipe, var_specs, overrides, var_values)
+        if summary:
+            prompter.reason(summary)
         try:
             picked = str(prompter.select(f"{recipe.label} — change a setting:",
                                          choices, default=_still_there(last, choices)))
@@ -4232,7 +4375,7 @@ def _recipe_behind(step: dict):
     """
     return next((r for r in _recipes.RECIPES
                  if r.save_as == step.get("save_as")
-                 and r.call == step.get("call")), None)
+                 and _recipes.answers_call(r, step.get("call"))), None)
 
 
 def review(prompter: Prompter, preset: dict, selected: Sequence[str],
@@ -4906,6 +5049,20 @@ def _ask_encoders(prompter: Prompter, steps: Sequence[_recipes.Recipe],
         else:
             current = str(recipe.with_.get(recipe.encoder_param, "") or "")
         tuned = recipe.encoder_kind == "meaning_tuned"
+        if recipe.encoder_kind == "generative":
+            from .library import pick_generative_model
+
+            prompter.reason(
+                f"'{recipe.label}' needs an instruction-tuned language model: one that "
+                f"answers questions. Smaller runs on a laptop; bigger judges better.")
+            picked = pick_generative_model(prompter, current, for_step=recipe.label)
+            if picked is None or picked == current:
+                continue
+            if var is not None:
+                var_values[var] = picked
+            else:
+                overrides.setdefault(recipe.id, {})[recipe.encoder_param] = picked
+            continue
         if tuned:
             prompter.reason(
                 f"'{recipe.label}' runs on a meaning-tuned model -- one trained "
@@ -4933,6 +5090,122 @@ def _ask_encoders(prompter: Prompter, steps: Sequence[_recipes.Recipe],
             var_values[var] = picked
         else:
             overrides.setdefault(recipe.id, {})[recipe.encoder_param] = picked
+
+
+def write_question(prompter: Prompter):
+    """
+    A prompt written on the spot: a name and the question, saved as a
+    ``.txt`` in the prompts library and sent to the model as written.
+    Returns the library path, or None when backed out of.
+    """
+    import tempfile
+
+    from ..helpers.library import KINDS, LibraryCollision, import_into
+
+    try:
+        name = str(prompter.text("A short name for this prompt (it names the columns):",
+                                 default="")).strip()
+        if not name:
+            return None
+        prompter.reason("The question is put to the model once per text, as you write it; "
+                        "the text itself goes after it. For columns out of the answer, ask "
+                        "for JSON here and turn on llm_parse_json.")
+        question = str(prompter.text("The question:", default="")).strip()
+        if not question:
+            return None
+    except GoBack:
+        return None
+    body = question + "\n"
+    # the file is named after the prompt, in characters every filesystem takes
+    stem = re.sub(r"\s+", " ", re.sub(r'[<>:"/\\|?*\x00-\x1f]+', " ", name)).strip(" .") \
+        or "prompt"
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / f"{stem}.txt"
+        try:
+            src.write_text(body, encoding="utf-8")
+            try:
+                dest = import_into(KINDS["prompts"], src)
+            except LibraryCollision:
+                try:
+                    if not prompter.confirm(f"'{stem}' is already in your prompts. Replace it?",
+                                            default=False):
+                        return None
+                except GoBack:
+                    return None
+                dest = import_into(KINDS["prompts"], src, replace=True)
+        except OSError as e:
+            prompter.note(f"  Could not save the prompt: {e}", style="yellow")
+            return None
+    prompter.note(f"  {glyphs.TICK} Saved to your prompts: {dest.stem}", style="green")
+    return dest
+
+
+def _ask_prompts(prompter: Prompter, steps: Sequence[_recipes.Recipe], src: SourceSpec,
+                 overrides: Dict[str, Dict[str, Any]]) -> None:
+    """
+    Which prompts the "Generate responses with an LLM" step runs, asked at the
+    features stage like the model is, with the chance to write one on the
+    spot. The prompts' placeholders become pass-through columns of the
+    step, and one naming a column the spreadsheet lacks is refused here,
+    with the columns, rather than minutes into a run.
+    """
+    from ..helpers.library import kind_by_id
+    from ..text.generate_with_llm import placeholders, read_prompt
+    from .library import pick_from_library
+
+    for recipe in steps:
+        kinds = [k for k in recipe.library.values() if k == "prompts"]
+        if not kinds:
+            continue
+        param = next(p for p, k in recipe.library.items() if k == "prompts")
+        if param in overrides.get(recipe.id, {}):
+            continue
+        kind = kind_by_id("prompts")
+        while True:
+            prompter.reason(
+                f"'{recipe.label}' puts each prompt to the model once per text. Pick "
+                f"the prompts to run, or write a question now.")
+            picked = pick_from_library(
+                prompter, kind, current=[], start_unticked=True,
+                compose=("Write a question now…",
+                         "A name, the question, and what kind of answer; saved to "
+                         "your prompts.", write_question))
+            if picked is None:
+                return
+            needed: set = set()
+            for path in picked:
+                try:
+                    prompt = read_prompt(path)
+                except (OSError, ValueError) as e:
+                    prompter.note(f"  {Path(path).name}: {e}", style="yellow")
+                    needed = None
+                    break
+                needed |= placeholders(prompt) - {"text"}
+            if needed is None:
+                continue
+            if needed and not src.columns:
+                # a folder of texts, or a table not read yet: nothing to fill
+                # the placeholders from, and the step would refuse later
+                prompter.note(
+                    f"  The prompt fills {{{sorted(needed)[0]}}}, but this kind of input has "
+                    f"no columns to fill it from. Pick a prompt without placeholders.",
+                    style="yellow")
+                continue
+            missing = sorted(c for c in needed if c not in src.columns)
+            if missing:
+                prompter.note(
+                    f"  The prompt fills {{{missing[0]}}}, and the spreadsheet has no such "
+                    f"column. Its columns: {', '.join(src.columns[:12])}"
+                    + (" …" if len(src.columns) > 12 else "") + ".", style="yellow")
+                continue
+            overrides.setdefault(recipe.id, {})[param] = picked
+            if needed:
+                carried = list(src.group_by) if src.group_by else list(src.id_cols)
+                if src.text_mode == "separate" and len(src.text_cols) > 1:
+                    carried.append("source_col")
+                overrides[recipe.id]["pass_through_cols"] = carried + sorted(
+                    c for c in needed if c not in carried)
+            return
 
 
 def _library_defaults(steps: Sequence[_recipes.Recipe],
@@ -5243,6 +5516,10 @@ def run_wizard(prompter: Prompter, *, cwd: Optional[Path] = None,
                     prompter, resolve_selection(selected, providers=providers,
                                                 source=src.source),
                     var_values, overrides)
+                _ask_prompts(
+                    prompter, resolve_selection(selected, providers=providers,
+                                                source=src.source),
+                    src, overrides)
             prompter.stage("features", "Features", status="done",
                            detail=", ".join(_recipes.by_id(s).label
                                             for s in selected))

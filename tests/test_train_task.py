@@ -348,7 +348,7 @@ def test_a_verb_with_nothing_left_under_it_is_grayed_with_the_first_reason(tmp_p
     assert not verbs["wrangle"].disabled
 
 
-def test_the_first_screen_offers_the_four_verbs_and_the_second_is_always_asked(tmp_path):
+def test_the_first_screen_offers_the_verbs_and_the_second_is_always_asked(tmp_path):
     """
     Intention first, material second -- and the second question is asked even
     when it has one answer. A menu of one row still tells you exactly what
@@ -360,7 +360,7 @@ def test_the_first_screen_offers_the_four_verbs_and_the_second_is_always_asked(t
     with pytest.raises(GoBack):
         run_train(p, cwd=tmp_path)
     verbs = [c.value for c in p.offered[0][1]]
-    assert verbs == ["scratch", "adapt", "predict", "wrangle"]
+    assert verbs == ["scratch", "adapt", "predict", "wrangle", "chat"]
     kinds = [[c.value for c in cs] for q, cs in p.offered if q == "With what?"]
     assert kinds == [["adapt_encoder"], ["finetune_predictor"]], \
         "a one-row kind question was skipped"

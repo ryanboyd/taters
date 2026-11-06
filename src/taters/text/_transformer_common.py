@@ -426,6 +426,10 @@ def load_encoder(spec: PathLike, *, device: str = "auto", for_mlm: bool = False,
     from ..helpers.settings import model_cache_dir
 
     cache = {"cache_dir": str(model_cache_dir())} if resolved.kind == "hub" else {}
+    # before anything downloads: see settle_links
+    from ..helpers.hub_models import settle_links
+
+    settle_links()
     tokenizer = AutoTokenizer.from_pretrained(resolved.source, **cache)
     loader = AutoModelForMaskedLM if for_mlm else AutoModel
     model = loader.from_pretrained(resolved.source, **cache)
@@ -532,7 +536,8 @@ def run_with_oom_fallback(fn: Callable[[int], object], batch_size: int, *,
         try:
             return fn(size)
         except Exception as e:      # cuda's OutOfMemoryError is just a RuntimeError
-            if "out of memory" not in str(e).lower():
+            said = str(e).lower()
+            if "out of memory" not in said and "not enough memory" not in said:
                 raise
             try:
                 import torch

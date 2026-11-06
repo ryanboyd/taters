@@ -19,6 +19,7 @@ as ``{{var:features_dir}}/readability.csv`` renders either way.
 from __future__ import annotations
 
 import csv
+import json
 import re
 import os
 from contextlib import contextmanager
@@ -515,6 +516,133 @@ def write_table(ref: RefLike, fieldnames: Sequence[str], *,
         writer.fingerprint = fp.hexdigest()
     if on_rows is not None:
         on_rows(writer.rows)
+
+
+@contextmanager
+def append_table(ref: RefLike, fieldnames: Sequence[str], *, key: str = "text_id",
+                 encoding: str = "utf-8-sig", settings: Optional[Mapping[str, Any]] = None,
+                 hints: Optional[Mapping[str, str]] = None,
+                 finish: Optional[Callable[[List[str], Iterator[Dict[str, str]]],
+                                           Tuple[List[str], Iterator[Any]]]] = None):
+    """
+    Open a table for writing that can be picked up where it stopped.
+
+    For a step whose rows each cost seconds of a model's time, "retried
+    rather than resumed" (:func:`atomic_write`) throws hours away. This
+    keeps the scratch file instead: rows go to ``<name>.part`` with a
+    flush after every batch, a sidecar ``<stem>_partial.json`` records the
+    ``settings`` that produced them, and on the next run the finished keys
+    are read back so the caller can skip them. The file still appears
+    under its real name only once complete. A sidecar that disagrees with
+    the settings, or a header that differs, starts over.
+
+    Yields ``(writer, done)``: the writer has ``flush()``, and ``done`` is
+    the set of keys already in the scratch file. A database table has no
+    scratch to keep, so it is written whole through :func:`write_table`
+    and ``done`` is empty.
+
+    ``finish``, when given, is the last pass: called with the header and
+    the completed rows (a stream of dicts, in order) once every row is in,
+    it returns the final header and rows, and those become the table --
+    columns worked out from the whole run, added to it without the rows
+    ever being held in memory. A file streams its scratch into the final
+    file; a database table is staged beside the final one and dropped
+    after, so no text touches the local disk. A ``finish`` that fails on
+    a file leaves the completed rows in the scratch for the next run (a
+    database table restarts, as it always does).
+    """
+    r = parse_ref(ref)
+    if r.is_db:
+        target = r.sibling(f"{r.stem}__stage") if finish is not None else r
+        with write_table(target, fieldnames, encoding=encoding, hints=hints) as writer:
+            writer.flush = lambda: None  # type: ignore[attr-defined]
+            writer.kept = []  # type: ignore[attr-defined]
+            yield writer, set()
+        if finish is not None:
+            try:
+                _finish_into(r, finish, [str(c) for c in fieldnames],
+                             read_rows(target), encoding=encoding, hints=hints)
+            finally:
+                delete_table(target)
+        return
+    from .atomic import SCRATCH_SUFFIX
+
+    path = r.path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    scratch = path.with_name(path.name + SCRATCH_SUFFIX)
+    side = path.with_name(f"{path.stem}_partial.json")
+    names = [str(c) for c in fieldnames]
+    wanted = json.dumps(dict(settings or {}), sort_keys=True, default=str)
+    kept: List[Dict[str, Any]] = []
+    done: set = set()
+    if scratch.is_file() and side.is_file():
+        try:
+            same = side.read_text(encoding="utf-8") == wanted
+        except OSError:
+            same = False
+        if same:
+            try:
+                with scratch.open("r", newline="", encoding=encoding) as fh:
+                    reader = csv.reader(fh)
+                    header = next(reader, None)
+                    if header == names:
+                        for cells in reader:
+                            # a torn last line has too few cells; drop it
+                            if len(cells) != len(names):
+                                continue
+                            row = dict(zip(names, cells))
+                            if row.get(key, "") in done:
+                                continue
+                            done.add(row.get(key, ""))
+                            kept.append(row)
+            except (OSError, csv.Error):
+                kept, done = [], set()
+    with scratch.open("w", newline="", encoding=encoding) as fh:
+        out = csv.DictWriter(fh, fieldnames=names)
+        out.writeheader()
+        out.writerows(kept)
+    side.write_text(wanted, encoding="utf-8")
+    writer = _Writer(names)
+    fh = scratch.open("a", newline="", encoding=encoding)
+    out = csv.DictWriter(fh, fieldnames=names)
+    writer._sink = lambda cells: out.writerow(dict(zip(names, cells)))
+    writer.rows = len(kept)
+    writer.kept = kept  # type: ignore[attr-defined]
+    writer.flush = fh.flush  # type: ignore[attr-defined]
+    try:
+        yield writer, done
+    except BaseException:
+        # the whole point: the rows written so far stay for the next run
+        fh.close()
+        raise
+    fh.close()
+    if finish is None:
+        os.replace(scratch, path)
+    else:
+        # the final file is written through the same scratch name, so the
+        # completed rows step aside first -- and back if the pass fails, for
+        # the next run to pick up
+        aside = path.with_name(path.name + ".answered")
+        os.replace(scratch, aside)
+        try:
+            with aside.open("r", newline="", encoding=encoding) as rf:
+                rows = ({k: (v or "") for k, v in row.items() if k is not None}
+                        for row in csv.DictReader(rf))
+                _finish_into(r, finish, names, rows, encoding=encoding, hints=hints)
+        except BaseException:
+            os.replace(aside, scratch)
+            raise
+        aside.unlink(missing_ok=True)
+    side.unlink(missing_ok=True)
+
+
+def _finish_into(ref: TableRef, finish, names: List[str], rows: Iterator[Dict[str, str]], *,
+                 encoding: str, hints: Optional[Mapping[str, str]]) -> None:
+    """The final table from ``finish``'s header and rows."""
+    header, out_rows = finish(list(names), rows)
+    with write_table(ref, header, encoding=encoding, hints=hints) as writer:
+        for row in out_rows:
+            writer.writerow(row)
 
 
 def fingerprint(ref: RefLike, *, encoding: str = "utf-8-sig",

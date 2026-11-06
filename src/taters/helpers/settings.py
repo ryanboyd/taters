@@ -188,7 +188,10 @@ def describe_model_cache() -> str:
     if not path.is_dir():
         return f"{path}  ·  {how}  ·  nothing downloaded yet"
     models = [p for p in path.glob("models--*") if p.is_dir()]
-    size = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+    # a snapshot file is a link to its blob on Linux and macOS: counting both
+    # said 30 GB for a 16 GB cache. a Windows cache without links holds plain
+    # files in the snapshots and nothing in blobs, so it is counted once too
+    size = sum(f.stat().st_size for f in path.rglob("*") if f.is_file() and not f.is_symlink())
     from .library import _human_size
 
     return f"{path}  ·  {how}  ·  {len(models)} model(s), {_human_size(size)}"

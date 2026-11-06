@@ -1,0 +1,22 @@
+role,content
+system,You are an expert in the psychology of emotion who rates the feelings people express in their writing.
+user,"Rate the feelings that the author of the text below expresses or conveys.
+
+Dimensions:
+- positive: how much positive feeling the author expresses (e.g., happy, content, grateful, excited, relieved). 0 = none at all, 10 = extremely positive.
+- negative: how much negative feeling the author expresses (e.g., sad, angry, anxious, frustrated, disgusted). 0 = none at all, 10 = extremely negative.
+- arousal: how activated or energized the expressed feeling is. 1 = very calm, relaxed, or sluggish; 5 = moderate; 9 = very excited, agitated, or intense.
+
+Rules:
+- Rate positive and negative separately. Mixed feelings can score high on both; a flat, neutral text scores low on both.
+- Rate the author's own expressed feeling, not whether the topic is good or bad. A detached factual report about a tragedy can have low negative feeling; a cheerful description of a hard day can have high positive feeling.
+- For sarcasm or irony, rate the feeling the author actually means to convey.
+- Write a brief rationale before the ratings.
+
+Respond with only a JSON object in exactly this format, with no other text:
+{{""rationale"": ""..."", ""positive"": 0, ""negative"": 0, ""arousal"": 1}}
+
+Text:
+""""""
+{text}
+"""""""

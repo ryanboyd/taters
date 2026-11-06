@@ -892,6 +892,10 @@ def analyze_cohesion(
         from ..helpers.gpu import resolve_device
 
         announce(on_progress, "loading the sentence-embedding model")
+        # before anything downloads: see settle_links
+        from ..helpers.hub_models import settle_links
+
+        settle_links()
         encoder = SentenceTransformer(semantic_model,
                                       device=resolve_device(device)[0])
     insert_at = columns.index("semantic_1_all_sent") if semantic_on else -1

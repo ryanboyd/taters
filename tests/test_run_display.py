@@ -92,7 +92,8 @@ def test_a_step_error_is_collected_too(display):
 
 def test_the_step_label_is_readable():
     assert _short_call("potato.text.analyze_readability") == "analyze readability"
-    assert _short_call("convert_to_wav") == "convert to wav"
+    assert _short_call("convert_to_wav") == "convert to WAV"
+    assert _short_call("potato.text.generate_with_llm") == "generate with LLM"
 
 
 def test_events_without_a_display_are_harmless():

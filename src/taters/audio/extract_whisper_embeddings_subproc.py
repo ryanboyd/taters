@@ -210,10 +210,15 @@ def _load_whisper(config: "EmbedConfig"):
     """
     import numpy as _np
 
+    from taters.audio.transcribe_with_whisper import fetch_whisper_model
+    from taters.helpers.gpu import is_gpu_failure
+
     asked = (config.device or "auto").strip().lower()
+    # the files first, so a failed download is said as one, not as a GPU
+    path = fetch_whisper_model(config.model_name)
 
     def build(device: str, compute_type: str):
-        model = WhisperModel(config.model_name, device=device, compute_type=compute_type)
+        model = WhisperModel(path, device=device, compute_type=compute_type)
         # one 30-second window of silence: a single encode, which drags in every
         # library the real work is going to need. milliseconds, against a run
         # that takes minutes.
@@ -231,6 +236,8 @@ def _load_whisper(config: "EmbedConfig"):
             try:
                 return build("cuda", config.compute_type), "cuda", config.compute_type
             except Exception as e:
+                if not is_gpu_failure(e):
+                    raise
                 reason = f"the GPU is visible but CTranslate2 cannot use it: {e}"
         print(f"[whisper-embeddings] {reason}", flush=True)
         print("[whisper-embeddings] Falling back to the CPU.", flush=True)

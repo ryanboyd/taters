@@ -528,6 +528,8 @@ def test_the_transcriber_tries_the_repair_before_loading_a_cuda_model(monkeypatc
 
     order = []
     monkeypatch.setattr(twh, "_MODEL_CACHE", {})
+    # the files are taken as downloaded; the fetch has its own tests
+    monkeypatch.setattr(twh, "fetch_whisper_model", lambda name: name)
     monkeypatch.setattr(twh, "ensure_cuda_libraries",
                         lambda: order.append("repair") or True)
     monkeypatch.setattr(twh, "_prove_it_works", lambda model: None)
@@ -551,6 +553,7 @@ def test_no_repair_is_attempted_for_a_cpu_model(monkeypatch):
     from taters.audio import transcribe_with_whisper as twh
 
     monkeypatch.setattr(twh, "_MODEL_CACHE", {})
+    monkeypatch.setattr(twh, "fetch_whisper_model", lambda name: name)
     monkeypatch.setattr(twh, "ensure_cuda_libraries",
                         lambda: pytest.fail("looked for CUDA libraries on the CPU path"))
     monkeypatch.setattr(twh, "_prove_it_works", lambda model: None)

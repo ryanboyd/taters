@@ -610,10 +610,17 @@ def _clock(value: Any) -> str:
     return f"{minutes}:{seconds:02d}"
 
 
+#: words in a step's name that are acronyms, said as such on the progress
+#: line: "generate with LLM", "convert to WAV"
+_ACRONYMS = {"llm": "LLM", "wav": "WAV", "csv": "CSV", "pca": "PCA", "lda": "LDA",
+             "nmf": "NMF", "hf": "HF"}
+
+
 def _short_call(call: str) -> str:
-    """`potato.text.analyze_readability` -> `analyze readability`."""
+    """`potato.text.analyze_readability` -> `analyze readability`;
+    `potato.text.generate_with_llm` -> `generate with LLM`."""
     leaf = str(call).rsplit(".", 1)[-1]
-    return leaf.replace("_", " ")
+    return " ".join(_ACRONYMS.get(w, w) for w in leaf.split("_"))
 
 
 def reporter_for(display: Optional[RunDisplay]) -> Callable[..., None]:

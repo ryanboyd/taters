@@ -36,7 +36,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Union
 
-from ..helpers.gpu import (CPU_FALLBACK_NOTE, ensure_cuda_libraries, resolve_device)
+from ..helpers.gpu import (CPU_FALLBACK_NOTE, ensure_cuda_libraries, is_gpu_failure,
+                           resolve_device)
 from ..helpers.progress import announce
 from ..helpers.cliargs import CliSpec
 
@@ -107,16 +108,143 @@ def _prove_it_works(model) -> None:
         break
 
 
+def _model_stem(whisper_model: str) -> str:
+    """A model's own name, lower case: the last part of a hub id or a path."""
+    return str(whisper_model).rstrip("/\\").replace("\\", "/").split("/")[-1].lower()
+
+
 def english_only(whisper_model: str) -> bool:
     """
-    Whether a model name is one of Whisper's English-only variants.
+    Whether a model only knows English.
 
-    Those are the ``.en`` names (``base.en``, ``small.en``). A local model
-    directory is taken at its word: a folder called ``my-model.en`` is
-    presumably one too, and a folder without the suffix is assumed
-    multilingual, because there is no way to ask without loading it.
+    Those are the ``.en`` names (``base.en``, ``small.en``) and the
+    Distil-Whisper models (``distil-large-v3``), which were distilled on
+    English speech alone. A local model directory is taken at its word: a
+    folder called ``my-model.en`` is presumably one too, and a folder
+    without either mark is assumed multilingual, because there is no way to
+    ask without loading it.
     """
-    return str(whisper_model).rstrip("/\\").endswith(".en")
+    stem = _model_stem(whisper_model)
+    return stem.endswith(".en") or "distil" in stem
+
+
+def multilingual_counterpart(whisper_model: str) -> str:
+    """The multilingual model to use instead of an English-only one: the
+    same size without ``.en``, or large-v3 for a Distil-Whisper model."""
+    name = str(whisper_model)
+    if "distil" in _model_stem(name):
+        return "large-v3"
+    return name[:-3] if name.endswith(".en") else name
+
+
+def translation_caveat(whisper_model: str) -> str:
+    """
+    Why this model will not translate well, or ``""``. Not a refusal: the
+    model runs, but OpenAI left translation out of large-v3-turbo's
+    training, so asked to translate it returns degraded English or the
+    original language. The English-only models are refused outright
+    instead (see :func:`english_only`).
+    """
+    if "turbo" in _model_stem(whisper_model):
+        return (f"{whisper_model} was not trained to translate (OpenAI left translation out "
+                f"of the turbo model's training), so it may return poor English or the "
+                f"original language. large-v3 is the model trained for it")
+    return ""
+
+
+#: codes people reach for that are not the ISO 639-1 codes Whisper uses:
+#: a country's code instead of its language's, or a retired one
+_LANGUAGE_MISTAKES = {"jp": "ja", "cn": "zh", "kr": "ko", "ua": "uk", "gr": "el",
+                      "dk": "da", "se": "sv", "cz": "cs", "iw": "he", "in": "id",
+                      "ji": "yi", "jw": "jv", "br": "pt", "us": "en"}
+
+
+def _language_codes() -> Dict[str, str]:
+    """Whisper's language codes, each with its name."""
+    try:
+        from transformers.models.whisper.tokenization_whisper import LANGUAGES
+
+        return dict(LANGUAGES)
+    except Exception:  # pragma: no cover - transformers is a base dependency
+        from faster_whisper.tokenizer import _LANGUAGE_CODES
+
+        return {c: c for c in _LANGUAGE_CODES}
+
+
+def language_problem(language: Optional[str], whisper_model: str = "") -> str:
+    """
+    Why ``language`` will not work, or ``""``. Empty means detect it. A code
+    Whisper does not know is refused with the right one when the mistake
+    is a familiar one (``jp`` for Japanese is ``ja``) or the language was
+    written out by name; faster-whisper's own refusal, a list of a hundred
+    codes, came only after every model had loaded (a real run). A language
+    other than English for an English-only model is refused too.
+    """
+    if language is None or not str(language).strip():
+        return ""
+    code = str(language).strip().lower()
+    codes = _language_codes()
+    if code not in codes:
+        by_name = {name.lower(): c for c, name in codes.items()}
+        right = _LANGUAGE_MISTAKES.get(code) or by_name.get(code)
+        hint = (f" {codes.get(right, right).capitalize()} is {right!r}." if right in codes
+                else "")
+        return (f"{language!r} is not a language code Whisper knows.{hint} Use a two-letter "
+                f"code such as ja, en, es or zh, or leave it empty to detect the language")
+    if whisper_model and english_only(whisper_model) and code != "en":
+        return (f"{whisper_model} only knows English, so it cannot transcribe "
+                f"{codes[code].capitalize()}. Use {multilingual_counterpart(whisper_model)!r}, "
+                f"or another model without '.en' or 'distil' in its name")
+    return ""
+
+
+def validate_setting(name: str, value, settings: Dict[str, object]) -> str:
+    """
+    The settings screen's question to this step: why ``value`` will not do
+    for the setting ``name``, given the step's other ``settings``, or
+    ``""``. Asked as the value is typed, so a wrong language code is said
+    there rather than after every file has been converted.
+    """
+    # a code Whisper does not know is the one thing refused here; a language
+    # an English-only model cannot hear is settled by the screen moving the
+    # model, the way asking for a translation does
+    del settings
+    if name == "language":
+        return language_problem(value)
+    return ""
+
+
+def fetch_whisper_model(model_name: str) -> str:
+    """
+    The model's folder on this computer, downloading it first when it is
+    not there yet: a name (``large-v3``) or a hub id is fetched into the
+    model cache, a folder is used as it is.
+
+    Kept apart from putting the model on the GPU on purpose. Building a
+    ``WhisperModel`` from a name downloads it as it goes, so a download
+    that failed used to land in the GPU test and be reported as a GPU that
+    could not be used -- a Windows link-privilege error in a 3 GB download
+    sent a whole run to the CPU (a real run). Here a failed download is
+    tried once more (the commonest failure is a race the first attempt
+    settles) and then said as what it is.
+    """
+    if Path(model_name).is_dir():
+        return str(model_name)
+    from faster_whisper.utils import download_model
+
+    from ..helpers.hub_models import settle_links
+
+    settle_links()
+    last: Optional[BaseException] = None
+    for _attempt in range(2):
+        try:
+            return str(download_model(model_name))
+        except Exception as e:  # noqa: BLE001 - said below, in words
+            last = e
+    raise RuntimeError(
+        f"the Whisper model {model_name!r} could not be downloaded ({type(last).__name__}: "
+        f"{last}). This is the download, not the GPU: check the network and the free space "
+        f"in the model folder, and run again.") from last
 
 
 def _get_model(model_name: str, device: str, compute_type: str) -> tuple:
@@ -153,6 +281,9 @@ def _get_model(model_name: str, device: str, compute_type: str) -> tuple:
                 "has gone missing."
             ) from e
 
+        # the files first, outside the GPU test: a download that fails is a
+        # download that failed, not a GPU that cannot be used
+        path = fetch_whisper_model(model_name)
         if device == "cuda":
             # the math libraries are usually there, just unreachable -- torch
             # bundles them, and nothing puts torch's lib directory on the search
@@ -161,10 +292,12 @@ def _get_model(model_name: str, device: str, compute_type: str) -> tuple:
             ensure_cuda_libraries()
 
         try:
-            model = WhisperModel(model_name, device=device, compute_type=compute_type)
+            model = WhisperModel(path, device=device, compute_type=compute_type)
             _prove_it_works(model)
         except Exception as e:
-            if device != "cuda":
+            # only the GPU's own failures earn the slow road; anything else
+            # would fail on the CPU too, or worse, be hidden by it
+            if device != "cuda" or not is_gpu_failure(e):
                 raise
             # we say this loudly, every time. it's the difference between a
             # one-minute run and an hour-long one, and a run that quietly takes
@@ -176,7 +309,7 @@ def _get_model(model_name: str, device: str, compute_type: str) -> tuple:
             print("[transcribe] Falling back to the CPU.")
             device = "cpu"
             compute_type = _resolve_compute_type(None, device)
-            model = WhisperModel(model_name, device=device, compute_type=compute_type)
+            model = WhisperModel(path, device=device, compute_type=compute_type)
             _prove_it_works(model)
 
         resolved = (model, device, compute_type)
@@ -338,7 +471,7 @@ def transcribe_with_whisper(
     overwrite_existing : bool, default False
         If False and the CSV already exists, return the existing artifacts
         without re-running the model.
-    whisper_model : {"tiny", "tiny.en", "base", "base.en", "small", "small.en", "medium", "medium.en", "large-v2", "large-v3", "large-v3-turbo", "distill-large-v3"} or str, default "base.en"
+    whisper_model : {"tiny", "tiny.en", "base", "base.en", "small", "small.en", "medium", "medium.en", "large-v2", "large-v3", "large-v3-turbo", "distil-large-v3"} or str, default "base.en"
         A faster-whisper model name -- the ``.en`` variants are English-only
         and a little better at it -- or the path of a local CTranslate2 model
         directory.
@@ -439,9 +572,20 @@ def transcribe_with_whisper(
         # speech -- in other words, nonsense that looks like output.
         raise ValueError(
             f"translate=True needs a multilingual Whisper model, and "
-            f"{whisper_model!r} is English-only. Use the same size without "
-            f".en -- {whisper_model[:-3]!r} -- or any of tiny, base, small, "
+            f"{whisper_model!r} is English-only. Use "
+            f"{multilingual_counterpart(whisper_model)!r} -- or any of tiny, base, small, "
             f"medium, large-v3.")
+    problem = language_problem(language, whisper_model)
+    if problem:
+        raise ValueError(problem)
+    if language:
+        language = str(language).strip().lower()
+    if translate and translation_caveat(whisper_model):
+        # it runs, so it is said rather than refused: the person may have
+        # tried it and found it good enough for their language
+        announce(on_progress, translation_caveat(whisper_model))
+        if verbose:
+            print(f"[whisper] {translation_caveat(whisper_model)}.")
 
     out_dir = Path(out_dir).resolve() if out_dir is not None else (Path.cwd() / "transcripts")
     work_dir = out_dir / audio_path.stem

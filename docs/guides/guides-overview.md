@@ -17,7 +17,9 @@ tables, and getting the results written back as tables.
 Taters also arrives with a bunch of ready-made dictionaries and archetypes.
 [Built-in dictionaries and archetypes](bundled-dictionaries.md) lists every
 one of them, what it measures, and the citation to use when it ends up in
-something you publish.
+something you publish. The same goes for the prompts the LLM step ships with:
+[Built-in prompts](bundled-prompts.md) says what each one rates, on what scale, and
+which theory it comes from.
 
 What you will *not* find here is an exhaustive list of every parameter. That
 lives in the [API reference](../api/api-overview.md), one click away, and it

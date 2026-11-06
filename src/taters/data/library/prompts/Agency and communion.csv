@@ -1,0 +1,91 @@
+role,content
+system,You are an expert narrative psychologist trained in coding themes of agency and communion in personal stories.
+user,"Code the personal narrative below for themes of agency and communion.
+
+Agency themes (the self as a strong, autonomous actor):
+- self_mastery: gaining control over oneself, one's fate, or a challenge; insight that strengthens the self.
+- status_victory: winning, gaining prestige, or prevailing over others.
+- achievement_responsibility: accomplishing goals, succeeding at tasks, or taking on important responsibility.
+- empowerment: being enhanced or made stronger through contact with someone or something larger or more powerful.
+
+Communion themes (the self in connection with others):
+- love_friendship: experiencing romantic love, friendship, or affection.
+- dialogue: meaningful, reciprocal communication with another person.
+- caring_help: giving care, help, or support to someone (or receiving it in a way the author highlights).
+- unity_togetherness: feeling part of a larger group or community, or a sense of oneness with others.
+
+Scale for agency and for communion overall:
+0 = absent, 1 = minor or implicit, 2 = clearly present, 3 = dominant theme of the narrative
+
+Rules:
+- Code themes in the author's experience as narrated, not events described in passing.
+- Agency and communion are independent: a story can be high on both, low on both, or high on one.
+- Write a brief rationale before the codes.
+
+Respond with only a JSON object in exactly this format, with no other text (theme lists may be empty):
+{{""rationale"": ""..."", ""agency"": 0, ""agency_themes"": [], ""communion"": 0, ""communion_themes"": []}}
+
+Narrative:
+""""""
+After failing the bar exam twice, I made a strict schedule, studied every morning before work, and finally passed. It was the first time I felt I could steer my own life.
+"""""""
+assistant,"{{""rationale"": ""Story centers on overcoming failure through sustained effort and ends with a sense of control over life."", ""agency"": 3, ""agency_themes"": [""achievement_responsibility"", ""self_mastery""], ""communion"": 0, ""communion_themes"": []}}"
+user,"Code the personal narrative below for themes of agency and communion.
+
+Agency themes (the self as a strong, autonomous actor):
+- self_mastery: gaining control over oneself, one's fate, or a challenge; insight that strengthens the self.
+- status_victory: winning, gaining prestige, or prevailing over others.
+- achievement_responsibility: accomplishing goals, succeeding at tasks, or taking on important responsibility.
+- empowerment: being enhanced or made stronger through contact with someone or something larger or more powerful.
+
+Communion themes (the self in connection with others):
+- love_friendship: experiencing romantic love, friendship, or affection.
+- dialogue: meaningful, reciprocal communication with another person.
+- caring_help: giving care, help, or support to someone (or receiving it in a way the author highlights).
+- unity_togetherness: feeling part of a larger group or community, or a sense of oneness with others.
+
+Scale for agency and for communion overall:
+0 = absent, 1 = minor or implicit, 2 = clearly present, 3 = dominant theme of the narrative
+
+Rules:
+- Code themes in the author's experience as narrated, not events described in passing.
+- Agency and communion are independent: a story can be high on both, low on both, or high on one.
+- Write a brief rationale before the codes.
+
+Respond with only a JSON object in exactly this format, with no other text (theme lists may be empty):
+{{""rationale"": ""..."", ""agency"": 0, ""agency_themes"": [], ""communion"": 0, ""communion_themes"": []}}
+
+Narrative:
+""""""
+When my dad was in the hospital, my brother and I took turns sleeping in the chair next to his bed. We talked more on those nights than we had in years.
+"""""""
+assistant,"{{""rationale"": ""Caring for a parent together, with renewed closeness and conversation between siblings."", ""agency"": 0, ""agency_themes"": [], ""communion"": 3, ""communion_themes"": [""caring_help"", ""dialogue"", ""unity_togetherness""]}}"
+user,"Code the personal narrative below for themes of agency and communion.
+
+Agency themes (the self as a strong, autonomous actor):
+- self_mastery: gaining control over oneself, one's fate, or a challenge; insight that strengthens the self.
+- status_victory: winning, gaining prestige, or prevailing over others.
+- achievement_responsibility: accomplishing goals, succeeding at tasks, or taking on important responsibility.
+- empowerment: being enhanced or made stronger through contact with someone or something larger or more powerful.
+
+Communion themes (the self in connection with others):
+- love_friendship: experiencing romantic love, friendship, or affection.
+- dialogue: meaningful, reciprocal communication with another person.
+- caring_help: giving care, help, or support to someone (or receiving it in a way the author highlights).
+- unity_togetherness: feeling part of a larger group or community, or a sense of oneness with others.
+
+Scale for agency and for communion overall:
+0 = absent, 1 = minor or implicit, 2 = clearly present, 3 = dominant theme of the narrative
+
+Rules:
+- Code themes in the author's experience as narrated, not events described in passing.
+- Agency and communion are independent: a story can be high on both, low on both, or high on one.
+- Write a brief rationale before the codes.
+
+Respond with only a JSON object in exactly this format, with no other text (theme lists may be empty):
+{{""rationale"": ""..."", ""agency"": 0, ""agency_themes"": [], ""communion"": 0, ""communion_themes"": []}}
+
+Narrative:
+""""""
+{text}
+"""""""

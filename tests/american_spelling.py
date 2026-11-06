@@ -120,8 +120,20 @@ SKIP_PARTS = {"reference", "whisper-diarization", "venv", ".venv", "site",
 SKIP_FILES = {"happierfuntokenizing.py", "hashbrowns.py"}
 
 
+#: Proper names that keep their own spelling: a journal is called what it
+#: is called, and a citation that "corrected" it would point at nothing.
+PROPER_NAMES = ("Nature Human Behaviour", "Distil-Whisper")
+#: Model names with a British-looking word in them. `distil-large-v3` is
+#: faster-whisper's name for the model; respelled to `distill-large-v3` in a
+#: docstring, it was offered on the settings screen and failed to load.
+PROPER_PATTERNS = (r"\bdistil-[A-Za-z0-9.\-]+",)
+PROPER_RE = re.compile("|".join([re.escape(n) for n in PROPER_NAMES] + list(PROPER_PATTERNS)))
+
+
 def british_words(text: str) -> List[str]:
-    """The British spellings in one piece of prose, code spans excluded."""
+    """The British spellings in one piece of prose, code spans and proper
+    names excluded."""
+    text = PROPER_RE.sub(" ", text)
     found: List[str] = []
     last = 0
     pieces = []

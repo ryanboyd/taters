@@ -868,3 +868,49 @@ def test_an_ssh_host_that_reads_as_an_option_is_refused():
 def test_a_found_password_never_shows_in_a_repr():
     h = db.LoginHints(user="u", password="s3cret", source="~/.my.cnf")
     assert "s3cret" not in repr(h) and "s3cret" not in str(h)
+
+
+def _add_length(header, rows):
+    """A last pass that adds a column worked out per row: the shape the
+    LLM step's JSON parsing has, a column known only once the run is in."""
+    out = [*header[:2], "length", *header[2:]]
+
+    def each():
+        for row in rows:
+            yield {**row, "length": len(row["reply"])}
+    return out, each()
+
+
+@pytest.mark.parametrize("where", ["file", "db"])
+def test_a_finishing_pass_adds_columns_to_the_completed_table(lab, tmp_path, where):
+    ref = parse_ref(tmp_path / "out" / "llm.csv" if where == "file"
+                    else "db://lab/main/taters/out/llm")
+    with tables.append_table(ref, ["text_id", "reply", "error"], finish=_add_length) as (w, done):
+        assert done == set()
+        for i in range(250):
+            w.writerow([f"t{i}", "x" * i, ""])
+            w.flush()
+    rows = list(tables.read_rows(ref))
+    assert list(rows[0]) == ["text_id", "reply", "length", "error"]
+    assert len(rows) == 250 and rows[7]["length"] in ("7", 7)
+    if where == "file":
+        assert sorted(p.name for p in (tmp_path / "out").iterdir()) == ["llm.csv"], \
+            "the scratch and its sidecar are gone"
+    else:
+        names = [t.logical for t in tables.tables_under("db://lab/main/taters/out/")]
+        assert names == ["taters/out/llm"], "the stage is dropped"
+
+
+def test_a_failed_finishing_pass_keeps_the_rows_for_the_next_run(home, tmp_path):
+    ref = parse_ref(tmp_path / "llm.csv")
+
+    def broken(header, rows):
+        raise RuntimeError("the pass failed")
+
+    with pytest.raises(RuntimeError, match="the pass failed"):
+        with tables.append_table(ref, ["text_id", "reply"], finish=broken) as (w, done):
+            w.writerow(["t1", "a"])
+    assert not ref.path.exists()
+    with tables.append_table(ref, ["text_id", "reply"], finish=_add_length) as (w, done):
+        assert done == {"t1"}, "the answered row is picked up, not asked again"
+    assert [r["length"] for r in tables.read_rows(ref)] == ["1"]

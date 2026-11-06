@@ -78,25 +78,25 @@ ROW_INDENT = f"  {glyphs.INDENT} "
 #: out rather than spliced in, which is how one screen came to carry the
 #: phrase twice and run off the edge.
 _KEY_HINTS = {
-    "select": "[↑↓] move · [enter] picks the highlighted row · [1-9] jump · [esc] back",
+    "select": "[↑↓] move · [enter] picks the row · [1-9] jump · [esc]/[bksp] back",
     # too many rows to number, so the hint had better not offer a digit.
     # [pgup]/[pgdn] work on every list and are deliberately NOT named here;
     # the wizard guide lists them.
-    "select_long": "[↑↓] move · [enter] picks the highlighted row · [esc] back",
+    "select_long": "[↑↓] move · [enter] picks the row · [esc]/[bksp] back",
     # a single pick whose rows can be re-typed with the arrows (which column
     # is the group: "labels" or "numbers")
-    "select_cycle": "[↑↓] move · [enter] picks the row · [←→] change type · [esc] back",
+    "select_cycle": "[↑↓] move · [enter] picks · [←→] change type · [esc]/[bksp] back",
     # tick screens: entries toggle, actions choose
-    "tick": "[↑↓] move · [space] tick · [enter] picks the highlighted row · [esc] back",
-    "tick_cycle": "[space] tick · [enter] picks the row · [←→] change type · [esc] back",
+    "tick": "[↑↓] move · [space] tick · [enter] picks the row · [esc]/[bksp] back",
+    "tick_cycle": "[space] tick · [enter] picks · [←→] change type · [esc]/[bksp] back",
     # the one multi-select dialect (see `checkbox`): boxes tick, and the Done
     # row is the only way forward
-    "checkbox": f"[space] ticks a box · [enter] on {glyphs.TICK} Done continues · [esc] back",
-    "checkbox_cycle": f"[space] ticks a box · [enter] on {glyphs.TICK} Done continues · "
-                      f"[←→] type · [esc] back",
-    "confirm": "[y]/[n] answer · [enter] picks the highlighted row · [esc] back",
+    "checkbox": f"[space] ticks · [enter] on {glyphs.TICK} Done continues · [esc]/[bksp] back",
+    "checkbox_cycle": f"[space] ticks · [enter] on {glyphs.TICK} Done continues · "
+                      f"[←→] type · [esc]/[bksp] back",
+    "confirm": "[y]/[n] answer · [enter] picks the row · [esc]/[bksp] back",
 }
-_DEFAULT_HINT = "[enter] accept · [esc] back · [ctrl-c] quit"
+_DEFAULT_HINT = "[enter] accept · [esc]/[bksp] back · [ctrl-c] quit"
 #: The widest a hint may be, counting its two-space margin: narrower than
 #: an 80-column terminal, so the line never folds.
 HINT_WIDTH = 78
@@ -300,6 +300,16 @@ class LivePrompter(QuestionaryPrompter):
         """
         self._header = header
         self._compact_header = compact or ""
+
+    def clear(self) -> None:
+        """
+        A clean screen, and nothing held over to redraw on the next one. The
+        held notes are normally retired by the next question, but a chat asks
+        no questions -- its "Loading the model…" line came back above the
+        save question at the end.
+        """
+        super().clear()
+        self._screen_notes.clear()
 
     def note(self, text: str, *, style: str = "", wrap: bool = True) -> None:
         """
@@ -711,9 +721,9 @@ class LivePrompter(QuestionaryPrompter):
     # -- input -------------------------------------------------------------
     _BACK = object()          # the sentinel our Esc binding exits the app with
 
-    def _bind_escape(self, application) -> None:
+    def _bind_escape(self, application, *, typing: bool = False) -> None:
         """
-        Make Esc mean "undo that last answer".
+        Make Esc, and Backspace, mean "undo that last answer".
 
         prompt_toolkit reserves Escape as the prefix of every escape sequence,
         so a bare binding waits to see whether an arrow key is arriving. `eager`
@@ -728,6 +738,14 @@ class LivePrompter(QuestionaryPrompter):
         def _(event):
             event.app.exit(result=self._BACK)
 
+        # backspace means the same on a list: "undo that last answer" is what
+        # the key says everywhere else. on a typing prompt it deletes, as it
+        # must, so those say `typing` and keep the key
+        if not typing:
+            @bindings.add("backspace")
+            def _(event):
+                event.app.exit(result=self._BACK)
+
         existing = application.key_bindings
         if existing is None:
             application.key_bindings = bindings
@@ -736,7 +754,7 @@ class LivePrompter(QuestionaryPrompter):
             application.key_bindings = merge_key_bindings([existing, bindings])
 
     def _ask(self, question_obj, hint: str = _DEFAULT_HINT,
-             transient: bool = False, breadcrumb=None) -> Any:
+             transient: bool = False, breadcrumb=None, *, typing: bool = False) -> Any:
         # a transient question redraws over the one before it instead of wiping
         # the screen and starting over. stepping through folders is one act of
         # navigation, and clearing the terminal on every keypress makes it
@@ -763,7 +781,7 @@ class LivePrompter(QuestionaryPrompter):
         set_description_rows(desc)
         try:
             self._wrap(question_obj.application, hint, breadcrumb)
-            self._bind_escape(question_obj.application)
+            self._bind_escape(question_obj.application, typing=typing)
             if transient:
                 # prompt_toolkit keeps its last frame on screen so questionary
                 # can leave a "? Question  answer" record behind. for a step of

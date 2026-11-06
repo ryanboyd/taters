@@ -64,8 +64,11 @@ def test_every_text_step_is_offered_on_a_database():
 
 
 @pytest.mark.parametrize("step", _text_steps())
-def test_a_text_step_runs_from_a_table_into_a_table(lab, tmp_path, step):
+def test_a_text_step_runs_from_a_table_into_a_table(lab, tmp_path, step, monkeypatch):
     recipe = _recipes.by_id(step)
+    if step == "generate_with_llm":
+        # the plumbing is under test, not a model: canned replies
+        monkeypatch.setenv("TATERS_FAKE_LLM", "1")
     for extra in recipe.extras or ():
         probes = __import__("taters.ui.wizard", fromlist=["EXTRA_PROBES"]).EXTRA_PROBES.get(extra, ())
         for module in probes:
@@ -97,3 +100,38 @@ def test_a_text_step_runs_from_a_table_into_a_table(lab, tmp_path, step):
             if t.logical.startswith("taters/sweep/features/")]
     assert made, f"{step} wrote no feature table into the database"
     assert all(tables.count(t) > 0 for t in made)
+
+
+def test_a_prompt_fills_a_placeholder_from_a_database_column(lab, tmp_path, monkeypatch):
+    """{cond} in the prompt is filled from the table's own column, row by
+    row, the way a spreadsheet column fills it, and the column rides along
+    into the answers table."""
+    import json
+
+    prompt = tmp_path / "Fit.txt"
+    prompt.write_text("The writer was in condition {cond}. "
+                      "Rate the fit.\n", encoding="utf-8")
+    fake = tmp_path / "fake.json"
+    fake.write_text(json.dumps({"default": "{}", "contains": {
+        "condition A.": '{"fit": 2}', "condition B.": '{"fit": 6}'}}), encoding="utf-8")
+    monkeypatch.setenv("TATERS_FAKE_LLM", str(fake))
+    preset = compose(["generate_with_llm"], source="db",
+                     source_spec={"connection": "lab", "from": {"table": "posts", "as": "p"}},
+                     connection="lab", results_root="db://lab/main/taters/fill/",
+                     text_cols=["body"], id_cols=["id"], name="fill",
+                     overrides={"generate_with_llm": {"prompt_paths": [str(prompt)],
+                                            "pass_through_cols": ["id", "cond"]}},
+                     var_values={"llm_parse_json": True})
+    work = tmp_path / "run"
+    work.mkdir()
+    manifest = run_preset(preset, workers=1, work_dir=work,
+                          out_manifest=work / "run_manifest.json", verbose=False)
+    assert not manifest["errors"], manifest["errors"]
+    made = [t.logical for t in tables.tables_under("db://lab/main/taters/fill/")]
+    assert not [m for m in made if "stage" in m], "the parse pass drops its stage"
+    assert not (work / "features").exists(), "no row-level table touched the disk"
+    (answers,) = [t for t in tables.tables_under("db://lab/main/taters/fill/")
+                  if t.logical.endswith("features/llm")]
+    rows = list(tables.read_rows(answers))
+    assert len(rows) == 40
+    assert {(str(r["cond"]), str(r["Fit__fit"])) for r in rows} == {("A", "2"), ("B", "6")}

@@ -84,6 +84,9 @@ FACADE_METHODS = [
     ("text", "apply_text_predictor"),
     ("text", "import_hf_classifier"),
     ("text", "apply_hf_classifier"),
+    ("text", "generate_with_llm"),
+    # the LLM step's old name, kept: pipelines saved before the rename call it
+    ("text", "ask_language_model"),
     ("text", "apply_mem_model"),
     ("text", "topic_model_lda"),
     ("text", "apply_lda_model"),

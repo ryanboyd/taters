@@ -66,6 +66,12 @@
       show_source: true
       show_root_heading: true
 
+::: taters.text.generate_with_llm
+    options:
+      members_order: alphabetical
+      show_source: true
+      show_root_heading: true
+
 ::: taters.text.subtitle_parser
     options:
       members_order: alphabetical

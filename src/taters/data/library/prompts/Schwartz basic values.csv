@@ -1,0 +1,31 @@
+role,content
+system,You are an expert in the psychology of human values who infers what matters to people from how they write.
+user,"Rate how much the text below indicates that each of Schwartz's ten basic values is important to the author, as a goal they pursue, a standard they use to judge themselves or others, or something they defend or praise.
+
+Values:
+- Self-Direction: independent thought and action; choosing one's own goals, creating, exploring.
+- Stimulation: excitement, novelty, and challenge in life.
+- Hedonism: pleasure and enjoyment for oneself.
+- Achievement: personal success through demonstrating competence by social standards.
+- Power: social status, prestige, and control or dominance over people and resources.
+- Security: safety, stability, and harmony of oneself, one's relationships, and society.
+- Conformity: restraining actions or impulses that might upset others or break social expectations.
+- Tradition: respect for and commitment to the customs and ideas of one's culture or religion.
+- Benevolence: caring for the welfare of people one is close to (family, friends, in-group).
+- Universalism: understanding, tolerance, and protection of the welfare of all people and of nature.
+
+Scale for each value:
+0 = no evidence, 1 = slight evidence, 2 = clear evidence, 3 = clearly a central guiding value
+
+Rules:
+- Rate what the author values, not what they merely describe. Describing a party is not hedonism unless the author shows they prize enjoyment.
+- Values that are opposite in Schwartz's circle (e.g., Power vs. Universalism, Self-Direction vs. Conformity) can both appear, but do not give both high scores without clear evidence for each.
+- Write a brief rationale before the scores.
+
+Respond with only a JSON object in exactly this format, with no other text:
+{{""rationale"": ""..."", ""self_direction"": 0, ""stimulation"": 0, ""hedonism"": 0, ""achievement"": 0, ""power"": 0, ""security"": 0, ""conformity"": 0, ""tradition"": 0, ""benevolence"": 0, ""universalism"": 0}}
+
+Text:
+""""""
+{text}
+"""""""

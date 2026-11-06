@@ -1,0 +1,105 @@
+role,content
+system,"You are an expert in emotion science who identifies the emotions people express in writing, using appraisal theory."
+user,"Identify which emotions the author of the text below is expressing, and how intensely. Each emotion is defined by the appraisal, the way the author sees their situation, that gives rise to it.
+
+Emotions:
+- anger: the author or someone they care about has been wronged, demeaned, or unfairly obstructed, and someone is to blame.
+- fear: the author faces a threat or danger, either immediate or uncertain and looming (includes anxiety and worry).
+- sadness: the author has experienced a loss or a setback they cannot undo, or feels helpless about one.
+- disgust: the author is repelled by something offensive, contaminating, or morally repugnant.
+- joy: something good has happened, or the author is making progress toward something they want.
+- surprise: something unexpected has happened (positive or negative).
+
+Scale for each emotion:
+0 = not expressed, 1 = slight, 2 = moderate, 3 = strong
+
+Rules:
+- Rate the author's emotions, not the emotions a reader might feel and not those of people the author describes (unless the author shares them).
+- More than one emotion can be present. If no emotion is expressed, give all zeros.
+- Write a brief rationale naming the appraisals you see before the ratings.
+
+Respond with only a JSON object in exactly this format, with no other text:
+{{""rationale"": ""..."", ""anger"": 0, ""fear"": 0, ""sadness"": 0, ""disgust"": 0, ""joy"": 0, ""surprise"": 0}}
+
+Text:
+""""""
+They cancelled my flight with no explanation and then charged me a rebooking fee. Unbelievable.
+"""""""
+assistant,"{{""rationale"": ""The airline is blamed for unfair treatment (anger). The cancellation was unexpected (surprise)."", ""anger"": 3, ""fear"": 0, ""sadness"": 0, ""disgust"": 0, ""joy"": 0, ""surprise"": 1}}"
+user,"Identify which emotions the author of the text below is expressing, and how intensely. Each emotion is defined by the appraisal, the way the author sees their situation, that gives rise to it.
+
+Emotions:
+- anger: the author or someone they care about has been wronged, demeaned, or unfairly obstructed, and someone is to blame.
+- fear: the author faces a threat or danger, either immediate or uncertain and looming (includes anxiety and worry).
+- sadness: the author has experienced a loss or a setback they cannot undo, or feels helpless about one.
+- disgust: the author is repelled by something offensive, contaminating, or morally repugnant.
+- joy: something good has happened, or the author is making progress toward something they want.
+- surprise: something unexpected has happened (positive or negative).
+
+Scale for each emotion:
+0 = not expressed, 1 = slight, 2 = moderate, 3 = strong
+
+Rules:
+- Rate the author's emotions, not the emotions a reader might feel and not those of people the author describes (unless the author shares them).
+- More than one emotion can be present. If no emotion is expressed, give all zeros.
+- Write a brief rationale naming the appraisals you see before the ratings.
+
+Respond with only a JSON object in exactly this format, with no other text:
+{{""rationale"": ""..."", ""anger"": 0, ""fear"": 0, ""sadness"": 0, ""disgust"": 0, ""joy"": 0, ""surprise"": 0}}
+
+Text:
+""""""
+Grandma passed away this morning. I keep expecting her to call.
+"""""""
+assistant,"{{""rationale"": ""An irrevocable loss of a loved one, with lingering disbelief."", ""anger"": 0, ""fear"": 0, ""sadness"": 3, ""disgust"": 0, ""joy"": 0, ""surprise"": 0}}"
+user,"Identify which emotions the author of the text below is expressing, and how intensely. Each emotion is defined by the appraisal, the way the author sees their situation, that gives rise to it.
+
+Emotions:
+- anger: the author or someone they care about has been wronged, demeaned, or unfairly obstructed, and someone is to blame.
+- fear: the author faces a threat or danger, either immediate or uncertain and looming (includes anxiety and worry).
+- sadness: the author has experienced a loss or a setback they cannot undo, or feels helpless about one.
+- disgust: the author is repelled by something offensive, contaminating, or morally repugnant.
+- joy: something good has happened, or the author is making progress toward something they want.
+- surprise: something unexpected has happened (positive or negative).
+
+Scale for each emotion:
+0 = not expressed, 1 = slight, 2 = moderate, 3 = strong
+
+Rules:
+- Rate the author's emotions, not the emotions a reader might feel and not those of people the author describes (unless the author shares them).
+- More than one emotion can be present. If no emotion is expressed, give all zeros.
+- Write a brief rationale naming the appraisals you see before the ratings.
+
+Respond with only a JSON object in exactly this format, with no other text:
+{{""rationale"": ""..."", ""anger"": 0, ""fear"": 0, ""sadness"": 0, ""disgust"": 0, ""joy"": 0, ""surprise"": 0}}
+
+Text:
+""""""
+Got the acceptance letter today!! Still nervous about moving across the country, but I can't stop smiling.
+"""""""
+assistant,"{{""rationale"": ""Progress toward a valued goal (joy), with worry about an uncertain upcoming change (fear)."", ""anger"": 0, ""fear"": 1, ""sadness"": 0, ""disgust"": 0, ""joy"": 3, ""surprise"": 0}}"
+user,"Identify which emotions the author of the text below is expressing, and how intensely. Each emotion is defined by the appraisal, the way the author sees their situation, that gives rise to it.
+
+Emotions:
+- anger: the author or someone they care about has been wronged, demeaned, or unfairly obstructed, and someone is to blame.
+- fear: the author faces a threat or danger, either immediate or uncertain and looming (includes anxiety and worry).
+- sadness: the author has experienced a loss or a setback they cannot undo, or feels helpless about one.
+- disgust: the author is repelled by something offensive, contaminating, or morally repugnant.
+- joy: something good has happened, or the author is making progress toward something they want.
+- surprise: something unexpected has happened (positive or negative).
+
+Scale for each emotion:
+0 = not expressed, 1 = slight, 2 = moderate, 3 = strong
+
+Rules:
+- Rate the author's emotions, not the emotions a reader might feel and not those of people the author describes (unless the author shares them).
+- More than one emotion can be present. If no emotion is expressed, give all zeros.
+- Write a brief rationale naming the appraisals you see before the ratings.
+
+Respond with only a JSON object in exactly this format, with no other text:
+{{""rationale"": ""..."", ""anger"": 0, ""fear"": 0, ""sadness"": 0, ""disgust"": 0, ""joy"": 0, ""surprise"": 0}}
+
+Text:
+""""""
+{text}
+"""""""

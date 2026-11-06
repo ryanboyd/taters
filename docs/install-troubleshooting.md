@@ -3,6 +3,24 @@
 Everything that does not belong on the [install page](install-guide.md).
 Nothing here is required reading — come looking when something breaks.
 
+## Installing one feature at a time
+
+`pip install taters` covers text analysis, transcription, embeddings,
+language models at 16-bit and SQLite. `taters[standard]` adds everything
+below except diarization and glottal features; `taters[all]` adds
+diarization too. Each can also be installed on its own:
+
+| Extra | Unlocks | Note |
+|---|---|---|
+| `taters[db]` | Text in MySQL, MariaDB or PostgreSQL | SQLite needs nothing |
+| `taters[vectors]` | Training word vectors (word2vec, fastText) | Python 3.13 or older |
+| `taters[stanza]` | Stanza as the tokenizer and tagger | downloads a language model on first use |
+| `taters[llm]` | Loading a language model in 4-bit, so a 7B model fits an 8 GB card | needs a CUDA GPU |
+| `taters[vocalacoustics]` | Pitch, loudness, voice quality from audio | |
+| `taters[cuda]` | The NVIDIA cuDNN library transcription uses on a GPU | about 700 MB; does nothing without an NVIDIA card |
+| `taters[diarization]` | Who spoke when, in recordings | Python 3.13 or older; three GitHub packages, below |
+| `taters[glottal]` | Three extra vocal-acoustics measures (HRF, NAQ, OQ) | not in `all`, below |
+
 ## Speaker diarization
 
 Diarization works out *who spoke when*. It is the most involved thing to
@@ -50,6 +68,19 @@ it can fail with an error naming some unrelated package, because pip finds the
 problem while working out versions for everything else.
 
 Skip it unless you need those three measures.
+
+## Generating responses with an LLM in 4-bit
+
+The "Generate responses with an LLM" step runs on the base install: an
+instruction-tuned model loads through transformers at 16-bit, or a local
+server (Ollama, LM Studio) answers instead and nothing is loaded here.
+Loading a model in 4-bit so that a 7B model fits an 8 GB card needs
+`accelerate` and `bitsandbytes` (`pip install "taters[llm]"`, also part of
+`taters[standard]` and `taters[all]`); `accelerate` alone is what lets a
+model too big for one card be sharded across several. Without them
+the step says the model does not fit and names the fixes, rather than
+loading it anyway and spilling to the CPU. bitsandbytes needs a CUDA GPU;
+it has no useful build for macOS or CPU-only machines.
 
 ## Training word vectors
 

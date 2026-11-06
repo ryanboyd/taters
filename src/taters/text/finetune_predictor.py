@@ -406,6 +406,10 @@ def _train_one(base, tokenizer, table: List[dict], tasks, weights, train_rows, v
     from transformers import AutoModel, get_linear_schedule_with_warmup
 
     torch.manual_seed(int(seed))
+    # before anything downloads: see settle_links
+    from ..helpers.hub_models import settle_links
+
+    settle_links()
     model = AutoModel.from_pretrained(base)
     model.to(device_name)
     if gradient_checkpointing and hasattr(model, "gradient_checkpointing_enable"):

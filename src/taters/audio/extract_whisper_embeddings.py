@@ -91,7 +91,7 @@ def extract_whisper_embeddings(
     output_dir : str | Path | None, optional
         Directory for the output CSV. If None, defaults to
         ``./features/whisper-embeddings``.
-    model_name : {"tiny", "tiny.en", "base", "base.en", "small", "small.en", "medium", "medium.en", "large-v2", "large-v3", "large-v3-turbo", "distill-large-v3"} or str, default "base"
+    model_name : {"tiny", "tiny.en", "base", "base.en", "small", "small.en", "medium", "medium.en", "large-v2", "large-v3", "large-v3-turbo", "distil-large-v3"} or str, default "base"
         Model identifier passed through to the worker: a faster-whisper model
         name, or the path of a local CTranslate2 model directory.
     device : {"auto","cuda","cpu"}, default "auto"

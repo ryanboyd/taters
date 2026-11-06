@@ -330,6 +330,10 @@ def extract_sentence_embeddings(
     # and on the run display too, not only under `verbose` -- see the same
     # announcement in transformer_embeddings for why
     announce(on_progress, device_note("embedding", resolved, fallback_reason))
+    # before anything downloads: see settle_links
+    from ..helpers.hub_models import settle_links
+
+    settle_links()
     model = SentenceTransformer(model_name, device=resolved)
     dim = int(getattr(model, "get_sentence_embedding_dimension", lambda: 768)())
 

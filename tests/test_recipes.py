@@ -466,9 +466,8 @@ def test_a_per_step_label_names_a_setting_that_step_actually_has(recipe):
     rather than who tags the text. A label keyed by a name the step does not
     have is dead text nobody will ever see, and the mistake is invisible.
 
-    Nothing in the catalog needs an override at the moment (the step that did
-    has been folded into the topic models), so this is currently vacuous --
-    deliberately so, since it is the guard for the next one.
+    The LLM step names all of its settings this way: every row of its screen
+    in plain words.
 
     Per recipe rather than a loop over all of them, so that a step whose
     optional dependency is not installed skips itself instead of taking the
@@ -482,7 +481,9 @@ def test_a_per_step_label_names_a_setting_that_step_actually_has(recipe):
     except ImportError as exc:
         pytest.skip(f"{recipe.id} needs an optional dependency: {exc}")
     for name in recipe.labels:
-        assert name in spec, f"{recipe.id}: labels[{name!r}] is not a setting"
+        # `spec.get`, not `in`: the spec is not a container, which went
+        # unnoticed while no step had labels to check (the LLM step is first)
+        assert spec.get(name) is not None, f"{recipe.id}: labels[{name!r}] is not a setting"
 
 
 # ---------------------------------------------------------------------------
@@ -704,6 +705,7 @@ def test_the_gpu_steps_are_the_ones_we_think_they_are():
         "archetypes",            # ArchetypeQuantifier loads a sentence-transformer
         "sentence_embeddings",   # loads a sentence-transformer
         "transformer_embeddings",  # loads an encoder
+        "generate_with_llm",                 # loads a generative model
         "video_embeddings",        # loads a vision encoder per worker
         "adapt_encoder",           # trains one
         "pretrain_encoder",        # trains one from nothing

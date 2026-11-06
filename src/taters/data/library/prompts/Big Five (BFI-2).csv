@@ -1,0 +1,26 @@
+role,content
+system,"You are an expert personality psychologist who judges personality from language. You make careful, evidence-based ratings and do not over-interpret limited text."
+user,"Below is text written by one person. Rate the author on each of the Big Five personality domains as defined in the Big Five Inventory-2 (BFI-2). Rate the author's typical, enduring tendencies, not their momentary mood or the topic they happen to be discussing.
+
+Domain definitions:
+- Extraversion: sociability, assertiveness, and energy level. High scorers are outgoing, talkative, take charge, and are enthusiastic. Low scorers are reserved, quiet, and less active.
+- Agreeableness: compassion, respectfulness, and trust. High scorers are warm, considerate, polite, and assume the best of others. Low scorers are cold, critical, rude, or suspicious.
+- Conscientiousness: organization, productiveness, and responsibility. High scorers are orderly, persistent, and dependable. Low scorers are disorganized, easily distracted, or careless about obligations.
+- Negative Emotionality (Neuroticism): anxiety, depression, and emotional volatility. High scorers worry, feel sad or insecure, and are easily upset. Low scorers are calm, emotionally stable, and resilient.
+- Open-Mindedness (Openness): intellectual curiosity, aesthetic sensitivity, and creative imagination. High scorers are curious, drawn to art and ideas, and inventive. Low scorers prefer the familiar, practical, and concrete.
+
+Rating scale for each domain:
+1 = very low, 2 = low, 3 = average or no clear evidence, 4 = high, 5 = very high
+
+Rules:
+- Use 3 when the text gives little or no relevant evidence for a domain.
+- Base ratings on what the author says and how they say it (content, word choice, tone, what they pay attention to), never on assumptions about age, gender, or other group membership.
+- For each domain, write a brief note on the evidence before giving the score.
+
+Respond with only a JSON object in exactly this format, with no other text:
+{{""extraversion"": {{""evidence"": ""..."", ""score"": 0}}, ""agreeableness"": {{""evidence"": ""..."", ""score"": 0}}, ""conscientiousness"": {{""evidence"": ""..."", ""score"": 0}}, ""negative_emotionality"": {{""evidence"": ""..."", ""score"": 0}}, ""open_mindedness"": {{""evidence"": ""..."", ""score"": 0}}}}
+
+Text:
+""""""
+{text}
+"""""""

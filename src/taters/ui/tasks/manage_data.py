@@ -29,7 +29,7 @@ def entries():
     # pipelines first (the thing a run leaves behind that you re-run), then
     # the things you import, then the things runs produce, and last the cache
     # -- which is not yours so much as downloaded on your behalf
-    return [manage.TASK, library.TASK, library.STOPLISTS_TASK,
+    return [manage.TASK, library.TASK, library.STOPLISTS_TASK, library.PROMPTS_TASK,
             library.MODELS_TASK, library.ENCODERS_TASK, model_cache.TASK]
 
 

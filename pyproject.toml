@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "taters"
-version = "1.6.2"
+version = "1.7.0"
 authors = [{ name = "Ryan L. Boyd", email = "ryan@ryanboyd.io" }]
 description = "Analyze, process, and extract from many types of input data. Highly modular/customizable."
 
@@ -16,6 +16,13 @@ license = { text = "MIT" }
 dependencies = [
   # Core, minimal runtime for splitting, per-speaker builds, and embeddings
   "faster-whisper>=1.1.0",
+  # PyAV 19 removed av.open's `metadata_errors` argument, and faster-whisper
+  # 1.2.1 (its newest release) still passes it on every call to decode audio,
+  # so on av 19 every transcription fails before it starts:
+  #   TypeError: open() got an unexpected keyword argument 'metadata_errors'
+  # (a real run on Windows, 2026-11-06). Fixed in faster-whisper's source,
+  # not yet released; lift this once a release decodes on av 19.
+  "av<19",
   "ctranslate2",            # imported directly by the embedding worker
   "transformers>=4.38.0,<5",   # for WhisperFeatureExtractor; <5 pairs with nemo 2.x
   "librosa>=0.10.1",
@@ -169,6 +176,7 @@ stanza = ["stanza>=1.7"]
 # ask for it: the install succeeds, the training step is greyed out, and
 # "Check my setup" says "not available for Python 3.14" instead of "not
 # installed". drop the marker when gensim publishes 3.14 wheels.
+llm = ["accelerate>=0.26", "bitsandbytes>=0.43.1; sys_platform != 'darwin'"]
 vectors = ["gensim>=4.3.3; python_version < '3.14'"]
 
 # Reading from and writing to a MySQL/MariaDB or PostgreSQL database. SQLite
@@ -176,13 +184,15 @@ vectors = ["gensim>=4.3.3; python_version < '3.14'"]
 # every platform, which is why these two and not mysqlclient or psycopg2.
 db = ["PyMySQL>=1.1", "psycopg[binary]>=3.1"]
 # the two by name as well, for anyone who only ever talks to one engine
-mysql = ["PyMySQL>=1.1"]
-postgres = ["psycopg[binary]>=3.1"]
 
 standard = [
   "PyMySQL>=1.1",
+  "accelerate>=0.26",
+  "bitsandbytes>=0.43.1; sys_platform != 'darwin'",
   "gensim>=4.3.3; python_version < '3.14'",
-  "nvidia-cudnn-cu12",
+  # no macOS wheel exists, so without the marker `standard`/`all` fail to
+  # install on a Mac; the libraries are useless there anyway
+  "nvidia-cudnn-cu12; sys_platform != 'darwin'",
   "praat-parselmouth>=0.4.6",
   "psycopg[binary]>=3.1",
   "soundfile",
@@ -196,6 +206,8 @@ standard = [
 all = [
   "PyMySQL>=1.1",
   "psycopg[binary]>=3.1",
+  "accelerate>=0.26",
+  "bitsandbytes>=0.43.1; sys_platform != 'darwin'",
   # <3 is required: NeMo 3.0 removed nemo.collections.asr.models.msdd_models,
   # which the vendored whisper-diarization code imports.
   #
@@ -221,7 +233,9 @@ all = [
   # NVIDIA lifts that cap.
   "nemo-toolkit[asr]>=2.7,<3.0; python_version < '3.14'",
   "gensim>=4.3.3; python_version < '3.14'",
-  "nvidia-cudnn-cu12",
+  # no macOS wheel exists, so without the marker `standard`/`all` fail to
+  # install on a Mac; the libraries are useless there anyway
+  "nvidia-cudnn-cu12; sys_platform != 'darwin'",
   "praat-parselmouth>=0.4.6",
   "soundfile",
   "stanza>=1.7",
@@ -259,12 +273,13 @@ diarization = [
 ]
 # User-space cuDNN libs for CUDA 12 (handy on many systems)
 cuda = [
-  "nvidia-cudnn-cu12",
+  # no macOS wheel exists, so without the marker `standard`/`all` fail to
+  # install on a Mac; the libraries are useless there anyway
+  "nvidia-cudnn-cu12; sys_platform != 'darwin'",
 ]
 # Kept as an empty alias. textstat moved into the base install, but
 # `pip install "taters[readability]"` appears in older docs and in people's
 # notes, and an unknown extra is a warning rather than a silent no-op.
-readability = []
 
 vocalacoustics = [
   # soundfile is imported at module level by analyze_vocal_acoustics; without it

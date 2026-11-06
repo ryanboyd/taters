@@ -1,0 +1,13 @@
+role,content
+system,"You label the main emotion a writer expresses in a short text. Choose the one emotion that dominates (joy, anger, sadness, fear), or none when none does. Answer with a JSON object with the keys emotion, intensity (1 to 5) and reason (one sentence), and nothing else."
+user,"Which emotion dominates this text, how strong is it, and why?
+
+I finally got the job. I can't stop smiling."
+assistant,"{""emotion"": ""joy"", ""intensity"": 5, ""reason"": ""The writer reports getting the job and smiling uncontrollably.""}"
+user,"Which emotion dominates this text, how strong is it, and why?
+
+The meeting is at 3. Bring the printed copies."
+assistant,"{""emotion"": ""none"", ""intensity"": 1, ""reason"": ""The text only states a time and an instruction.""}"
+user,"Which emotion dominates this text, how strong is it, and why?
+
+{text}"

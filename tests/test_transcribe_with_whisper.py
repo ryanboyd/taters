@@ -40,6 +40,14 @@ class FakeSegment(SimpleNamespace):
     """Stands in for a faster-whisper segment: `.start`, `.end` (seconds), `.text`."""
 
 
+@pytest.fixture(autouse=True)
+def _files_already_here(monkeypatch):
+    """The model's files are taken as downloaded: these tests are about the
+    GPU and the transcript, and the fetch has tests of its own
+    (test_model_fetch.py)."""
+    monkeypatch.setattr(twh, "fetch_whisper_model", lambda name: name)
+
+
 class FakeModel:
     """
     A stand-in for `faster_whisper.WhisperModel`.
@@ -347,7 +355,7 @@ def test_decoding_options_reach_the_model(wav, fake_model):
     """A dropped option is invisible at runtime — the transcript just gets worse."""
     model = fake_model([FakeSegment(start=0.0, end=1.0, text="hi")])
     transcribe_with_whisper(
-        wav, language="fr", beam_size=1, vad_filter=False,
+        wav, whisper_model="base", language="fr", beam_size=1, vad_filter=False,
         initial_prompt="Taters, LIWC", verbose=False,
     )
 
@@ -932,3 +940,73 @@ def test_translating_with_an_english_only_model_is_refused_before_loading(
 ])
 def test_english_only_is_read_off_the_model_name(name, expected):
     assert twh.english_only(name) is expected
+
+
+@pytest.mark.parametrize("name,expected", [
+    ("distil-large-v3", True), ("Systran/faster-distil-whisper-large-v3", True),
+    ("large-v3-turbo", False), ("turbo", False)])
+def test_distil_whisper_models_are_english_only(name, expected):
+    """Distil-Whisper was distilled on English speech alone: it can neither
+    translate nor hear Japanese, and was treated as multilingual."""
+    assert twh.english_only(name) is expected
+    if expected:
+        assert twh.multilingual_counterpart(name) == "large-v3"
+
+
+@pytest.mark.parametrize("code,said", [
+    ("jp", "Japanese is 'ja'"), ("cn", "Chinese is 'zh'"), ("kr", "Korean is 'ko'"),
+    ("japanese", "Japanese is 'ja'"), ("klingon", "not a language code Whisper knows."),
+])
+def test_a_language_code_whisper_does_not_know_is_refused_with_the_right_one(code, said):
+    problem = twh.language_problem(code)
+    assert "is not a language code Whisper knows" in problem and said in problem
+
+
+@pytest.mark.parametrize("code", [None, "", "  ", "ja", "JA", " en ", "zh"])
+def test_a_known_code_or_none_is_fine(code):
+    assert twh.language_problem(code) == ""
+
+
+def test_a_language_other_than_english_on_an_english_only_model_is_refused():
+    assert "only knows English" in twh.language_problem("ja", "base.en")
+    assert "'large-v3'" in twh.language_problem("ja", "distil-large-v3")
+    assert twh.language_problem("en", "base.en") == ""
+
+
+def test_a_wrong_language_code_is_refused_before_any_model_loads(wav, monkeypatch):
+    """A real run: `jp` would have been refused by faster-whisper only after
+    every video was converted and the model loaded."""
+    monkeypatch.setattr(twh, "_get_model", lambda *a, **k: pytest.fail("should not load"))
+    with pytest.raises(ValueError, match="Japanese is 'ja'"):
+        transcribe_with_whisper(wav, whisper_model="large-v3", language="jp", verbose=False)
+
+
+def test_a_known_code_is_passed_on_cleaned(wav, fake_model):
+    model = fake_model([])
+    transcribe_with_whisper(wav, whisper_model="large-v3", language=" JA ", verbose=False)
+    assert model.calls[-1]["language"] == "ja"
+
+
+def test_translating_with_turbo_is_said_but_not_refused():
+    caveat = twh.translation_caveat("large-v3-turbo")
+    assert "not trained to translate" in caveat and "large-v3" in caveat
+    assert twh.translation_caveat("large-v3") == "" and twh.translation_caveat("base") == ""
+
+
+def test_the_settings_screen_can_ask_the_step_about_a_value():
+    check = twh.validate_setting
+    assert "Japanese is 'ja'" in check("language", "jp", {"whisper_model": "large-v3"})
+    assert check("language", "ja", {"whisper_model": "base.en"}) == "", \
+        "the screen moves the model for a language it cannot hear; only bad codes are refused"
+    assert check("whisper_model", "base.en", {"language": "ja"}) == ""
+
+
+def test_the_model_list_names_distil_as_faster_whisper_does():
+    """`distill-large-v3` (a respelling) was offered and could not load."""
+    import inspect
+
+    doc = inspect.getdoc(twh.transcribe_with_whisper)
+    assert '"distil-large-v3"' in doc and "distill-large" not in doc
+    from faster_whisper.utils import _MODELS
+
+    assert "distil-large-v3" in _MODELS

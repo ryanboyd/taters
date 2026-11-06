@@ -22,6 +22,10 @@ Importing pre-trained vectors is here too, under the fourth verb, though it
 trains nothing: it is where someone looks for "get a word-vector model into
 Taters". It is a one-off, not a pipeline -- there is no corpus to re-run it
 over -- so it asks for the file and writes the model, then offers the library.
+
+The fifth verb, chatting with a generative model, trains nothing either; it
+lives here because it is something done *with* a model rather than with a
+dataset (:mod:`taters.ui.chat`). It comes back to this menu when it ends.
 """
 from __future__ import annotations
 
@@ -47,6 +51,9 @@ VERBS: List[Tuple[str, str, str]] = [
      "numbers or categories, cross-validated."),
     ("wrangle", "Import or export language models",
      "Bring a model in, or copy one out to share."),
+    ("chat", "Chat with a language model",
+     "Talk with a generative model, with a system prompt of your own; save "
+     "the conversation as a CSV when you finish."),
 ]
 
 #: The second question, per verb that trains: ``(value, label, help, recipe)``.
@@ -335,6 +342,17 @@ def run_train(prompter: Prompter, *, cwd: Path) -> Optional[bool]:
                 except GoBack:
                     stage = "verb"
                     continue
+            if verb == "chat":
+                # a chat isn't a pipeline run, so when it's over we land back
+                # on this menu rather than the main one
+                from .chat import run_chat
+
+                try:
+                    run_chat(prompter, cwd=cwd)
+                except GoBack:
+                    pass
+                stage = "verb"
+                continue
             try:
                 kind = str(prompter.select("With what?", _kind_rows(verb)))
             except GoBack:

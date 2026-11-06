@@ -71,6 +71,8 @@ _PACKAGES = [
     ("disvoice", "vocal acoustics", False),
     ("nemo-toolkit", "speaker diarization", False),
     ("gensim", "training word vectors", False),
+    ("accelerate", "language models in 4-bit, or across several GPUs", False),
+    ("bitsandbytes", "language models in 4-bit", False),
 ]
 
 

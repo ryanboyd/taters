@@ -76,3 +76,17 @@ def test_the_scanner_reads_prose_and_leaves_code_alone():
     assert british_words("`neighbour_wordclouds` draws the neighbours") == ["neighbours"]
     assert british_words("neighbours.csv is the file; the Colour column") == ["Colour"]
     assert british_words("run the analyses; raise Cancelled") == []
+
+
+def test_a_proper_name_keeps_its_own_spelling():
+    """A citation to *Nature Human Behaviour* cannot be respelled; the same
+    word in ordinary prose is still caught."""
+    assert british_words("Wright et al. (2026). *Nature Human Behaviour, 10*(3).") == []
+    assert british_words("the model's behaviour") == ["behaviour"]
+
+
+def test_a_model_name_keeps_its_own_spelling():
+    """faster-whisper calls it `distil-large-v3`; the respelled
+    `distill-large-v3` was offered on a settings screen and could not load."""
+    assert british_words('one of "large-v3", "distil-large-v3", or a Distil-Whisper model') == []
+    assert british_words("we distil the notes") == ["distil"]

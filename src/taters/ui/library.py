@@ -15,7 +15,7 @@ is exactly one flow to learn.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import Callable, List, Optional, Sequence, Tuple
 
 from ..helpers import library as lib
 from . import glyphs
@@ -33,7 +33,7 @@ SINGLE_PICK_KINDS = frozenset({"encoders"})
 #: Kinds whose picker opens with nothing ticked: "score with every model I
 #: ever saved" is not what anyone means by default, where "use all of my
 #: dictionaries" usually is.
-START_UNTICKED_KINDS = frozenset({"models"})
+START_UNTICKED_KINDS = frozenset({"models", "prompts"})
 
 # action rows. the colons keep them from colliding with entry names, which are
 # filename stems (same convention as the wizard's :done / :shared).
@@ -53,6 +53,7 @@ _BACK = ":back"
 #: Prompter.ticks_in_place): enter on an entry ticks it there, so approving
 #: the ticked set has to be a row of its own.
 _USE_TICKED = ":use-ticked"
+_COMPOSE = ":compose"
 
 
 def _size_of(path: Path) -> str:
@@ -179,6 +180,176 @@ def manage_library(prompter: Prompter, kind: lib.LibraryKind) -> None:
 
 _APPLY_DONE = ":done"
 _TYPE_ENCODER = ":type"
+
+
+_SERVER = ":server"
+
+
+def pick_generative_model(prompter: Prompter, current: str = "", *,
+                          for_step: str = "", later: str = "") -> Optional[str]:
+    """
+    Choose an instruction-tuned language model for the "ask a language
+    model" step: what is already downloaded, then the curated names with
+    their size in memory, then a local server (Ollama, LM Studio, vLLM)
+    by URL, then any name or folder typed. Returns the name, path or URL,
+    or None for Esc. ``later`` is what to say when the download is left for
+    later (the default speaks of a pipeline's first run).
+    """
+    from ..text._generation import (CURATED_GENERATIVE_MODELS,
+                                    cached_hub_generative_models)
+
+    rows: List[Choice] = []
+    cached = dict(cached_hub_generative_models())
+    curated = dict(CURATED_GENERATIVE_MODELS)
+    for hub_id, note in cached.items():
+        rows.append(Choice(hub_id, hub_id, f"downloaded · {note}"
+                           + (f" · {curated[hub_id]}" if hub_id in curated else "")))
+    for hub_id, note in CURATED_GENERATIVE_MODELS:
+        if hub_id not in cached:
+            rows.append(Choice(hub_id, hub_id, f"not on this machine yet (offered next) · "
+                                                f"{note}"))
+    rows.append(Choice(_SERVER, "A local server (Ollama, LM Studio, vLLM)…",
+                       "Answers come from a server on this machine or your network; "
+                       "nothing is loaded here. You give its URL and the model name."))
+    rows.append(Choice(_TYPE_ENCODER, "Something else — type a name or path",
+                       "Any instruction-tuned Hugging Face model, or a checkpoint folder."))
+    whose = f"The model for '{for_step}'." if for_step else "The language model."
+    prompter.reason(f"{whose} Smaller is faster and fits more machines; bigger judges "
+                    f"better. The size in memory is what decides what runs here.")
+    default = current if any(c.value == current for c in rows) else None
+    while True:
+        try:
+            picked = str(prompter.select("Which language model?", rows, default=default))
+            if picked == _SERVER:
+                url = str(prompter.text("Server URL (OpenAI-style chat API):",
+                                        default="http://localhost:11434/v1")).strip()
+                if not url:
+                    return None
+                name = str(prompter.text("Model name on that server:", default="")).strip()
+                return f"{url.rstrip('/')}#{name}" if name else url
+            if picked == _TYPE_ENCODER:
+                picked = str(prompter.text("Model name or folder:", default=current)).strip()
+                if not picked:
+                    return None
+        except GoBack:
+            return None
+        if make_local(prompter, picked, later=later or _LATER):
+            return picked
+        default = picked if any(c.value == picked for c in rows) else default
+
+
+#: what the wizard says when a model is left for the first run to fetch
+_LATER = "It will be downloaded when the pipeline first runs."
+
+
+def make_local(prompter: Prompter, model: str, *, later: str = "") -> bool:
+    """
+    Get a Hugging Face model onto this machine when it is chosen, rather
+    than have the first run fail on it minutes later (a real run: a gated
+    Llama, picked in the wizard, refused at the run).
+
+    Already here in full: nothing is asked. Not here: say so with the size,
+    and offer to download it now. A gated model asks for a Hugging Face
+    token, saves it the way the hub keeps sign-ins, and waits on an
+    approval still pending. Returns True to keep the pick -- downloaded,
+    or left for the first run -- and False to pick again (no such model,
+    or "pick another" asked for). A folder, a server address, and a dry
+    run with canned replies are kept as they are.
+    """
+    import os
+
+    from ..helpers import hub_models as hm
+    from ..text._generation import FAKE_LLM_ENV
+
+    later = later or _LATER   # when the model gets fetched if not now
+    name = str(model or "").strip()
+    if (not name or "/" not in name or name.startswith(("http://", "https://"))
+            or Path(name).exists() or os.environ.get(FAKE_LLM_ENV)):
+        return True
+    if hm.is_downloaded(name):
+        return True
+    with prompter.scanning(f"Looking up {name} on Hugging Face") as seen:
+        seen("listing its files")
+        plan = hm.plan_download(name)
+    if plan.state == "missing":
+        prompter.note(f"  No model called {name} on Hugging Face. Check the name "
+                      f"(owner/model).", style="yellow")
+        return False
+    if plan.state == "offline":
+        prompter.note(f"  Could not reach Hugging Face to look up {name} ({plan.why}). "
+                      f"{later}", style="yellow")
+        return True
+    prompter.reason(f"{name} is not on this machine yet. It is about {plan.gigabytes} to "
+                    f"download, once; every run after uses the copy here.")
+    try:
+        if not prompter.confirm("Download it now?", default=True):
+            prompter.note(f"  {later}")
+            return True
+        state = hm.access(name)
+        while state != "ok":
+            if state in ("offline", "missing"):
+                prompter.note(f"  Could not check access to {name}. {later}", style="yellow")
+                return True
+            if state == "pending":
+                prompter.reason(
+                    f"Hugging Face knows this machine's account, but it is not approved for "
+                    f"{name} yet. Accept the license at {hm.model_page(name)} if you have "
+                    f"not; approval usually takes minutes, sometimes a day.")
+                what = str(prompter.select("What now?", [
+                    Choice("again", "Check again", "After the model page says you have access."),
+                    Choice("later", "Leave it for the first run",
+                           "The run downloads it, and stops if access is still pending."),
+                    Choice("other", "Pick another model", "One that needs no approval.")],
+                    default="again"))
+                if what == "later":
+                    prompter.note(f"  {later}")
+                    return True
+                if what == "other":
+                    return False
+            else:
+                if state == "gated":
+                    prompter.reason(
+                        f"{name} is gated: its owner approves each account. First open "
+                        f"{hm.model_page(name)} and accept the license. Then make a token at "
+                        f"https://huggingface.co/settings/tokens (the Read kind) and paste "
+                        f"it here.")
+                else:
+                    prompter.reason("Hugging Face did not accept the token this machine has. "
+                                    "Paste a new one from https://huggingface.co/settings/"
+                                    "tokens (the Read kind).")
+                token = str(prompter.secret("Hugging Face token (Enter to skip):")).strip()
+                if not token:
+                    prompter.note(f"  {later} Without access it will stop there.")
+                    return True
+                try:
+                    hm.save_token(token)
+                except ValueError as e:
+                    prompter.note(f"  That token was not accepted ({e}).", style="yellow")
+                    state = "bad_token"
+                    continue
+                prompter.note(f"  {glyphs.TICK} Signed in to Hugging Face on this machine; "
+                              f"later runs use it too.", style="green")
+            state = hm.access(name)
+    except GoBack:
+        prompter.note(f"  {later}")
+        return True
+    total = plan.size
+    try:
+        with prompter.scanning(f"Downloading {name}") as seen:
+            hm.download(plan, on_bytes=lambda done: seen(
+                f"{done / 1e9:.1f} of {total / 1e9:.1f} GB" if total else
+                f"{done / 1e9:.1f} GB"))
+    except KeyboardInterrupt:
+        prompter.note(f"  Stopped. What arrived is kept, and the download picks up from there. "
+                      f"{later}", style="yellow")
+        return True
+    except Exception as e:  # noqa: BLE001 - the pick stands; the run tries again
+        first = str(e).splitlines()[0] if str(e) else type(e).__name__
+        prompter.note(f"  The download failed ({type(e).__name__}: {first}). {later}",
+                      style="yellow")
+        return True
+    prompter.note(f"  {glyphs.TICK} Downloaded {name} ({plan.gigabytes}).", style="green")
+    return True
 
 
 def pick_encoder(prompter: Prompter, current: str = "",
@@ -813,7 +984,10 @@ def _row_of(kind: lib.LibraryKind, entry) -> tuple:
 
 def pick_from_library(prompter: Prompter, kind: lib.LibraryKind,
                       current: Sequence[str] = (),
-                      start_unticked: bool = False) -> Optional[List[str]]:
+                      start_unticked: bool = False,
+                      compose: Optional[Tuple[str, str, Callable[[Prompter],
+                                                                 Optional[Path]]]] = None
+                      ) -> Optional[List[str]]:
     """
     Choose which entries of one kind a pipeline step should use.
 
@@ -841,6 +1015,11 @@ def pick_from_library(prompter: Prompter, kind: lib.LibraryKind,
         current at all, everything starts ticked: "use all of my dictionaries"
         is the common case and the default the rest of the wizard assumes.
 
+    ``compose`` is ``(label, help, make)`` for a kind whose entries can be
+    written on the spot (a question for a language model): a row under the
+    entries that calls ``make(prompter)``, which writes the new entry into
+    the library and returns its path, ticked on return.
+
     ``start_unticked`` opens with nothing ticked even for a kind that
     usually starts full -- a setting that is *optional* (concept
     dictionaries for word vectors) must not quietly mean "all of them".
@@ -864,6 +1043,12 @@ def pick_from_library(prompter: Prompter, kind: lib.LibraryKind,
     while True:
         entries = lib.entries(kind)
         if not entries:
+            if compose is not None:
+                made = compose[2](prompter)
+                if made is None:
+                    return None
+                chosen.add(str(made.resolve()))
+                continue
             if not _offer_first_import(prompter, kind):
                 return None
             continue
@@ -903,6 +1088,8 @@ def pick_from_library(prompter: Prompter, kind: lib.LibraryKind,
                               tone="good"))
             out.append(Choice(_NONE, "Untick everything",
                               "Clear the ticks, then pick a few."))
+            if compose is not None:
+                out.append(Choice(_COMPOSE, compose[0], compose[1]))
             out.append(Choice(_MANAGE, f"Manage {kind.label.lower()}…",
                               "Import, export, rename or delete entries."))
             return out
@@ -954,6 +1141,11 @@ def pick_from_library(prompter: Prompter, kind: lib.LibraryKind,
             chosen.clear()
         elif picked == _MANAGE:
             manage_library(prompter, kind)
+        elif picked == _COMPOSE and compose is not None:
+            made = compose[2](prompter)
+            if made is not None:
+                chosen.add(str(made.resolve()))
+                pointer = str(made.resolve())
         else:
             return sorted(chosen | {picked})
 

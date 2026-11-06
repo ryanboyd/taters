@@ -449,3 +449,4 @@ def test_the_scan_honors_an_encoding_and_every_later_pass_uses_it(tmp_path):
     assert insp.distinct("name") == ["Jos\u00e9", "Ren\u00e9e"]
     assert insp.grain(["g"], track=["name"]).groups == 2
     assert insp.survivors([["name", "==", "Jos\u00e9"]]) == 2
+

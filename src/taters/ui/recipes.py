@@ -385,6 +385,10 @@ class Recipe:
     #: off). The options screen indents a gated row under its gate and
     #: applies the same rule on the shared section. See `gate_of`.
     param_when: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
+    #: Calls this step went by before a rename. A saved pipeline names its
+    #: steps by call, so one saved under the old name still finds its step
+    #: (to open in the wizard, to run) -- the LLM step was `ask_language_model`.
+    old_calls: Tuple[str, ...] = ()
     #: Extra tags for the preset index, on top of the ones derived from where
     #: the step lives (`audio`/`text` from its module). Declared here so a new
     #: module can describe itself; the alternative was a chain of `if
@@ -593,6 +597,102 @@ _WORDCLOUD_VARS: Dict[str, dict] = {
 #: Explaining a prediction model in words: on for the sets a coefficient
 #: cloud cannot explain (embeddings, model scores), off for sets that are
 #: words already, and switchable either way.
+#: The "Generate responses with an LLM" step's settings. The prompt and the model are
+#: asked where they happen (the features stage); the rest sit on the
+#: options screen with their defaults.
+_LLM_VARS: Dict[str, dict] = {
+    "llm_prompts": {
+        "default": "Sentiment 1-7.csv",
+        "desc": "The prompts to run: names in your prompts library, or file paths. Each "
+                "prompt's answers become columns of their own.",
+    },
+    "llm_model": {
+        "default": "Qwen/Qwen3-1.7B",
+        "desc": "An instruction-tuned model: a Hugging Face name, a model folder, or the "
+                "address of a local server (Ollama, LM Studio).",
+    },
+    "llm_endpoint": {
+        "default": "",
+        "desc": "Only for a model on a local server: its address, such as "
+                "http://localhost:11434/v1. Empty runs the model on this computer.",
+    },
+    "llm_max_new_tokens": {
+        "default": 1024,
+        "desc": "The most an answer may run, in tokens (a token is about 3/4 of a word). "
+                "Generous on purpose: an answer that hits it is cut off.",
+    },
+    "llm_temperature": {
+        "default": 0.0,
+        "desc": "0 gives the same answer every time. Higher lets answers vary from run to "
+                "run.",
+    },
+    "llm_parse_json": {
+        "default": False,
+        "desc": "After the run, read each answer as JSON and add a column per key the "
+                "model used. Ask for the JSON you want in the prompt itself.",
+    },
+    "llm_thinking": {
+        "default": "off",
+        "desc": "Let the model reason before answering: off; drop (keep only the answer); "
+                "keep (its reasoning goes in a column). Slower; may judge better.",
+    },
+    "llm_reasoning_tokens": {
+        "default": 4096,
+        "desc": "Room for the model's reasoning, in tokens, on top of the answer's. "
+                "Models that think often write thousands before answering.",
+    },
+    "llm_long_texts": {
+        "default": "cut",
+        "desc": "A text too long for the model: cut keeps its start; notes reads it in "
+                "parts, taking notes, then answers once; pieces answers each part.",
+    },
+    "llm_context_length": {
+        "default": 0,
+        "desc": "How many tokens the model reads at once. 0 finds out (from the model, or "
+                "a server that says); set it for a server that does not.",
+    },
+    "llm_precision": {
+        "default": "auto",
+        "desc": "How the model is loaded: auto picks what fits (16-bit, else 4-bit "
+                "with taters[llm]); bf16, fp16, fp32, int8, nf4 force one.",
+    },
+    "llm_batch_size": {
+        "default": 0,
+        "desc": "How many texts go to the model at once. 0 sizes it to free memory; "
+                "halved automatically if the GPU runs out.",
+    },
+}
+
+#: The LLM step's settings in the options screen's own words. The order of
+#: the step's `with_` below is the order they are listed in: the ones people
+#: change first, the machinery after.
+_LLM_LABELS = {
+    "prompt_paths": "prompts",
+    "model": "language model",
+    "long_texts": "texts too long for the model",
+    "max_new_tokens": "longest answer (tokens)",
+    "thinking": "think before answering",
+    "reasoning_tokens": "room to think (tokens)",
+    "parse_json": "read answers as JSON",
+    "temperature": "how much answers vary",
+    "context_length": "context window (tokens; 0 = find out)",
+    "endpoint_url": "server address",
+    "precision": "model precision",
+    "batch_size": "texts at a time (0 = fit to memory)",
+    "device": "run on",
+    "backend": "where answers come from",
+    "top_p": "sampling breadth (top p)",
+    "seed": "random seed",
+    "offload": "spill into CPU memory when the GPU is full",
+    "concurrency": "server requests at once",
+    "hf_token": "Hugging Face token",
+    "rounding": "decimal places",
+    "workers": "CPU threads",
+    "out_features_csv": "answers table",
+    "out_report_md": "report",
+    "overwrite_existing": "redo if already done",
+}
+
 _EXPLAIN_VARS: Dict[str, dict] = {
     "explain_predictions": {
         "default": "auto",
@@ -898,6 +998,12 @@ _STATS_PCA_PARAM_WHEN_WITH_MISSING = {
     **_STATS_PCA_PARAM_WHEN,
     "pca_max_missing": ("pca", "!=", "off"),
 }
+
+
+def answers_call(recipe: "Recipe", call: object) -> bool:
+    """Whether a saved step's call is this recipe's, by its name now or one
+    it went by before a rename."""
+    return call == recipe.call or call in recipe.old_calls
 
 
 def gate_of(recipe: "Recipe", param: str) -> Optional[Tuple[str, str, str]]:
@@ -1534,14 +1640,13 @@ RECIPES: List[Recipe] = [
                 "desc": "faster-whisper model size. Use a name without '.en' "
                         "(e.g. 'base', 'small') for anything but English.",
             },
-            "language": {"default": None, "desc": "Force a language code (e.g. en). Null auto-detects."},
+            "language": {"default": None,
+                         "desc": "The spoken language as a two-letter code (ja, en, es, zh). "
+                                 "Empty detects it."},
             "translate": {
                 "default": False,
                 "desc": "Write the transcript in English whatever language is "
-                        "spoken. Needs a multilingual model: a name without "
-                        "'.en'. Only the one-speaker transcript can do this; "
-                        "the diarizer aligns words to the audio, which a "
-                        "translation cannot be.",
+                        "spoken. large-v3 translates best; turbo was not trained to.",
             },
             "speaker_label": {
                 "default": "Speaker 0",
@@ -3392,6 +3497,50 @@ RECIPES: List[Recipe] = [
         },
     ),
     Recipe(
+        id="generate_with_llm",
+        feature_table=True,
+        library={"prompt_paths": "prompts"},
+        encoder_param="model",
+        encoder_kind="generative",
+        gpu_use="gpu_one_model",
+        label="Generate responses with an LLM",
+        help="Run a stored prompt over every text and keep the answers as "
+             "columns: a rating, a yes/no, a category, or free text.",
+        text_help="Run a stored prompt over every text and keep the answers as "
+                  "columns: a rating, a yes/no, a category, or free text.",
+        call="potato.text.generate_with_llm",
+        old_calls=("potato.text.ask_language_model",),
+        target="taters.text.generate_with_llm:generate_with_llm",
+        scope="global",
+        save_as="llm_answers",
+        requires=frozenset({"unified_transcripts_csv"}),
+        vars={**_FEATURES_DIR_VAR, **_LLM_VARS},
+        labels=_LLM_LABELS,
+        # room to think means nothing while the model is not thinking
+        param_when={"reasoning_tokens": ("thinking", "!=", "off")},
+        **_TEXT_STEP,
+        with_={
+            # listed in this order: what people change first, then the rest
+            "prompt_paths": ["{{var:llm_prompts}}"],
+            "model": "{{var:llm_model}}",
+            "long_texts": "{{var:llm_long_texts}}",
+            "max_new_tokens": "{{var:llm_max_new_tokens}}",
+            "thinking": "{{var:llm_thinking}}",
+            "reasoning_tokens": "{{var:llm_reasoning_tokens}}",
+            "parse_json": "{{var:llm_parse_json}}",
+            "temperature": "{{var:llm_temperature}}",
+            "context_length": "{{var:llm_context_length}}",
+            "endpoint_url": "{{var:llm_endpoint}}",
+            "precision": "{{var:llm_precision}}",
+            "batch_size": "{{var:llm_batch_size}}",
+            "device": "{{var:device}}",
+            **_TEXT_INPUT_WITH,
+            "out_features_csv": "{{var:features_dir}}/llm.csv",
+            "out_report_md": "{{var:features_dir}}/llm_report.md",
+            "pass_through_cols": list(_ID_COLS),
+        },
+    ),
+    Recipe(
         id="gather_transformer_embeddings",
         feature_table=True,
         vars={**_FEATURES_DIR_VAR},
@@ -4105,7 +4254,7 @@ FEATURE_CATEGORIES: Tuple[FeatureCategory, ...] = (
         "vectors", "Embeddings & vectors",
         "Turn each text into numbers that put similar meanings close "
         "together.",
-        ("sentence_embeddings", "transformer_embeddings", "word_vectors_train")),
+        ("sentence_embeddings", "transformer_embeddings", "word_vectors_train", "generate_with_llm")),
     FeatureCategory(
         "saved_models", "Score with saved models",
         "Measure this corpus with something fitted somewhere else.",

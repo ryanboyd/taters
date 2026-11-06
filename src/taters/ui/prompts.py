@@ -278,6 +278,14 @@ class Prompter(Protocol):
     # invites people to hunt for the difference between them.
     def pause(self, message: str = ...) -> None: ...
 
+    # chat mode steps outside the screens: every question wipes and redraws,
+    # and a chat is a transcript that has to stay. so it writes straight to
+    # the terminal and reads a plain line. `chat_input` returns None for Esc,
+    # Ctrl-C or the end of input -- all of which mean "leave the chat" -- and
+    # neither method writes to the session log: a chat is the person's own.
+    def chat_write(self, text: str, *, style: str = "", end: str = "") -> None: ...
+    def chat_input(self, label: str) -> Optional[str]: ...
+
     # "something slow is starting" -- a line that has to hit the screen *now*,
     # before the blocking call, not whenever the next question paints.
     # otherwise importing a heavy dependency or parsing a big dictionary leaves
@@ -614,7 +622,9 @@ class QuestionaryPrompter:
         self.note(f"  {_REASON_MARK} {text}", style=_REASON_STYLE)
 
     # -- input -------------------------------------------------------------
-    def _ask(self, question_obj) -> Any:
+    def _ask(self, question_obj, *, typing: bool = False) -> Any:
+        # `typing` says the question takes text, so a renderer that gives
+        # Backspace a meaning of its own on lists leaves it alone here
         answer = question_obj.ask()
         if answer is None:
             raise Cancelled()
@@ -626,19 +636,48 @@ class QuestionaryPrompter:
         # screen, where the question ends in a colon and then... nothing.
         return self._log_answer("ask", question, self._ask(
             self._q.text(question, default=default,
-                         style=self._style, instruction="› ")))
+                         style=self._style, instruction="› "), typing=True))
 
     def path(self, question: str, *, default: str = "") -> str:
         # questionary's path prompt gives us filesystem tab-completion, which
         # is the single biggest quality-of-life win in the whole wizard.
         return self._log_answer("ask", question, self._ask(
-            self._q.path(question, default=default, style=self._style)))
+            self._q.path(question, default=default, style=self._style), typing=True))
+
+    def chat_write(self, text: str, *, style: str = "", end: str = "") -> None:
+        """Text straight to the terminal, as it comes: no screen, no log."""
+        self._console.print(text, style=style or None, end=end, markup=False,
+                            highlight=False, soft_wrap=True)
+        try:
+            self._console.file.flush()
+        except Exception:  # noqa: BLE001 - a stream that cannot flush still printed
+            pass
+
+    def chat_input(self, label: str) -> Optional[str]:
+        """
+        One line typed in a chat, with the transcript left on screen above
+        it: a bare prompt_toolkit line rather than a question, which would
+        wipe the screen. Esc, Ctrl-C and the end of input all give None.
+        """
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.key_binding import KeyBindings
+
+        keys = KeyBindings()
+
+        @keys.add("escape", eager=True)
+        def _leave(event):
+            event.app.exit(result=None)
+
+        try:
+            return PromptSession(key_bindings=keys).prompt(f"{label} › ")
+        except (KeyboardInterrupt, EOFError):
+            return None
 
     def secret(self, question: str) -> str:
         # the question is logged, the answer is not. a password in the
         # session log would sit on disk beside the pipeline forever
         self._log_answer("ask", question, "********")
-        return str(self._ask(self._q.password(question, style=self._style)))
+        return str(self._ask(self._q.password(question, style=self._style), typing=True))
 
     def confirm(self, question: str, *, default: bool = True) -> bool:
         return self._log_answer("ask", question, self._ask(
@@ -890,6 +929,20 @@ class ScriptedPrompter:
 
     def path(self, question: str, *, default: str = "") -> str:
         return self._next("path", question, default)
+
+    def chat_write(self, text: str, *, style: str = "", end: str = "") -> None:
+        """Kept whole in `chat_text`, as the screen would show it."""
+        self.chat_text = getattr(self, "chat_text", "") + str(text) + end
+
+    def chat_input(self, label: str) -> Optional[str]:
+        """The next scripted answer; None stands for Esc."""
+        self.asked.append(("chat", label))
+        if self._cursor >= len(self.answers):
+            raise AssertionError(f"ScriptedPrompter ran out of answers at question "
+                                 f"{len(self.asked)}: [chat] {label!r}")
+        value = self.answers[self._cursor]
+        self._cursor += 1
+        return None if value is None else str(value)
 
     def secret(self, question: str) -> str:
         """The answer is consumed and returned, and recorded nowhere: not in

@@ -1,0 +1,33 @@
+role,content
+system,"You are a clinical psychologist experienced in assessing depressive symptoms from what people write. You are careful, and you distinguish what is stated from what is inferred."
+user,"Read the text below and estimate the author's current (recent) level on each of the nine PHQ-9 depressive symptoms.
+
+Symptoms:
+1. anhedonia: little interest or pleasure in doing things
+2. depressed_mood: feeling down, depressed, or hopeless
+3. sleep: trouble falling or staying asleep, or sleeping too much
+4. fatigue: feeling tired or having little energy
+5. appetite: poor appetite or overeating
+6. worthlessness_guilt: feeling bad about oneself, like a failure, or like one has let oneself or others down
+7. concentration: trouble concentrating on things such as reading or work
+8. psychomotor: moving or speaking noticeably slowly, or being unusually fidgety or restless
+9. suicidal_ideation: thoughts that one would be better off dead, or of hurting oneself
+
+Scale for each symptom:
+0 = not present, 1 = mild or occasional (several days), 2 = moderate or frequent (more than half the days), 3 = severe or nearly constant (nearly every day)
+
+Procedure:
+- First, score symptoms the author states explicitly (evidence = ""explicit"").
+- Then, for the remaining symptoms, give a score only if the text gives reasonable grounds to infer it (evidence = ""inferred""). Infer cautiously.
+- If there is no evidence, give 0 with evidence = ""none"".
+- For suicidal_ideation, score only from explicit or clearly implied statements.
+- Quote a short excerpt (under 20 words) for every symptom scored above 0.
+- Do not compute a total score.
+
+Respond with only a JSON object in exactly this format, with no other text:
+{{""anhedonia"": {{""evidence"": ""explicit|inferred|none"", ""excerpt"": """", ""score"": 0}}, ""depressed_mood"": {{""evidence"": ""none"", ""excerpt"": """", ""score"": 0}}, ""sleep"": {{""evidence"": ""none"", ""excerpt"": """", ""score"": 0}}, ""fatigue"": {{""evidence"": ""none"", ""excerpt"": """", ""score"": 0}}, ""appetite"": {{""evidence"": ""none"", ""excerpt"": """", ""score"": 0}}, ""worthlessness_guilt"": {{""evidence"": ""none"", ""excerpt"": """", ""score"": 0}}, ""concentration"": {{""evidence"": ""none"", ""excerpt"": """", ""score"": 0}}, ""psychomotor"": {{""evidence"": ""none"", ""excerpt"": """", ""score"": 0}}, ""suicidal_ideation"": {{""evidence"": ""none"", ""excerpt"": """", ""score"": 0}}}}
+
+Text:
+""""""
+{text}
+"""""""

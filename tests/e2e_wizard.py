@@ -181,6 +181,61 @@ class Harness:
             ":done", "Flow A", "save",
         ], analyses=True)
 
+    def flow_l(self):
+        """The "Generate responses with an LLM" step through the real app: a question
+        written on the spot, the model chosen, a ridge on its answers. The
+        replies are canned (no model is run), which is exactly the plumbing
+        the unit tests cannot see end to end: the wizard's two new questions,
+        the composed preset, the gathered columns, the assemble step keeping
+        the bookkeeping aside, and the ridge finding a numeric feature."""
+        import json as _json
+
+        fake = self.proj / "fake_llm.json"
+        fake.write_text(_json.dumps({"default": '{"mood": 3}',
+                                     "contains": {"stress": '{"mood": 6}',
+                                                  "exercise": '{"mood": 5}'}}),
+                        encoding="utf-8")
+        os.environ["TATERS_FAKE_LLM"] = str(fake)
+        written = (Path(os.environ["TATERS_HOME"]) / "library" / "prompts" / "Mood.txt").resolve()
+        try:
+            out = self.flow("L generate with an LLM, then a ridge on the answers", [
+                "csv", *self.browse(self.study), ["text"], True, ["pid"],
+                ["generate_with_llm"], "row",
+                "Qwen/Qwen3-1.7B",                  # which language model
+                ":compose", "Mood", 'Rate the mood of the text, as JSON: {"mood": 1-7}.',
+                str(written),                        # enter on the written prompt
+                ["stats_ridge_fit"], False, ["openness"], False, False,
+                "generate_with_llm", "parse_json", True,       # the field is read from JSON
+                ":done", ":done", "Flow L", "save",
+            ], analyses=True)
+        finally:
+            os.environ.pop("TATERS_FAKE_LLM", None)
+        if out is None:
+            return None
+        folder, preset = out
+        answers = folder / "features" / "llm.csv"
+        if not answers.is_file():
+            self.bad("L answers", "no llm.csv")
+            return out
+        import csv as _csv
+        rows = list(_csv.DictReader(answers.open(encoding="utf-8-sig")))
+        moods = {r.get("Mood__mood") for r in rows}
+        if moods <= {"3", "5", "6"} and len(rows) > 0:
+            self.ok("L answers", f"{len(rows)} rows, moods {sorted(moods)}")
+        else:
+            self.bad("L answers", f"{len(rows)} rows, moods {sorted(moods)}")
+        coefs = folder / "stats_results" / "ridge_coefficients.csv"
+        if coefs.is_file() and "Mood__mood" in coefs.read_text(encoding="utf-8-sig"):
+            self.ok("L ridge", "fitted on Mood__mood")
+        else:
+            self.bad("L ridge", "no ridge coefficient for Mood__mood")
+        report = folder / "features" / "llm_report.md"
+        if report.is_file() and "canned replies" in report.read_text(encoding="utf-8"):
+            self.ok("L report", "written, says the replies were canned")
+        else:
+            self.bad("L report", "missing or silent about the fake")
+        return out
+
     def flow_w(self):
         """
         Wrangle: two messy files matched by ID, flipped wide and back, stacked
@@ -847,7 +902,7 @@ def main(argv=None) -> int:
               f"Point --work at a fresh folder.")
         return 2
     h = Harness(work, keep=args.keep or args.work is not None)
-    wanted = {f.upper() for f in (args.flows or list("ABCDEFGHRVWTM"))}
+    wanted = {f.upper() for f in (args.flows or list("ABCDEFGHRVWLTM"))}
     print(f"scratch: {work}")
 
     runs = {}
@@ -873,6 +928,8 @@ def main(argv=None) -> int:
         h.flow_v()
     if "W" in wanted:
         h.flow_w()
+    if "L" in wanted:
+        h.flow_l()
     if "T" in wanted and args.slow:
         h.flow_t()
     if "M" in wanted and args.media:

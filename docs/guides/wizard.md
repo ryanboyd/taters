@@ -28,7 +28,7 @@ of the answers do not involve new data at all.
 | **Wrangle/Analyze data** | The two things you do to a spreadsheet you already have. *Wrangle data* collects text into a tidy spreadsheet — a folder of documents to CSV, or a CSV combined by any column(s) — and does the other things a spreadsheet needs before it is ready: two files matched up by an ID, several stacked into one, one flipped between wide and long, or tables copied out of (or a spreadsheet into) a database — with a read-back of what will match before anything is written. See [Working with a Database](databases.md). *Analyze data* runs the statistics over one: LIWC output from elsewhere, questionnaire scales, anything measured in another program. Tick which columns are the predictors and answer the same statistics questions; nothing is extracted. |
 | **Extract features from my data** | Turn audio, video or text into measures. Builds a new pipeline. |
 | **Extract features and run analyses** | The same, then compare groups, correlate with outcomes, or fit a prediction model. Needs a spreadsheet with those columns in it. |
-| **Wrangle Language Models** | Asks what you want to do, then with what. *Train a model from scratch* — word embeddings, or a whole transformer with its own tokenizer (heavy-duty, and it tells you the cost first). *Adapt an existing model to my texts*. *Fine-tune a transformer to predict my outcomes*. *Import or export language models* — your text encoders and saved models, or pre-trained word vectors from elsewhere. Each asks what the model itself should be called (its file, its entry in your library, and its name in every menu), separately from the pipeline's name. Every model trained here is saved with a report of how it was trained, kept in your library, and applied to new data from the checklist. |
+| **Wrangle Language Models** | Asks what you want to do, then with what. *Train a model from scratch* — word embeddings, or a whole transformer with its own tokenizer (heavy-duty, and it tells you the cost first). *Adapt an existing model to my texts*. *Fine-tune a transformer to predict my outcomes*. *Import or export language models* — your text encoders and saved models, or pre-trained word vectors from elsewhere. *Chat with a language model* — talk with a generative model, with a system prompt of your own, and save the conversation as a CSV with a timestamp on every line (see [Generating responses with an LLM](analyzing-text.md#generating-responses-with-an-llm)). Each asks what the model itself should be called (its file, its entry in your library, and its name in every menu), separately from the pipeline's name. Every model trained here is saved with a report of how it was trained, kept in your library, and applied to new data from the checklist. |
 | **Run a saved pipeline** | Re-run something you built earlier, or one of the pipelines that ship with Taters. |
 | **Settings and tools** | Check whether your setup works, and manage everything Taters keeps between runs. |
 
@@ -37,8 +37,8 @@ press the number beside an option to pick it outright. <kbd>PgUp</kbd> and
 <kbd>PgDn</kbd> jump a screenful at a time, which is what you want once a list
 runs to hundreds of rows — a vocabulary, a folder of files, a spreadsheet's
 columns. They stop at the ends rather than wrapping around. Yes/no questions take
-`y`/`n` or `1`/`0` as single keypresses, <kbd>Esc</kbd> steps back exactly one
-question if you change your mind (what you already answered stays filled in,
+`y`/`n` or `1`/`0` as single keypresses, <kbd>Esc</kbd> (or <kbd>Backspace</kbd>
+on any list) steps back exactly one question if you change your mind (what you already answered stays filled in,
 so changing one thing costs one keypress per question, not a re-typing of all of
 them), and <kbd>Ctrl-C</kbd> leaves without writing anything.
 
@@ -413,7 +413,7 @@ causes.
 Everything Taters keeps between runs shares one row, because they are all the
 same errand: something stored on your disk that you want to rename, export or
 throw away. Beneath it sit saved pipelines, dictionaries and archetypes, stop
-lists, saved models, text encoders, and the downloaded model cache.
+lists, saved models, text encoders, and the models downloaded from Hugging Face.
 
 #### Manage saved pipelines
 
@@ -466,19 +466,52 @@ measures, a fine-tuned predictor's batch size and whether it writes
 per-class probabilities. They live in the model file, so every pipeline
 that applies the model uses them from then on.
 
-### Where downloaded models are kept
+#### Manage downloaded models
 
-Every transformer, sentence-embedding and Whisper model is downloaded once
-into a cache -- by default under your home folder. On a shared server, or a
-machine with a small system drive, that is the wrong place, so this screen
-shows where models go and why, lets you choose another folder, and remembers
-it: the choice lives in `settings.json` in the Taters home, is applied every
-time Taters starts, and every downloading library follows it. An
-administrator can set `TATERS_MODEL_CACHE` in the environment instead, which
-wins over any folder chosen here; the Hugging Face variables `HF_HUB_CACHE`
-and `HF_HOME` are honored as they always were when neither is set. Models
-already downloaded elsewhere are not moved. "Check my setup" shows the
-folder, how it was chosen, and how much is in it.
+Every transformer, sentence-embedding, Whisper and language model is
+downloaded once into the Hugging Face cache, by default under your home
+folder. That cache is shared with every other program on your computer that
+uses Hugging Face, so it can hold models Taters never touches. This screen
+lists everything in it, biggest first within three groups, and each row says
+what it is to Taters:
+
+* **a model a step can use**, and which steps: the language models, encoders,
+  sentence models, Whisper models and vision models you can pick;
+* **part of a step**: something a step downloads for its own use and nobody
+  picks, such as the punctuation and word-timing models speaker diarization
+  needs, or the face models the video steps use;
+* **not used by Taters**: another program's model, or a dataset.
+
+A model whose weights are not all here is marked *incomplete*: a run would
+still download the rest. Tick rows with space, then:
+
+* **Export the ticked models** copies each one to a folder you choose, as a
+  plain model folder with real files. Type that folder's path wherever a step
+  asks for a model, or carry it to a computer with no internet. The copy is
+  checked against the free space first.
+* **Delete the ticked models** says what it frees, and asks first. When a
+  saved pipeline names one of them, the warning names the pipeline, since it
+  will download the model again when it runs. A step's own parts download
+  again the next time the step needs them. Deleting something Taters does not
+  use comes with a reminder that another program may need it.
+* **Free leftover versions** appears when a model was updated and its old
+  version is still on disk. It removes only versions nothing points to; the
+  version in use stays, and so does the copy transformers keeps on the hub's
+  conversion branch for some models.
+
+**Change the download folder** is where new downloads go. On a shared server,
+or a machine with a small system drive, the default is the wrong place: pick
+another folder and Taters remembers it in `settings.json` in the Taters home,
+applies it every time it starts, and every downloading library follows it.
+An administrator can set `TATERS_MODEL_CACHE` in the environment instead,
+which wins over any folder chosen here; the Hugging Face variables
+`HF_HUB_CACHE` and `HF_HOME` are honored as they always were when neither is
+set. Models already downloaded elsewhere are not moved. "Check my setup"
+shows the folder, how it was chosen, and how much is in it.
+
+A few packages keep their models outside this cache and are not listed here:
+Stanza, NeMo's diarization models, Demucs (in the torch hub folder), and
+NLTK's data.
 
 ### How much of a spreadsheet to read
 

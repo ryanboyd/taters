@@ -144,10 +144,10 @@ def test_the_key_hints_match_the_question_type(staged):
 
     # keys get brackets so "a all" can't read as a typo to anyone, native
     # English speaker or not.
-    assert "[enter] picks the highlighted row" in from_select
+    assert "[enter] picks the row" in from_select
     # the checkbox hint teaches our one tick dialect: boxes tick, the Done row
     # proceeds (see LivePrompter.checkbox).
-    assert "ticks a box" in from_checkbox
+    assert "[space] ticks" in from_checkbox
     assert "Done" in from_checkbox
 
 
@@ -271,9 +271,28 @@ def test_escape_works_on_every_question_type(staged, ask):
         render(staged, "\x1b", ask)
 
 
+@pytest.mark.parametrize("ask", [
+    lambda p: p.select("Q", [Choice("a", "A"), Choice("b", "B")]),
+    lambda p: p.checkbox("Q", [Choice("a", "A")]),
+    lambda p: p.confirm("Q"),
+])
+def test_backspace_goes_back_on_every_list_screen(staged, ask):
+    """The owner's ask: Backspace means "undo that last answer" on a list,
+    the way it does everywhere else a person types."""
+    from taters.ui.prompts import GoBack
+
+    with pytest.raises(GoBack):
+        render(staged, "\x7f", ask)
+
+
+def test_backspace_still_deletes_in_a_typing_prompt(staged):
+    answer, _drawn = render(staged, "ab\x7f\r", lambda p: p.text("Q"))
+    assert answer == "a"
+
+
 def test_the_key_hint_mentions_escape(staged):
     _, drawn = render(staged, "\r", lambda p: p.select("Q", [Choice("a", "A")]))
-    assert "[esc] back" in drawn
+    assert "[esc]/[bksp] back" in drawn
 
 
 # ---------------------------------------------------------------------------
@@ -447,7 +466,7 @@ def test_a_confirm_is_not_numbered(staged):
 def test_the_hint_mentions_numbers(staged):
     _, drawn = render(staged, "\r", lambda p: p.select("Pick", [Choice("a", "A")]))
     assert "[1-9] jump" in drawn
-    assert "[enter] picks the highlighted row" in drawn
+    assert "[enter] picks the row" in drawn
 
 
 # ---------------------------------------------------------------------------
@@ -2144,14 +2163,14 @@ def test_every_key_hint_fits_an_eighty_column_terminal():
     for name, hint in live_mod._KEY_HINTS.items():
         assert cell_len(hint) + 2 <= live_mod.HINT_WIDTH, (name, cell_len(hint), hint)
         assert hint.count("[←→]") <= 1, name
-        assert hint.endswith("[esc] back"), name
+        assert hint.endswith("[esc]/[bksp] back"), name
 
 
 def test_a_cycling_tick_screen_says_change_type_once(staged):
     _, drawn = render(staged, "\x1b[B \x1b[A\r", lambda p: p.checkbox(
         "Tick", [Choice("a", "A"), Choice("b", "B")], cycle=lambda v, d: "numbers"))
-    hint = next(ln for ln in drawn.split("\n") if "[esc] back" in ln)
-    assert hint.count("[←→]") == 1 and "[esc] back" in hint
+    hint = next(ln for ln in drawn.split("\n") if "[esc]/[bksp] back" in ln)
+    assert hint.count("[←→]") == 1 and "[esc]/[bksp] back" in hint
 
 
 def test_the_done_row_carries_no_description(staged):
@@ -2171,7 +2190,7 @@ def test_the_hint_sits_right_under_the_list_not_on_the_bottom_row(staged):
     first = drawn.split("? Pick")[1] if "? Pick" in drawn else drawn
     lines = [ln.rstrip() for ln in first.split("\n")]
     desc = next(i for i, ln in enumerate(lines) if "Description:" in ln)
-    hint = next(i for i, ln in enumerate(lines) if "[esc] back" in ln)
+    hint = next(i for i, ln in enumerate(lines) if "[esc]/[bksp] back" in ln)
     assert hint - desc == 2, (desc, hint, lines[desc:hint + 1])
     assert lines[desc + 1] == ""
 
@@ -2250,7 +2269,7 @@ def test_a_single_pick_with_retypable_rows_gets_its_own_hint(staged):
     _, drawn = render(staged, "\r", lambda p: p.select(
         "Which column separates the groups?",
         [Choice("a", "condition", annotation="labels")], cycle=lambda v, d: "numbers"))
-    hint = next(ln for ln in drawn.split("\n") if "[esc] back" in ln)
+    hint = next(ln for ln in drawn.split("\n") if "[esc]/[bksp] back" in ln)
     assert "[←→] change type" in hint and "[space]" not in hint
 
 

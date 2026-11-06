@@ -65,14 +65,14 @@ def _recipes_behind(preset: dict):
     review table uses. A hand-written preset may not match at all, and that is
     fine: the caller falls back to the flat variable editor for those.
     """
-    from ..recipes import RECIPES
+    from ..recipes import RECIPES, answers_call
 
     matched = []
     for step in preset.get("steps") or []:
         step = step or {}
         recipe = next((r for r in RECIPES
                        if r.save_as == step.get("save_as")
-                       and r.call == step.get("call")), None)
+                       and answers_call(r, step.get("call"))), None)
         matched.append(recipe)
     return matched
 

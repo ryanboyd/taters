@@ -222,6 +222,7 @@ DECLARING_MODULES: Tuple[str, ...] = (
     "taters.text.analyze_with_archetypes",
     "taters.text.analyze_with_dictionaries",
     "taters.text.analyze_with_norms",
+    "taters.text.generate_with_llm",
     "taters.video.analyze_faces",
     "taters.video.extract_video_embeddings",
     "taters.video.analyze_visual_dynamics",

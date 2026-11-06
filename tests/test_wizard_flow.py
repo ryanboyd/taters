@@ -1546,3 +1546,53 @@ def test_accepting_the_default_model_is_not_a_change(tmp_path):
         "accepting the default forced the options screen open"
     assert result.preset["meta"]["variables"]["sentence_model"]["default"] == \
         "sentence-transformers/all-roberta-large-v1"
+
+
+def test_asking_a_language_model_asks_for_the_model_and_the_prompt_where_they_happen(
+        tmp_path, monkeypatch):
+    """The "Generate responses with an LLM" step needs a model and at least one
+    prompt; both are asked right after the checklist. A prompt can be
+    written on the spot: a name and the question, saved to the prompts
+    library as written and ticked."""
+    from taters.helpers import hub_models
+
+    # the model is already here: the download offer is tested on its own
+    monkeypatch.setattr(hub_models, "is_downloaded", lambda name, cache=None: True)
+    monkeypatch.setenv("TATERS_HOME", str(tmp_path / "home"))
+    path = tmp_path / "s.csv"
+    path.write_text("id,text\n1,hello there\n2,bye now\n", encoding="utf-8")
+    written = (tmp_path / "home" / "library" / "prompts" / "Mood.txt").resolve()
+    p = ScriptedPrompter([
+        "csv", *browse_to(path), ["text"], True, ["id"],
+        ["generate_with_llm"], "row",
+        "Qwen/Qwen3-4B",                 # which language model
+        ":compose",                      # write a question now
+        "Mood", 'Rate the mood of the text, as JSON: {"mood": 1-7}.',
+        str(written),                    # enter on the new entry approves it
+        "generate_with_llm", "parse_json", True,   # the options screen: read the replies as JSON
+        ":done", ":done", "Ask", "save",
+    ])
+    result = wiz.run_wizard(p, cwd=tmp_path, analyses=False)
+    questions = [q for _k, q in p.asked]
+    assert "Which language model?" in questions
+    assert any(q.startswith("Which language model prompts should this step use?")
+               for q in questions)
+    step = next(s for s in result.preset["steps"] if "generate_with_llm" in s["call"])
+    (prompt_path,) = step["with"]["prompt_paths"]
+    saved = Path(prompt_path)
+    assert saved.name == "Mood.txt" and saved.is_file()
+    assert saved.read_text(encoding="utf-8") == ('Rate the mood of the text, as JSON: '
+                                                 '{"mood": 1-7}.\n')
+    assert result.preset["meta"]["variables"]["llm_model"]["default"] == "Qwen/Qwen3-4B"
+    assert step["with"]["model"] == "{{var:llm_model}}"
+    assert "What kind of answer?" not in questions, "the prompt is sent as written"
+    assert result.preset["vars"]["llm_parse_json"] is True
+    assert step["with"]["parse_json"] == "{{var:llm_parse_json}}"
+
+
+def test_a_question_written_on_the_spot_gets_a_file_name_every_filesystem_takes(tmp_path, monkeypatch):
+    monkeypatch.setenv("TATERS_HOME", str(tmp_path / "home"))
+    p = ScriptedPrompter(["Mood: 1/7?", "Rate the mood."])
+    dest = wiz.write_question(p)
+    assert dest is not None and dest.name == "Mood 1 7.txt"
+    assert dest.read_text(encoding="utf-8") == "Rate the mood.\n"

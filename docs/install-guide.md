@@ -37,7 +37,20 @@ terminal (Windows: search for "PowerShell" or "cmd"; macOS: search for
 pip install taters
 ```
 
-That's it. Pip fetches TATERS and everything it needs.
+That's it. Pip fetches TATERS and everything it needs: text analysis,
+transcription, embeddings, language models and SQLite all come with the
+base install. Two bigger bundles exist for people who know they will want
+more:
+
+| You want | Install |
+|---|---|
+| Text, audio transcription, embeddings, language models | `pip install taters` |
+| Everything that installs everywhere (databases, word vectors, Stanza, vocal acoustics, 4-bit language models) | `pip install "taters[standard]"` |
+| All of that plus who-spoke-when in recordings | `pip install "taters[all]"` |
+
+Each piece can also be added on its own later; the
+[one-per-feature list](install-troubleshooting.md#installing-one-feature-at-a-time)
+says what each one unlocks.
 
 ## 3. Run it
 
