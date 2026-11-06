@@ -91,7 +91,7 @@ def manage_model_cache(prompter: Prompter, cwd: Optional[Path] = None) -> None:
         others = [r for r in repos if r.role == "other"]
         if others:
             prompter.reason(
-                (f"One of these is" if len(others) == 1 else f"{len(others)} of these are")
+                ("One of these is" if len(others) == 1 else f"{len(others)} of these are")
                 + f" not used by Taters ({human_size(sum(r.size for r in others))}): the "
                 f"cache is shared with other programs on this computer, which may need "
                 f"{'it' if len(others) == 1 else 'them'}.")
