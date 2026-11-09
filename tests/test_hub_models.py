@@ -170,3 +170,30 @@ def test_the_picker_offers_the_download_and_picks_again_after_a_wrong_name(hub, 
     p = ScriptedPrompter([":type", "nobody/nothing", "Qwen/Qwen3-0.6B", True])
     assert uilib.pick_generative_model(p, "") == "Qwen/Qwen3-0.6B"
     assert hub["downloads"] == ["Qwen/Qwen3-0.6B"]
+
+
+def test_a_repository_with_nothing_runnable_is_said_so_and_never_fetched_whole(monkeypatch):
+    """A GGUF-only repository: the old plan had no files and a size of 0 MB,
+    and `allow_patterns=None` would have fetched every multi-GB export in it."""
+    import huggingface_hub
+
+    class Info:
+        siblings = [_Sibling("README.md", 10), _Sibling("Qwen2.5-7B-Q4_K_M.gguf", 4_700_000_000),
+                    _Sibling("Qwen2.5-7B-Q8_0.gguf", 8_100_000_000)]
+
+    monkeypatch.setattr(huggingface_hub.HfApi, "model_info", lambda *a, **k: Info())
+    plan = hm.plan_download("someone/Qwen2.5-7B-GGUF")
+    assert plan.state == "unusable" and plan.files == []
+    assert ".gguf" in plan.why and "Ollama" in plan.why
+    with pytest.raises(ValueError, match="holds no weights"):
+        hm.download(plan)
+    with pytest.raises(ValueError, match="nothing to download"):
+        hm.download(hm.DownloadPlan("org/m"))      # no files: never the whole repository
+
+
+def test_the_wizard_says_why_a_repository_cannot_be_used_and_asks_again(hub, monkeypatch):
+    monkeypatch.setattr(hm, "plan_download", lambda name: hm.DownloadPlan(
+        name, state="unusable", why="org/gguf holds no weights a step can run"))
+    p = ScriptedPrompter([])
+    assert uilib.make_local(p, "org/gguf") is False, "pick another model"
+    assert any("holds no weights" in line for line in p.output)

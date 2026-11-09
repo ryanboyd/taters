@@ -279,6 +279,9 @@ def make_local(prompter: Prompter, model: str, *, later: str = "") -> bool:
         prompter.note(f"  Could not reach Hugging Face to look up {name} ({plan.why}). "
                       f"{later}", style="yellow")
         return True
+    if plan.state == "unusable":
+        prompter.note(f"  {plan.why}", style="yellow")
+        return False
     prompter.reason(f"{name} is not on this machine yet. It is about {plan.gigabytes} to "
                     f"download, once; every run after uses the copy here.")
     try:

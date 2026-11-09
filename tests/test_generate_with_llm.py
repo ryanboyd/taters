@@ -1242,3 +1242,38 @@ def test_a_pipeline_saved_under_the_old_name_still_finds_its_step():
     assert r.answers_call(recipe, "potato.text.ask_language_model")
     assert r.answers_call(recipe, "potato.text.generate_with_llm")
     assert callable(Taters().text.ask_language_model)
+
+
+def test_a_failed_window_lookup_is_not_remembered_for_the_session(monkeypatch):
+    """Offline when the settings screen first opened, then online: the
+    screen used to keep saying the window could not be looked up until
+    the process restarted, because the failure was cached with the answers."""
+    import types
+
+    from taters.text import _generation_local as gl
+
+    seq = [types.SimpleNamespace(problem="the hub could not be reached", config={}),
+           types.SimpleNamespace(problem="", config={"max_position_embeddings": 4096})]
+    monkeypatch.setattr(gl, "model_facts", lambda model, **k: seq.pop(0))
+    monkeypatch.setattr(al, "_FAILURE_TTL", 0.0)
+    name = "org/only-in-this-test"
+    assert al.context_window(name) == (None, "the hub could not be reached")
+    assert al.context_window(name) == (4096, "from the model's config")
+    assert al.context_window(name) == (4096, "from the model's config"), "the answer is kept"
+    assert seq == []
+
+
+def test_a_failed_window_lookup_is_not_repeated_on_every_redraw(monkeypatch):
+    """The other half: a screen redrawn per keystroke must not wait out the
+    hub's timeout each time, so a failure is remembered for a short while."""
+    import types
+
+    from taters.text import _generation_local as gl
+
+    calls = []
+    monkeypatch.setattr(gl, "model_facts", lambda model, **k: calls.append(1) or
+                        types.SimpleNamespace(problem="offline", config={}))
+    name = "org/only-in-this-other-test"
+    for _ in range(5):
+        assert al.context_window(name) == (None, "offline")
+    assert calls == [1], "asked once; the redraws read the remembered failure"

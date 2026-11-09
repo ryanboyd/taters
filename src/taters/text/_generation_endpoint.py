@@ -245,12 +245,14 @@ class EndpointGenerator(Generator):
                 message = (choices[0].get("message") or {}) if choices else {}
                 content = message.get("content")
                 reasoning = message.get("reasoning_content") or message.get("reasoning")
+                # a reasoning parser on the server hands the thinking over
+                # apart from the answer: back together as the think block a
+                # local model writes, so the step splits it off the same way
+                # (and keeps it when asked); the stream does the same
+                think = f"<think>{reasoning}</think>" if reasoning else ""
                 if content is None:
-                    # a reasoning parser on the server gave only the thinking:
-                    # hand it over as the think block it is, so the step
-                    # splits it off and the answer is blank, not the reasoning
-                    return f"<think>{reasoning}</think>" if reasoning else ""
-                return str(content).strip()
+                    return think
+                return think + str(content).strip()
             except urllib.error.HTTPError as e:
                 last = f"HTTP {e.code}"
                 if e.code not in (408, 409, 429) and e.code < 500:

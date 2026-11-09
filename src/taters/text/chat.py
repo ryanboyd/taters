@@ -211,15 +211,31 @@ class ChatSession:
             self.messages.pop()
             raise
         pieces: List[str] = []
-        for piece in self.gen.stream(conv, max_new_tokens=self.reply_budget,
-                                     temperature=self.temperature, top_p=self.top_p,
-                                     seed=self.seed, top_k=self.top_k,
-                                     repetition_penalty=self.repetition_penalty):
-            pieces.append(piece)
-            yield piece
+        try:
+            for piece in self.gen.stream(conv, max_new_tokens=self.reply_budget,
+                                         temperature=self.temperature, top_p=self.top_p,
+                                         seed=self.seed, top_k=self.top_k,
+                                         repetition_penalty=self.repetition_penalty):
+                pieces.append(piece)
+                yield piece
+        except BaseException:
+            # a reply that failed or was stopped partway (Ctrl-C closes this
+            # generator): what arrived stays as the reply, since the screen
+            # showed it; one that never started takes the question back out.
+            # Either way the transcript keeps alternating -- Gemma's and
+            # Llama's templates refuse two user turns in a row, and one
+            # failure would have stuck the chat for good
+            if "".join(pieces):
+                self._record("".join(pieces))
+            else:
+                self.messages.pop()
+            raise
+        self._record("".join(pieces))
+
+    def _record(self, reply: str) -> None:
         from .generate_with_llm import split_reasoning
 
-        reasoning, answer, _cut = split_reasoning("".join(pieces))
+        reasoning, answer, _cut = split_reasoning(reply)
         self.messages.append(ChatMessage("assistant", answer,
                                          reasoning=reasoning if self.thinking == "keep" else ""))
 
@@ -249,7 +265,10 @@ def system_prompt_from_file(path: PathLike) -> Tuple[str, str]:
     """
     A system prompt read from a file, and a word on where it came from: a
     prompt from the library gives its system turn, or its question when it
-    has none (``{text}`` taken out); any other file is used as it is.
+    has none (``{text}`` taken out); any other file is used as it is. A
+    ``.csv`` that cannot be read as a prompt is a ``ValueError`` naming the
+    file: its raw text would make a nonsense system prompt, and nothing
+    would have said so.
     """
     path = Path(path)
     if path.suffix.lower() in (".csv", ".txt"):
@@ -257,8 +276,10 @@ def system_prompt_from_file(path: PathLike) -> Tuple[str, str]:
             from .generate_with_llm import read_prompt
 
             prompt = read_prompt(path)
-        except (OSError, ValueError):
-            prompt = None
+        except (ValueError, csv.Error) as e:
+            if path.suffix.lower() == ".csv":
+                raise ValueError(f"{path.name} could not be read as a prompt file ({e})") from None
+            prompt = None       # a .txt is plain text whatever else it is
         if prompt is not None and prompt.system:
             return prompt.system, f"the system turn of {path.stem}"
         if prompt is not None and path.suffix.lower() == ".csv":

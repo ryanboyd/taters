@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import csv
 import functools
+import time
 import json
 import re
 from dataclasses import dataclass, field
@@ -822,30 +823,57 @@ def answer_budget(context: int, prompt_tokens: int, asked: int) -> Tuple[int, in
     return reply, max(0, room - reply)
 
 
-@functools.lru_cache(maxsize=32)
 def context_window(model: str, endpoint_url: str = "", given: int = 0) -> Tuple[Optional[int], str]:
     """
     How many tokens the model reads at once, and where that came from:
     the setting, when it is given; a server's own listing, when it says;
     the model's config otherwise. ``(None, why)`` when nothing can tell.
+    An answer is remembered for the session. A failure to get one is
+    remembered for :data:`_FAILURE_TTL` seconds only: long enough that a
+    screen redrawn on every keystroke does not wait out the hub's timeout
+    each time, short enough that it recovers once the network (or the
+    download) does.
     """
     if int(given or 0) > 0:
         return int(given), "as set"
+    key = (model, endpoint_url)
+    failed = _window_failures.get(key)
+    if failed and time.monotonic() - failed[0] < _FAILURE_TTL:
+        return None, failed[1]
+    try:
+        found = _context_window(model, endpoint_url)
+    except LookupError as e:
+        _window_failures[key] = (time.monotonic(), str(e))
+        return None, str(e)
+    _window_failures.pop(key, None)
+    return found
+
+
+_FAILURE_TTL = 30.0
+_window_failures: Dict[Tuple[str, str], Tuple[float, str]] = {}
+
+
+@functools.lru_cache(maxsize=32)
+def _context_window(model: str, endpoint_url: str) -> Tuple[Optional[int], str]:
+    """The lookup itself; raises ``LookupError`` (which the cache does not
+    keep) when the model or the server could not be asked."""
     from ._generation_endpoint import server_context, split_server_model
 
     url = endpoint_url or (model if str(model).startswith(("http://", "https://")) else "")
     if url:
         base, name = split_server_model(model, url)
         found = server_context(base, name)
-        return (found, "as the server reports") if found else (
-            None, "the server does not say")
+        if found:
+            return found, "as the server reports"
+        raise LookupError("the server does not say")
     from ._generation_local import context_of, model_facts
 
     facts = model_facts(model)
     if facts.problem:
-        return None, facts.problem
+        raise LookupError(facts.problem)
     found = context_of(facts.config)
     return (found, "from the model's config") if found else (None, "its config does not say")
+
 
 
 def settings_summary(settings: Dict[str, Any]) -> str:

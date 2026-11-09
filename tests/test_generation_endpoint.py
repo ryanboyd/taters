@@ -246,3 +246,37 @@ def test_top_k_and_the_penalty_are_sent_only_when_asked_for(server):
                     repetition_penalty=1.15))
     asked = server.requests[-1]
     assert (asked["top_k"], asked["seed"], asked["repetition_penalty"]) == (20, 9, 1.15)
+
+
+def test_the_batch_path_keeps_reasoning_beside_the_answer_like_the_stream(monkeypatch):
+    """vLLM or LM Studio with a reasoning parser: the thinking comes apart
+    from the answer. The stream wraps it in a think block; the batch path
+    dropped it whenever an answer was present, so thinking='keep' wrote an
+    empty reasoning column from a server and a full one from a local model."""
+    from taters.text._generation_endpoint import EndpointGenerator as EG
+
+    class Quiet(EG):
+        def _preflight(self):
+            pass
+
+    gen = Quiet("http://127.0.0.1:9/v1", model="m")
+    import json as _json
+    import urllib.request
+
+    class Resp:
+        def __init__(self, body):
+            self.body = body
+
+        def read(self):
+            return _json.dumps(self.body).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: Resp(
+        {"choices": [{"message": {"content": "Hello back", "reasoning_content": "they said hi"}}]}))
+    assert gen.generate([Conversation(user="hi")], max_new_tokens=8) == \
+        ["<think>they said hi</think>Hello back"]

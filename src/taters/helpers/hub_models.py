@@ -148,7 +148,8 @@ def is_downloaded(hub_id: str, cache: Optional[Path] = None) -> bool:
 class DownloadPlan:
     """What fetching a model means: the files, their total size, and why
     it cannot be looked up when it cannot (``state`` is ``"ok"``,
-    ``"missing"`` or ``"offline"``)."""
+    ``"missing"``, ``"offline"``, or ``"unusable"`` for a repository that
+    exists but holds nothing a step can run, such as a GGUF export)."""
 
     hub_id: str
     state: str = "ok"
@@ -162,14 +163,16 @@ class DownloadPlan:
         return f"{gb:.1f} GB" if gb >= 0.1 else f"{self.size / 1e6:.0f} MB"
 
 
-def plan_download(hub_id: str) -> DownloadPlan:
+def plan_download(hub_id: str, *, token: Optional[str] = None) -> DownloadPlan:
     """The files a run needs and their size, from the hub's listing (which
-    a gated model shows to anyone; only the files themselves are locked)."""
+    a gated model shows to anyone; only the files themselves are locked).
+    ``token`` is a sign-in for this call; without one the hub library's
+    saved sign-in is used, when there is one."""
     from huggingface_hub import HfApi
     from huggingface_hub.errors import RepositoryNotFoundError
 
     try:
-        info = HfApi().model_info(hub_id, files_metadata=True)
+        info = HfApi(token=token).model_info(hub_id, files_metadata=True)
     except Exception as e:  # noqa: BLE001 - every kind is an answer
         first = str(e).splitlines()[0] if str(e) else type(e).__name__
         return DownloadPlan(hub_id, state="missing" if isinstance(e, RepositoryNotFoundError)
@@ -180,6 +183,16 @@ def plan_download(hub_id: str) -> DownloadPlan:
     has_safetensors = any(name.endswith(".safetensors") for name, _ in top)
     files = [(name, size) for name, size in top
              if name.endswith(_RUN_FROM) or (not has_safetensors and name.endswith(".bin"))]
+    weights = [n for n, _ in files if n.endswith((".safetensors", ".bin"))]
+    if not weights:
+        # a GGUF or ONNX export, or weights in a subfolder: nothing here loads
+        # in transformers, and an empty file list would have fetched the
+        # whole repository (every multi-GB export in it)
+        kinds = sorted({Path(n).suffix for n, _ in siblings if Path(n).suffix})
+        return DownloadPlan(hub_id, state="unusable", why=(
+            f"{hub_id} holds no weights a step can run (it has {', '.join(kinds[:6]) or 'no files'}"
+            f"). A GGUF or ONNX export runs on a server such as Ollama or LM Studio; pick "
+            f"the model's transformers repository, or a local server."))
     return DownloadPlan(hub_id, files=[n for n, _ in files], size=sum(s for _, s in files))
 
 
@@ -239,7 +252,7 @@ def _bytes_in(folder: Path) -> int:
 
 
 def download(plan: DownloadPlan, *, on_bytes: Optional[Callable[[int], None]] = None,
-             every: float = 0.5) -> Path:
+             every: float = 0.5, token: Optional[str] = None) -> Path:
     """
     Fetch the plan's files into the model cache, calling ``on_bytes`` with
     the bytes on disk so far every ``every`` seconds. A stopped download
@@ -249,6 +262,9 @@ def download(plan: DownloadPlan, *, on_bytes: Optional[Callable[[int], None]] = 
     from huggingface_hub import snapshot_download
     from huggingface_hub.utils import disable_progress_bars, enable_progress_bars
 
+    if plan.state != "ok" or not plan.files:
+        # never `allow_patterns=None`: that is the whole repository
+        raise ValueError(plan.why or f"nothing to download for {plan.hub_id}")
     cache = _cache()
     settle_links(cache)
     folder = cache / ("models--" + plan.hub_id.replace("/", "--"))
@@ -258,7 +274,7 @@ def download(plan: DownloadPlan, *, on_bytes: Optional[Callable[[int], None]] = 
     def fetch() -> None:
         try:
             result["path"] = snapshot_download(plan.hub_id, allow_patterns=plan.files or None,
-                                               cache_dir=str(cache))
+                                               cache_dir=str(cache), token=token)
         except BaseException as e:  # noqa: BLE001 - handed back to the caller's thread
             result["error"] = e
 

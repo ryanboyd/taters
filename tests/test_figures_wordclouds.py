@@ -348,16 +348,33 @@ def _fitted(tmp_path, pca="all"):
 
     table, _dic, _read = _two_sets(tmp_path)
     out = tmp_path / "stats"
+    # in an actual run the analysis table and its sidecar sit beside the
+    # results, so we put them there too -- and *first*, the way the assemble
+    # step does. leftover() calls anything more than a second older than the
+    # table a previous run's; with the table copied in last, the fits sat
+    # ~0.5 s behind it here and past 1 s under a full-suite load, and the
+    # component clouds quietly weren't drawn (a flake that passed alone)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "analysis_table.csv").write_bytes(table.read_bytes())
+    (out / "analysis_table_sets.json").write_bytes(
+        (tmp_path / "analysis_table_sets.json").read_bytes())
     fit_ridge_csv(table_csv=table, outcome_cols=["outcome"], pca=pca,
                   feature_sets="per_table", out_dir=out, verbose=False)
     analyze_correlations(table_csv=table, outcome_cols=["outcome"],
                          feature_sets="per_table", out_dir=out, verbose=False)
-    # in an actual run the analysis table and its sidecar sit beside the
-    # results, so we put them there too
-    (out / "analysis_table.csv").write_bytes(table.read_bytes())
-    (out / "analysis_table_sets.json").write_bytes(
-        (tmp_path / "analysis_table_sets.json").read_bytes())
     return out
+
+
+def test_the_fixture_writes_the_table_before_the_results_as_a_run_does(tmp_path):
+    """Guards the order above: every result in the folder must count as this
+    run's, however long the fits took. The flake this catches hid for a
+    while because it only showed under a full-suite load."""
+    from taters.stats._common import leftover
+
+    out = _fitted(tmp_path, pca="all")
+    results = sorted(q for q in out.glob("*.csv") if q.name != "analysis_table.csv")
+    assert results
+    assert [q.name for q in results if leftover(q, out)] == []
 
 
 def test_stats_wordclouds_draws_the_pictures_and_writes_the_section(tmp_path):

@@ -209,6 +209,12 @@ def test_the_gpus_out_of_memory_halves_the_batch(tiny, monkeypatch):
     replies = gen.generate(convs, max_new_tokens=4)
     assert len(replies) == 4 and all(r is not None for r in replies)
     assert sizes[0] == 4 and max(sizes[1:]) <= 2
+    # the size that got through is remembered: the next call doesn't pay
+    # the out-of-memory and the halving all over again
+    assert gen.batch_size == 2
+    del sizes[:]
+    gen.generate(convs, max_new_tokens=4)
+    assert sizes and max(sizes) <= 2, "the second call started at the halved size"
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +379,83 @@ def test_two_workers_answer_the_same_as_one_and_in_order(tiny):
         par.close()
 
 
+def test_a_worker_killed_with_a_chunk_in_its_own_queue_does_not_hang_the_call(tiny):
+    """The real hazard on a server: a worker process is killed (the system's
+    memory killer, a crash in a kernel) while a chunk sits in *its* queue.
+    Nothing will ever answer that chunk, and the parent used to wait for it
+    forever. Now it notices the dead process and hands the chunk on."""
+    import threading
+
+    plan = gl.plan_load(str(tiny), device="cpu", gpu=(None, None), ram=(8 * GB, 16 * GB))
+    par = gl.ParallelGenerator(str(tiny), [None, None], batch_size=2, max_new_tokens=4,
+                               plan=plan)
+    try:
+        convs = [Conversation(user=t) for t in ("the cat sat", "a dog ran", "potato gravy",
+                                                "the meeting", "bad budget")]
+        par.workers[0].terminate()
+        par.workers[0].join()
+        out: list = []
+        t = threading.Thread(target=lambda: out.append(par.generate(convs, max_new_tokens=4)),
+                             daemon=True)
+        t.start()
+        t.join(90)
+        assert not t.is_alive(), "the call hung on the dead worker"
+        one = gl.LocalGenerator(str(tiny), device="cpu", batch_size=4, max_new_tokens=4)
+        assert out == [one.generate(convs, max_new_tokens=4)]
+        assert par._dead == {0}
+        # later calls skip the dead worker outright instead of waiting on it
+        t0 = __import__("time").time()
+        assert par.generate(convs[:2], max_new_tokens=4) == one.generate(convs[:2],
+                                                                         max_new_tokens=4)
+        assert __import__("time").time() - t0 < 60
+    finally:
+        par.close()
+
+
+def test_every_worker_dead_is_an_error_not_a_wait(tiny):
+    plan = gl.plan_load(str(tiny), device="cpu", gpu=(None, None), ram=(8 * GB, 16 * GB))
+    par = gl.ParallelGenerator(str(tiny), [None], batch_size=2, max_new_tokens=4, plan=plan)
+    try:
+        par.workers[0].terminate()
+        par.workers[0].join()
+        with pytest.raises(RuntimeError, match="died|every worker"):
+            par.generate([Conversation(user="x")], max_new_tokens=4)
+        with pytest.raises(RuntimeError, match="every worker has died"):
+            par.generate([Conversation(user="x")], max_new_tokens=4)
+    finally:
+        par.close()
+
+
+def test_the_parent_counts_tokens_the_way_the_workers_read_them(tiny):
+    """The step sizes cuts and budgets with the parent's count; a word count
+    stood in before, and a cut sized on words can overflow the model."""
+    plan = gl.plan_load(str(tiny), device="cpu", gpu=(None, None), ram=(8 * GB, 16 * GB))
+    par = gl.ParallelGenerator(str(tiny), [None], batch_size=2, max_new_tokens=4, plan=plan)
+    try:
+        one = gl.LocalGenerator(str(tiny), device="cpu", batch_size=1, max_new_tokens=4)
+        msgs = [{"role": "system", "content": "be brief"},
+                {"role": "user", "content": "the cat sat on the mat, didn't it? " * 20}]
+        assert par.count_tokens(msgs) == one.count_tokens(msgs)
+        assert par.thinking is False, "the smoke test reads this on every backend"
+    finally:
+        par.close()
+
+
+def test_worker_device_ids_go_through_the_parents_own_visible_devices():
+    """torch numbers what it can see from 0: under CUDA_VISIBLE_DEVICES=2,3
+    the parent's card 1 is the machine's 3, and a worker told "1" would
+    take a card the parent was never given."""
+    assert gl._physical_ids([[0], [1]], visible="2,3") == [["2"], ["3"]]
+    assert gl._physical_ids([[0, 1], [2, 3]], visible="4,5,6,7") == [["4", "5"], ["6", "7"]]
+    assert gl._physical_ids([[0], [1]], visible="") == [["0"], ["1"]]
+    assert gl._physical_ids([[1], None], visible="GPU-aaaa, GPU-bbbb") == [["GPU-bbbb"], None]
+
+
+def test_the_batch_is_sized_from_the_card_the_model_is_on():
+    assert gl._device_index("cuda:1") == 1
+    assert gl._device_index("cuda") == 0
+
+
 def test_devices_for_a_model_that_needs_a_gpu_is_empty_on_the_cpu(tiny):
     plan = gl.plan_load(str(tiny), device="cpu", gpu=(None, None), ram=(8 * GB, 16 * GB))
     assert gl.devices_for(plan) == []
@@ -498,3 +581,109 @@ def test_decoding_settings_for_a_chat_and_the_step_left_as_it_was(tiny):
     pieces = list(gen.stream(Conversation(user="the cat"), max_new_tokens=8, temperature=0.9,
                              top_k=5, seed=3, repetition_penalty=1.3))
     assert pieces, "sampled with every setting, it still answers"
+
+
+def test_the_plan_made_to_choose_a_backend_is_the_one_the_model_loads_with(tiny, monkeypatch):
+    """generator_for plans to choose between one process and many; the model
+    then planned again from scratch, a second trip to the hub every load."""
+    from taters.text._generation import generator_for
+
+    calls = []
+    real = gl.plan_load
+    monkeypatch.setattr(gl, "plan_load", lambda *a, **k: calls.append(1) or real(*a, **k))
+    gen = generator_for("local", str(tiny), device="auto", max_new_tokens=4, batch_size=1)
+    try:
+        assert isinstance(gen, gl.LocalGenerator)
+        assert len(calls) == 1, "planned once, and handed to the model"
+    finally:
+        gen.close()
+
+
+def test_the_many_gpu_branch_reports_progress_the_way_the_step_listens(tiny, monkeypatch):
+    """The step's callback takes (done, total, message). The branch that
+    picks several GPUs called it with one argument: a TypeError that only
+    a machine with several cards ever reached, before any model loaded."""
+    from taters.text._generation import generator_for
+
+    plan = gl.plan_load(str(tiny), device="cpu", gpu=(None, None), ram=(8 * GB, 16 * GB))
+    plan.device, plan.groups = "cuda:0", [[0], [1]]
+    monkeypatch.setattr(gl, "plan_load", lambda *a, **k: plan)
+    built = []
+
+    class Stub:
+        def __init__(self, model, groups, **kw):
+            built.append((groups, kw.get("plan") is plan))
+
+    monkeypatch.setattr(gl, "ParallelGenerator", Stub)
+    heard = []
+    gen = generator_for("local", str(tiny), max_new_tokens=4,
+                        on_progress=lambda done, total, message: heard.append(message))
+    assert isinstance(gen, Stub) and built == [([[0], [1]], True)]
+    assert any(m.startswith("loading") for m in heard)
+
+
+def test_the_one_time_download_carries_the_steps_token_and_progress(tiny, monkeypatch):
+    """A gated model refuses without the token; the helper used to try
+    without it, fail silently, and leave N workers downloading at once."""
+    from taters.helpers import hub_models as hm
+    from taters.text import _generation as g
+
+    seen = {}
+    monkeypatch.setattr(hm, "is_downloaded", lambda name, cache=None: False)
+
+    def plan_download(name, token=None):
+        seen["plan_token"] = token
+        return hm.DownloadPlan(name, files=["model.safetensors"], size=4_000)
+
+    monkeypatch.setattr(hm, "plan_download", plan_download)
+
+    def download(plan, *, on_bytes=None, every=0.5, token=None):
+        seen["download_token"] = token
+        if on_bytes:
+            on_bytes(2_000)
+        return Path("/cache/x")
+
+    monkeypatch.setattr(hm, "download", download)
+    heard = []
+    plan = gl.plan_load(str(tiny), device="cpu", gpu=(None, None), ram=(8 * GB, 16 * GB))
+    plan.facts.kind = "hub"
+    g._fetch_once("org/gated", plan, lambda d, t, m: heard.append((d, t)), "hf_secret")
+    assert seen == {"plan_token": "hf_secret", "download_token": "hf_secret"}
+    assert (2_000, 4_000) in heard, "progress in bytes, against the size"
+
+
+def test_a_failed_one_time_download_is_said_not_swallowed(tiny, monkeypatch):
+    from taters.helpers import hub_models as hm
+    from taters.text import _generation as g
+
+    monkeypatch.setattr(hm, "is_downloaded", lambda name, cache=None: False)
+    monkeypatch.setattr(hm, "plan_download", lambda name, token=None: hm.DownloadPlan(
+        name, files=["model.safetensors"], size=1))
+
+    def refuse(plan, **kw):
+        raise RuntimeError("GatedRepoError: access denied")
+
+    monkeypatch.setattr(hm, "download", refuse)
+    heard = []
+    plan = gl.plan_load(str(tiny), device="cpu", gpu=(None, None), ram=(8 * GB, 16 * GB))
+    plan.facts.kind = "hub"
+    g._fetch_once("org/gated", plan, lambda d, t, m: heard.append(m), None)
+    assert any("each copy fetches for itself" in m for m in heard)
+
+
+def test_a_late_answer_to_a_re_sent_chunk_is_used_not_thrown_away(tiny):
+    """A slow worker's answer arriving after its chunk went to another is
+    still the answer to those rows; whichever comes first fills them."""
+    plan = gl.plan_load(str(tiny), device="cpu", gpu=(None, None), ram=(8 * GB, 16 * GB))
+    par = gl.ParallelGenerator(str(tiny), [None], batch_size=2, max_new_tokens=4, plan=plan)
+    try:
+        par._superseded = {7: 9}
+        par._serial = 9
+        # the parent is told job 9 is pending; the answer comes labeled 7
+        msgs = [("done", 7, ["late reply"])]
+        par._next = lambda waiting: msgs.pop(0)
+        par.jobs[0] = type("Q", (), {"put": lambda self, job: None})()
+        par._serial = 8                     # send() will number the one chunk 9
+        assert par.generate([Conversation(user="x")], max_new_tokens=4) == ["late reply"]
+    finally:
+        par.close()

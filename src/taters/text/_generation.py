@@ -193,16 +193,53 @@ def generator_for(backend: str, model: str, *, endpoint_url: str = "",
         # a copy per card is for many texts at once; a chat is one
         # conversation, and a copy in a worker process cannot stream
         if len(groups) > 1 and not one_copy:
-            if on_progress is not None:
-                on_progress(f"loading {plan.describe()}")
+            from ..helpers.progress import announce
+
+            _fetch_once(model, plan, on_progress, hf_token)
+            # through announce: the step's callback takes (done, total,
+            # message), and a bare one-argument call here was a TypeError
+            # that only a machine with several GPUs ever reached
+            announce(on_progress, f"loading {plan.describe()}")
             return ParallelGenerator(model, groups, precision=precision,
                                      batch_size=batch_size, hf_token=hf_token,
                                      max_new_tokens=max_new_tokens, thinking=thinking,
                                      verbose=verbose, plan=plan)
+    else:
+        plan = None
     return LocalGenerator(model, device=device, precision=precision, offload=offload,
                          batch_size=batch_size, hf_token=hf_token,
                          max_new_tokens=max_new_tokens, thinking=thinking, verbose=verbose,
-                         on_progress=on_progress)
+                         on_progress=on_progress, plan=plan)
+
+
+def _fetch_once(model: str, plan, on_progress, hf_token: Optional[str] = None) -> None:
+    """The weights into the cache from this process, before the workers
+    start: otherwise every worker downloads the same files at once into the
+    same folder, and the first run on a fresh server does N downloads'
+    worth of waiting (and, on Windows, N chances at the link race). The
+    step's token goes with it, since a gated model refuses without one. A
+    failure is said, then left to the workers to report in the hub's words."""
+    from ..helpers.progress import announce
+
+    try:
+        from ..helpers import hub_models as hm
+
+        if plan.facts.kind == "folder" or hm.is_downloaded(model):
+            return
+        wanted = hm.plan_download(model, token=hf_token)
+        if wanted.state != "ok":
+            return
+        label = f"downloading {model} ({wanted.gigabytes}) once, before the copies load"
+        announce(on_progress, label)
+        if on_progress is not None:
+            hm.download(wanted, token=hf_token,
+                        on_bytes=lambda done: on_progress(done, wanted.size or None, label))
+        else:
+            hm.download(wanted, token=hf_token)
+    except Exception as e:  # noqa: BLE001 - the workers say what went wrong, with the hub's words
+        announce(on_progress, f"the download could not be done once here ({type(e).__name__}: "
+                              f"{str(e).splitlines()[0] if str(e) else ''}); each copy "
+                              f"fetches for itself")
 
 
 #: Instruction-tuned models worth offering by name, smallest first, with

@@ -113,7 +113,7 @@ def _ask_system_prompt(prompter: Prompter, current: str) -> Optional[str]:
                 text, where = system_prompt_from_file(Path(raw).expanduser())
         except GoBack:
             continue
-        except OSError as e:
+        except (OSError, ValueError) as e:
             prompter.note(f"  That file could not be read: {e}", style="yellow")
             continue
         if not text:
@@ -241,8 +241,10 @@ def _converse(prompter: Prompter, session, label: str, model_label: str = "") ->
         prompter.chat_write(f"{label} › ", style="bold cyan")
         filt = ThinkFilter(expect_thinking=session.thinking != "off")
         said_thinking = False
+        before = len(session.messages)
+        stream = session.send(line)
         try:
-            for piece in session.send(line):
+            for piece in stream:
                 for kind, text in filt.feed(piece):
                     said_thinking = _show(prompter, kind, text, session.thinking, said_thinking)
             for kind, text in filt.close():
@@ -251,10 +253,21 @@ def _converse(prompter: Prompter, session, label: str, model_label: str = "") ->
         except ValueError as e:
             prompter.chat_write(f"({e}.)", style="yellow", end="\n\n")
         except KeyboardInterrupt:
-            prompter.chat_write(" (stopped)", style="dim", end="\n\n")
+            stream.close()
+            kept = "" if len(session.messages) > before else \
+                " before a reply; your message was not kept"
+            prompter.chat_write(f" (stopped{kept})", style="dim", end="\n\n")
         except Exception as e:  # noqa: BLE001 - one failed reply is not a lost chat
-            prompter.chat_write(f"(The model could not answer: {type(e).__name__}: {e})",
+            stream.close()
+            # the session decides what the transcript keeps; the screen reads it back
+            kept = "" if len(session.messages) > before else \
+                " Your message was not kept; say it again."
+            prompter.chat_write(f"(The model could not answer: {type(e).__name__}: {e}.{kept})",
                                 style="red", end="\n\n")
+        finally:
+            # settles the transcript now (a stopped reply is recorded as far
+            # as it got) rather than whenever the generator is collected
+            stream.close()
         if session.out_of_view > out_of_view:
             out_of_view = session.out_of_view
             prompter.chat_write(

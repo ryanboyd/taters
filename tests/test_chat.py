@@ -383,3 +383,120 @@ def test_replies_are_labeled_poe_unless_named(canned, tmp_path):
     p = Prompter(["bot_name", "   ", ":start", "hi", "/exit", False])
     run_chat(p, cwd=tmp_path)
     assert "Poe › " in p.chat_text, "an empty name puts the default back"
+
+
+# ---------------------------------------------------------------------------
+# the transcript after a reply that failed or was stopped
+# ---------------------------------------------------------------------------
+
+def test_a_reply_that_fails_partway_is_kept_as_far_as_it_got():
+    def half(conv, **kw):
+        yield "Paris is "
+        raise RuntimeError("the server went away")
+
+    gen = FakeGenerator(_echo)
+    gen.stream = half
+    s = ChatSession(gen, model="m")
+    with pytest.raises(RuntimeError):
+        list(s.send("capital of France?"))
+    assert [(m.role, m.content.strip()) for m in s.messages] == [
+        ("user", "capital of France?"), ("assistant", "Paris is")]
+
+
+def test_a_reply_that_never_started_takes_the_question_back_out_so_turns_alternate():
+    """Gemma's and Llama's templates refuse two user turns in a row: one
+    failed reply used to leave [user, user] and every later send failed."""
+    def dead(conv, **kw):
+        raise RuntimeError("no server")
+        yield  # unreachable; makes this a generator
+
+    gen = FakeGenerator(_echo)
+    gen.stream = dead
+    s = ChatSession(gen, model="m")
+    with pytest.raises(RuntimeError):
+        list(s.send("hi"))
+    assert s.messages == []
+    del gen.stream       # the class's stream again
+    list(s.send("hello again"))
+    assert [m.role for m in s.messages] == ["user", "assistant"]
+    assert gen.calls[-1][0].messages() == [{"role": "user", "content": "hello again"}]
+
+
+def test_a_reply_stopped_by_the_reader_is_recorded_as_far_as_it_got():
+    """Ctrl-C in the chat closes the generator partway through."""
+    gen = FakeGenerator(lambda u: "one two three four")
+    s = ChatSession(gen, model="m")
+    stream = s.send("count")
+    assert next(stream) == "one " and next(stream) == "two "
+    stream.close()
+    assert [(m.role, m.content.strip()) for m in s.messages] == [("user", "count"),
+                                                                  ("assistant", "one two")]
+
+
+def test_ctrl_c_during_a_reply_stops_it_and_keeps_what_was_said(canned, tmp_path, monkeypatch):
+    from taters.ui.chat import run_chat
+
+    def interrupted(self, conv, **kw):
+        yield "Ahoy "
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(FakeGenerator, "stream", interrupted)
+    out = tmp_path / "c.csv"
+    p = Prompter([":start", "hi", "/exit", True, str(out)])
+    run_chat(p, cwd=tmp_path)
+    assert "(stopped)" in p.chat_text
+    with out.open(encoding="utf-8-sig", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    assert [(r["role"], r["content"].strip()) for r in rows] == [("user", "hi"),
+                                                                  ("assistant", "Ahoy")]
+
+
+def test_a_reply_that_never_started_tells_the_user_to_say_it_again(canned, tmp_path,
+                                                                     monkeypatch):
+    from taters.ui.chat import run_chat
+
+    def dead(self, conv, **kw):
+        raise RuntimeError("no server")
+        yield  # unreachable; makes this a generator
+
+    monkeypatch.setattr(FakeGenerator, "stream", dead)
+    p = Prompter([":start", "hi", "/exit"])
+    run_chat(p, cwd=tmp_path)       # nothing kept, so no export is offered
+    assert "Your message was not kept; say it again." in p.chat_text
+
+
+def test_a_broken_prompt_csv_is_refused_not_used_as_the_system_prompt(tmp_path):
+    """Its raw text would make a nonsense system prompt and nothing would say
+    so; a .txt, which is plain text whatever else it is, is still read whole."""
+    bad = tmp_path / "Broken.csv"
+    bad.write_bytes(b'role,content\nsystem,"unbalanced\nuser,{text}\n')
+    with pytest.raises(ValueError, match="Broken.csv could not be read as a prompt file"):
+        chat.system_prompt_from_file(bad)
+    plain = tmp_path / "notes.txt"
+    plain.write_text("You are terse.\n\nAlways.\n", encoding="utf-8")
+    assert chat.system_prompt_from_file(plain)[0] == "You are terse.\n\nAlways."
+
+
+def test_the_screen_says_a_prompt_file_could_not_be_read_and_asks_again(canned, tmp_path):
+    from taters.ui.chat import run_chat
+
+    bad = tmp_path / "Broken.csv"
+    bad.write_bytes(b'role,content\nsystem,"unbalanced\nuser,{text}\n')
+    p = Prompter(["system", ":file", str(bad), ":none", ":start", "/exit"])
+    run_chat(p, cwd=tmp_path)
+    assert any("Broken.csv could not be read" in line for line in p.output)
+
+
+def test_an_empty_first_piece_does_not_count_as_a_reply(canned, tmp_path, monkeypatch):
+    """The screen and the transcript agree on whether the question was kept:
+    the session decides, the screen reads it back."""
+    from taters.ui.chat import run_chat
+
+    def blank_then_dead(self, conv, **kw):
+        yield ""
+        raise RuntimeError("gone")
+
+    monkeypatch.setattr(FakeGenerator, "stream", blank_then_dead)
+    p = Prompter([":start", "hi", "/exit"])
+    run_chat(p, cwd=tmp_path)       # no export offered: nothing was kept
+    assert "Your message was not kept" in p.chat_text

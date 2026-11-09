@@ -20,11 +20,12 @@ from __future__ import annotations
 import json
 import math
 import os
+import queue
 import struct
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
 from ._generation import Conversation, Generator
 
@@ -571,6 +572,45 @@ def plan_load(model: str, *, precision: str = "auto", device: str = "auto",
 # The generator
 # ---------------------------------------------------------------------------
 
+def _tokenizer_for(source: str, kind: str, hf_token: Optional[str], thinking: bool):
+    """The model's tokenizer and the template switches it takes: shared by
+    the one-process backend and the parent of the many-process one, so
+    both count tokens the same way."""
+    from transformers import AutoTokenizer
+
+    from ..helpers.hub_models import settle_links
+    from ..helpers.settings import model_cache_dir
+
+    cache: Dict[str, Any] = {} if kind == "folder" else {"cache_dir": str(model_cache_dir())}
+    if hf_token:
+        cache["token"] = hf_token
+    # before anything downloads: see settle_links
+    settle_links()
+    tokenizer = AutoTokenizer.from_pretrained(source, **cache)
+    template = tokenizer.chat_template or ""
+    kwargs = {"enable_thinking": bool(thinking)} if "enable_thinking" in template else {}
+    return tokenizer, kwargs
+
+
+def _template_ids(tokenizer, messages: Sequence[Dict[str, str]],
+                  template_kwargs: Dict[str, Any]) -> List[int]:
+    if tokenizer.chat_template:
+        ids = tokenizer.apply_chat_template(
+            list(messages), tokenize=True, add_generation_prompt=True, return_dict=False,
+            **template_kwargs)
+        return list(ids) if not isinstance(ids, dict) else list(ids["input_ids"])
+    # no template: the plain fallback every chat model understands least badly
+    text = "\n\n".join(
+        (f"{m['role'].capitalize()}: {m['content']}" if m["role"] != "system"
+         else m["content"]) for m in messages) + "\n\nAssistant:"
+    return list(tokenizer(text)["input_ids"])
+
+
+def _device_index(device: str) -> int:
+    """``cuda:1`` -> 1; a bare ``cuda`` is card 0."""
+    return int(device.split(":", 1)[1]) if ":" in device else 0
+
+
 class LocalGenerator(Generator):
     kind = "transformers"
 
@@ -578,7 +618,7 @@ class LocalGenerator(Generator):
                  offload: bool = False, batch_size: int = 0, hf_token: Optional[str] = None,
                  max_new_tokens: int = 256, thinking: bool = False, verbose: bool = False,
                  on_progress: Optional[Callable[..., None]] = None,
-                 prompt_tokens: int = 512):
+                 prompt_tokens: int = 512, plan: Optional[LoadPlan] = None):
         from ..helpers.progress import announce
         from ._transformer_common import set_threads, torch_missing_reason
 
@@ -586,13 +626,16 @@ class LocalGenerator(Generator):
         if missing:
             raise ImportError(missing)
         import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer
+        from transformers import AutoModelForCausalLM
 
         from ..helpers.settings import model_cache_dir
 
-        self.plan = plan_load(model, precision=precision, device=device,
-                              max_new_tokens=max_new_tokens, prompt_tokens=prompt_tokens,
-                              offload=offload, batch_size=batch_size, hf_token=hf_token)
+        # the plan as handed in (generator_for made one to choose a backend;
+        # making it again meant a second trip to the hub), else made here
+        self.plan = plan if plan is not None else plan_load(
+            model, precision=precision, device=device, max_new_tokens=max_new_tokens,
+            prompt_tokens=prompt_tokens, offload=offload, batch_size=batch_size,
+            hf_token=hf_token)
         if self.plan.refusal:
             raise ValueError(self.plan.refusal)
         facts = self.plan.facts
@@ -609,11 +652,8 @@ class LocalGenerator(Generator):
         cache = {} if facts.kind == "folder" else {"cache_dir": str(model_cache_dir())}
         if hf_token:
             cache["token"] = hf_token
-        # before anything downloads: see settle_links
-        from ..helpers.hub_models import settle_links
-
-        settle_links()
-        self.tokenizer = AutoTokenizer.from_pretrained(facts.source, **cache)
+        self.tokenizer, self.template_kwargs = _tokenizer_for(facts.source, facts.kind,
+                                                              hf_token, thinking)
         self.tokenizer.padding_side = "left"
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -637,7 +677,9 @@ class LocalGenerator(Generator):
                 BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
                                    bnb_4bit_compute_dtype=dtype, bnb_4bit_use_double_quant=True)
                 if self.plan.precision == "nf4" else BitsAndBytesConfig(load_in_8bit=True))
-            kwargs["device_map"] = {"": 0}
+            # on the card the plan chose: card 0 may be the busy one
+            kwargs["device_map"] = {"": _device_index(self.plan.device)
+                                    if self.plan.device.startswith("cuda") else 0}
         elif self.plan.device == "auto":
             kwargs["device_map"] = "auto"
         elif self.plan.device == "shards":
@@ -663,8 +705,12 @@ class LocalGenerator(Generator):
         # the weights as loaded, not as planned: size the batch from the truth
         if self.plan.device.startswith("cuda") and len(self.plan.groups) <= 1:
             try:
-                allocated = int(torch.cuda.memory_allocated(0))
-                free, total = gpu_memory(0)
+                # the card the model is on: on a machine where card 0 is
+                # busy the plan picks another, and card 0's memory says
+                # nothing about this one's
+                card = _device_index(self.plan.device)
+                allocated = int(torch.cuda.memory_allocated(card))
+                free, total = gpu_memory(card)
                 if free is not None and not batch_size:
                     # `free` already excludes the CUDA context that batch_for
                     # subtracts, so it is handed back here
@@ -676,9 +722,6 @@ class LocalGenerator(Generator):
             except Exception:
                 pass
         self.batch_size = max(1, int(self.plan.batch))
-        template = self.tokenizer.chat_template or ""
-        self.template_kwargs: Dict[str, Any] = (
-            {"enable_thinking": bool(thinking)} if "enable_thinking" in template else {})
         self.max_new_tokens = int(max_new_tokens)
 
     def describe(self) -> str:
@@ -793,16 +836,7 @@ class LocalGenerator(Generator):
         return {"use_model_defaults": False} if known else {}
 
     def _ids(self, messages: Sequence[Dict[str, str]]) -> List[int]:
-        if self.tokenizer.chat_template:
-            ids = self.tokenizer.apply_chat_template(
-                list(messages), tokenize=True, add_generation_prompt=True, return_dict=False,
-                **self.template_kwargs)
-            return list(ids) if not isinstance(ids, dict) else list(ids["input_ids"])
-        # no template: the plain fallback every chat model understands least badly
-        text = "\n\n".join(
-            (f"{m['role'].capitalize()}: {m['content']}" if m["role"] != "system"
-             else m["content"]) for m in messages) + "\n\nAssistant:"
-        return list(self.tokenizer(text)["input_ids"])
+        return _template_ids(self.tokenizer, messages, self.template_kwargs)
 
     def count_tokens(self, messages: Sequence[Dict[str, str]]) -> int:
         return len(self._ids(messages))
@@ -837,6 +871,9 @@ class LocalGenerator(Generator):
                 texts = self.tokenizer.batch_decode(out[:, width:], skip_special_tokens=True)
                 for i, text in zip(chunk, texts):
                     replies[i] = text.strip()
+            # this size got through, so it's the size from now on; before
+            # this every call paid the out-of-memory and the halving again
+            self.batch_size = size
 
         run_with_oom_fallback(run, self.batch_size, verbose=self.verbose, what="a batch")
         return replies
@@ -861,13 +898,34 @@ def devices_for(plan: LoadPlan) -> List[List[int]]:
     return list(plan.groups) if plan.device == "shards" or plan.device.startswith("cuda") else []
 
 
-def _worker(rank: int, devices: Optional[Sequence[int]], spec: Dict[str, Any], jobs,
+def _physical_ids(devices: Sequence[Optional[Sequence[int]]],
+                  visible: Optional[str] = None) -> List[Optional[List[str]]]:
+    """
+    What each worker's ``CUDA_VISIBLE_DEVICES`` should say for these torch
+    indices. torch numbers the cards it can see from 0, so when the parent
+    itself runs under ``CUDA_VISIBLE_DEVICES=2,3`` (a shared server), its
+    card 1 is the machine's card 3, and a worker told "1" would take a
+    card the parent was never given. ``visible`` stands in for the
+    environment in tests.
+    """
+    raw = os.environ.get("CUDA_VISIBLE_DEVICES") if visible is None else visible
+    names = [n.strip() for n in str(raw).split(",") if n.strip()] if raw else []
+    out: List[Optional[List[str]]] = []
+    for group in devices:
+        if group is None:
+            out.append(None)
+        else:
+            out.append([names[i] if i < len(names) else str(i) for i in group])
+    return out
+
+
+def _worker(rank: int, devices: Optional[Sequence[str]], spec: Dict[str, Any], jobs,
             results) -> None:
     """One process: pin itself to its cards before torch is imported, load
     the model once (sharded across them when it takes more than one), then
     answer chunks of conversations until told to stop."""
     if devices is not None:
-        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(d) for d in devices)
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(devices)
     try:
         gen = LocalGenerator(spec["model"], device="cuda" if devices is not None else "cpu",
                              precision=spec["precision"], offload=False,
@@ -917,42 +975,91 @@ class ParallelGenerator(Generator):
         self.plan = plan
         self.model_label = plan.facts.label if plan else str(model)
         self.context_length = plan.context_length if plan else None
+        self.thinking = bool(thinking)
         self.devices = [None if d is None else list(d) for d in devices]
         self.device_name = ("cuda" if any(d is not None for d in self.devices) else "cpu")
+        # the tokenizer here too, so the step's budgets and cuts are counted
+        # the way the workers will read them; a word count stood in before,
+        # and a cut sized on words can overflow the model on long texts
+        self.template_kwargs: Dict[str, Any] = {}
+        counted = ""
+        try:
+            source = plan.facts.source if plan else str(model)
+            kind = plan.facts.kind if plan else "hub"
+            self.tokenizer, self.template_kwargs = _tokenizer_for(source, kind, hf_token,
+                                                                  thinking)
+        except Exception as e:  # noqa: BLE001 - the word count is the fallback, and said
+            self.tokenizer = None
+            counted = (f"; token counts are estimates from word counts (the tokenizer could "
+                       f"not be loaded here: {type(e).__name__})")
+            if verbose:
+                print(f"[llm] {counted[2:]}")
+        self._serial = 0            # job ids, unique across calls
+        self._dead: Set[int] = set()
+        self._superseded: Dict[int, int] = {}   # a re-sent job's old id -> its new one
         width = max((len(d) for d in self.devices if d), default=1)
         self.reason = (f"{len(self.devices)} copies of the model, one per device" if width == 1
                        else f"{len(self.devices)} copies of the model, each sharded across "
-                            f"{width} GPUs")
+                            f"{width} GPUs") + counted
         ctx = mp.get_context("spawn")
         self.jobs = [ctx.Queue() for _ in self.devices]
         self.results = ctx.Queue()
         spec = {"model": model, "precision": precision, "batch_size": batch_size,
                 "hf_token": hf_token, "max_new_tokens": max_new_tokens, "thinking": thinking,
                 "prompt_tokens": prompt_tokens}
+        physical = _physical_ids(self.devices)
         self.workers = [ctx.Process(target=_worker, args=(r, d, spec, self.jobs[r], self.results),
-                                    daemon=True) for r, d in enumerate(self.devices)]
+                                    daemon=True) for r, d in enumerate(physical)]
         for w in self.workers:
             w.start()
         sizes: Dict[int, int] = {}
-        for _ in self.workers:
-            kind, rank, payload = self.results.get()
-            if kind == "dead":
+        loading = set(range(len(self.workers)))
+        while loading:
+            kind, rank, payload = self._next(lambda: loading)
+            if kind in ("dead", "died"):
                 self.close()
-                raise RuntimeError(f"worker {rank} on device {self.devices[rank]} could not "
+                raise RuntimeError(f"worker {rank} on device {self._where(rank)} could not "
                                    f"load the model: {payload}")
-            sizes[rank] = int(payload)
+            if kind == "ready":
+                sizes[rank] = int(payload)
+                loading.discard(rank)
         self.per_worker = [sizes[r] for r in range(len(self.workers))]
         self.batch_size = max(1, sum(self.per_worker))
 
+    def _where(self, rank: int) -> str:
+        d = self.devices[rank]
+        return "cpu" if d is None else "cuda:" + "+".join(str(i) for i in d)
+
+    def _next(self, waiting_on: Callable[[], Set[int]]) -> Tuple[str, Any, Any]:
+        """
+        The next message from a worker. A worker that dies with work
+        outstanding (killed by the system for memory, a crash inside a CUDA
+        kernel) never sends, so without this the parent waited on an empty
+        queue forever -- an unattended overnight run that hangs instead of
+        failing. The wait is timed, and a dead process is reported as the
+        message it will never send.
+        """
+        while True:
+            try:
+                return self.results.get(timeout=1.0)
+            except queue.Empty:
+                for r in sorted(waiting_on()):
+                    if r not in self._dead and not self.workers[r].is_alive():
+                        self._dead.add(r)
+                        code = self.workers[r].exitcode
+                        return ("died", r,
+                                f"worker {r} on {self._where(r)} died (exit code {code}): "
+                                f"killed, most likely for running out of memory")
+
     def describe(self) -> str:
-        where = ", ".join("cpu" if d is None else "cuda:" + "+".join(str(i) for i in d)
-                          for d in self.devices)
+        where = ", ".join(self._where(r) for r in range(len(self.devices)))
         return (f"transformers, {len(self.devices)} copies of {self.model_label} on {where}, "
                 f"{self.batch_size} conversations per round")
 
     def count_tokens(self, messages: Sequence[Dict[str, str]]) -> int:
-        # the tokenizer lives in the workers; words times a bit is only
-        # ever used to size a cut, and the plan's context says when
+        if self.tokenizer is not None:
+            return len(_template_ids(self.tokenizer, messages, self.template_kwargs))
+        # no tokenizer could be loaded here: words times a bit, on the high side
         return int(sum(len(m["content"].split()) for m in messages) * 1.3) + 8
 
     def generate(self, conversations: Sequence[Conversation], *, max_new_tokens: int,
@@ -962,38 +1069,60 @@ class ParallelGenerator(Generator):
             return []
         kwargs = dict(max_new_tokens=max_new_tokens, temperature=temperature, top_p=top_p,
                       seed=seed)
-        # chunks in proportion to each worker's batch, in order
-        total = sum(self.per_worker)
+        live = [r for r in range(len(self.workers)) if r not in self._dead]
+        if not live:
+            raise RuntimeError("every worker has died; nothing is left to answer with")
+        # chunks in proportion to each live worker's batch, in order
+        total = sum(self.per_worker[r] for r in live)
         chunks: List[Tuple[int, int, int]] = []     # (worker, start, end)
         at = 0
-        for r, size in enumerate(self.per_worker):
-            n = max(1, round(len(conversations) * size / total)) if r < len(self.per_worker) - 1 \
+        for n_th, r in enumerate(live):
+            size = self.per_worker[r]
+            n = max(1, round(len(conversations) * size / total)) if n_th < len(live) - 1 \
                 else len(conversations) - at
             if at >= len(conversations):
                 break
             chunks.append((r, at, min(len(conversations), at + n)))
             at = min(len(conversations), at + n)
         replies: List[Optional[str]] = [None] * len(conversations)
-        pending: Dict[int, Tuple[int, int, int, int]] = {}      # index -> (worker, s, e, tries)
-        for i, (r, start, end) in enumerate(chunks):
-            self.jobs[r].put((i, list(conversations[start:end]), kwargs))
-            pending[i] = (r, start, end, 1)
-        alive = set(range(len(self.workers)))
+        pending: Dict[int, Tuple[int, int, int, int]] = {}      # job id -> (worker, s, e, tries)
+
+        def send(r: int, start: int, end: int, tries: int) -> None:
+            self._serial += 1
+            self.jobs[r].put((self._serial, list(conversations[start:end]), kwargs))
+            pending[self._serial] = (r, start, end, tries)
+
+        for r, start, end in chunks:
+            send(r, start, end, 1)
+        tired = set()       # workers that failed a chunk this call: no retries go to them
         while pending:
-            kind, index, payload = self.results.get()
-            r, start, end, tries = pending[index]
+            # `who` is the job id for done/failed, and the worker's rank for died
+            kind, who, payload = self._next(lambda: {p[0] for p in pending.values()})
             if kind == "done":
-                replies[start:end] = payload
-                del pending[index]
+                # a late answer from a slow worker to a job since re-sent is
+                # still the answer to those rows: the first good one counts,
+                # and the other, when it comes, finds nothing pending
+                while who in self._superseded:
+                    who = self._superseded[who]
+                if who in pending:
+                    r, start, end, _tries = pending.pop(who)
+                    replies[start:end] = payload
                 continue
-            # a failed chunk goes once more to another worker, else it is the error
-            alive.discard(r)
-            others = [w for w in alive if w != r] or sorted(alive)
-            if tries >= 2 or not others:
-                raise RuntimeError(f"a worker could not answer a batch: {payload}")
-            w = others[0]
-            self.jobs[w].put((index, list(conversations[start:end]), kwargs))
-            pending[index] = (w, start, end, tries + 1)
+            # a failed chunk goes once more to another worker, else it is the
+            # error; a dead worker's chunks, all of them, the same way
+            if kind == "died":
+                lost = [i for i, p in pending.items() if p[0] == who]
+            else:
+                lost = [who] if who in pending else []
+            for i in lost:
+                r, start, end, tries = pending.pop(i)
+                tired.add(r)
+                others = [w for w in range(len(self.workers))
+                          if w not in self._dead and w not in tired]
+                if tries >= 2 or not others:
+                    raise RuntimeError(f"a worker could not answer a batch: {payload}")
+                send(others[0], start, end, tries + 1)
+                self._superseded[i] = self._serial
         return replies
 
     def close(self) -> None:
