@@ -658,8 +658,8 @@ _LLM_VARS: Dict[str, dict] = {
     },
     "llm_batch_size": {
         "default": 0,
-        "desc": "How many texts go to the model at once. 0 sizes it to free memory; "
-                "halved automatically if the GPU runs out.",
+        "desc": "How many answers the model writes at once (a text with two prompts is "
+                "two). 0 fits it to free memory and to how long your prompts and texts are.",
     },
 }
 
@@ -678,7 +678,7 @@ _LLM_LABELS = {
     "context_length": "context window (tokens; 0 = find out)",
     "endpoint_url": "server address",
     "precision": "model precision",
-    "batch_size": "texts at a time (0 = fit to memory)",
+    "batch_size": "answers at a time (0 = fit to memory)",
     "device": "run on",
     "backend": "where answers come from",
     "top_p": "sampling breadth (top p)",

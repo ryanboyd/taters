@@ -687,3 +687,110 @@ def test_a_late_answer_to_a_re_sent_chunk_is_used_not_thrown_away(tiny):
         assert par.generate([Conversation(user="x")], max_new_tokens=4) == ["late reply"]
     finally:
         par.close()
+
+
+# ---------------------------------------------------------------------------
+# a batch fitted to memory from its own lengths, and the Windows spill
+# ---------------------------------------------------------------------------
+
+#: Llama-3.2-3B's shape: what the real run that prompted this was loading
+_LLAMA_3B = {"num_hidden_layers": 28, "num_attention_heads": 24, "num_key_value_heads": 8,
+             "hidden_size": 3072, "intermediate_size": 8192}
+
+
+def test_the_run_that_stalled_gets_batches_that_fit():
+    """A real run: 4-bit Llama-3.2-3B on a 6 GB laptop card, two long
+    prompts over 500-word essays, about 2,000 tokens a conversation. The
+    batch was sized once on a guess of 512 tokens and came out at 18; the
+    card had room for about 5, Windows lent it 4 GB of system memory
+    instead of refusing, and nothing was written in ten minutes."""
+    kv = gl.kv_bytes_per_token(_LLAMA_3B)
+    budget = 2 * GB                         # what the card had left beside the weights
+
+    def cost(tokens):
+        return gl.row_bytes(kv, _LLAMA_3B, tokens, 512)
+
+    long = [2000] * 18
+    end = gl.chunk_end(long, 0, 18, budget, cost)
+    assert 3 <= end <= 6, "a handful, not eighteen"
+    assert end * cost(2000) <= budget
+    short = [300] * 18
+    assert gl.chunk_end(short, 0, 18, budget, cost) == 18, "short ones still fill the count"
+
+
+def test_a_batch_is_sized_by_its_longest_member_and_is_never_empty():
+    def cost(tokens):
+        return tokens
+
+    lengths = [10, 10, 10, 100, 100, 5000]
+    assert gl.chunk_end(lengths, 0, 64, 300, cost) == 3      # a 4th would pad all to 100
+    assert gl.chunk_end(lengths, 3, 64, 300, cost) == 5
+    assert gl.chunk_end(lengths, 5, 64, 300, cost) == 6, "one that is over budget still goes"
+    assert gl.chunk_end(lengths, 0, 2, 300, cost) == 2, "the count still caps it"
+    assert gl.chunk_end(lengths, 0, 64, None, cost) == 6, "no budget: the count alone"
+
+
+def test_generate_fits_every_batch_to_the_memory_budget(tiny, monkeypatch):
+    gen = gl.LocalGenerator(str(tiny), device="cpu", batch_size=8, max_new_tokens=4)
+    convs = [Conversation(user="word " * n) for n in (2, 2, 2, 40, 40, 40)]
+    whole = gen.generate(convs, max_new_tokens=4)
+    sizes = []
+    real = gen.model.generate
+    monkeypatch.setattr(gen.model, "generate", lambda *a, **k: sizes.append(
+        tuple(k["input_ids"].shape)) or real(*a, **k))
+    longest = max(gen.count_tokens(c.messages()) for c in convs)
+    cost = gl.row_bytes(gen.plan.kv_per_token, gen.plan.facts.config, longest, 4)
+    gen._row_budget = 2 * cost              # room for two of the long ones
+    assert gen.generate(convs, max_new_tokens=4) == whole, "same replies, in order"
+    assert sum(n for n, _w in sizes) == 6
+    assert [n for n, w in sizes if w == max(w for _n, w in sizes)] == [2, 1], \
+        "the long ones went two at a time, then the one left"
+    assert gen.batch_size == 8, "the count is untouched: memory did the limiting"
+
+
+class _Card:
+    """torch.cuda's memory calls for one card, scripted."""
+
+    def __init__(self, monkeypatch, free, reserved, peak):
+        import torch
+
+        monkeypatch.setattr(torch.cuda, "mem_get_info", lambda card=0: (free, 6 * GB))
+        monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda card=0: None)
+        monkeypatch.setattr(torch.cuda, "memory_reserved", lambda card=0: reserved)
+        monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda card=0: peak)
+        monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+
+
+def test_a_batch_that_spilled_past_the_card_makes_the_next_ones_smaller(tiny, monkeypatch,
+                                                                         capsys):
+    """Windows lends the card system memory instead of failing, so there is
+    no out-of-memory error to halve on: the peak against what was free is
+    the only signal there is."""
+    assert gl.spilled(peak=9 * GB, free_before=2 * GB, reserved_before=3 * GB)
+    assert not gl.spilled(peak=4 * GB, free_before=2 * GB, reserved_before=3 * GB)
+
+    gen = gl.LocalGenerator(str(tiny), device="cpu", batch_size=0, max_new_tokens=4,
+                            verbose=True)
+    gen._card, gen._row_budget = 0, 4 * GB
+    _Card(monkeypatch, free=2 * GB, reserved=3 * GB, peak=9 * GB)
+    before = gen._memory_before()
+    assert before == (2 * GB, 3 * GB)
+    assert gen._after_batch(before, rows=18, size=18) == 9
+    assert gen._row_budget == 2 * GB
+    assert "borrowed system memory" in gen.reason and "at most 9" in capsys.readouterr().out
+    _Card(monkeypatch, free=2 * GB, reserved=3 * GB, peak=4 * GB)
+    assert gen._after_batch(gen._memory_before(), rows=9, size=9) == 9, "one that fit changes nothing"
+
+
+def test_a_batch_size_the_person_set_is_kept_and_they_are_told(tiny, monkeypatch):
+    gen = gl.LocalGenerator(str(tiny), device="cpu", batch_size=18, max_new_tokens=4)
+    gen._card = 0
+    _Card(monkeypatch, free=2 * GB, reserved=3 * GB, peak=9 * GB)
+    assert gen._after_batch(gen._memory_before(), rows=18, size=18) == 18
+    assert "a smaller batch size would be faster" in gen.reason
+
+
+def test_off_a_single_card_nothing_is_measured(tiny):
+    gen = gl.LocalGenerator(str(tiny), device="cpu", batch_size=2, max_new_tokens=4)
+    assert gen._card is None and gen._row_budget is None and gen._memory_before() is None
+    assert gen._after_batch(None, rows=2, size=2) == 2

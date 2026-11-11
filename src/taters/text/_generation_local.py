@@ -427,11 +427,51 @@ def batch_for(plan_free: int, weights: int, total: Optional[int], kv_per_token: 
     (its cache for prompt plus reply, and the prefill's largest activation)."""
     margin = max(_RESERVE_MIN, int(_RESERVE_SHARE * (total or plan_free)))
     budget = plan_free - weights - _CUDA_CONTEXT - margin
-    inter = int(config.get("intermediate_size") or 4 * int(config.get("hidden_size") or 1))
-    per_row = kv_per_token * (prompt_tokens + max_new_tokens) + prompt_tokens * 3 * inter * 2
+    per_row = row_bytes(kv_per_token, config, prompt_tokens, max_new_tokens)
     if budget <= 0 or per_row <= 0:
         return 1
     return max(1, min(cap, budget // per_row))
+
+
+def row_bytes(kv_per_token: int, config: Dict[str, Any], prompt_tokens: int,
+              reply_tokens: int) -> int:
+    """What one conversation costs beside the weights: its cache for the
+    prompt plus the reply, and the prefill's largest activation."""
+    inter = int(config.get("intermediate_size") or 4 * int(config.get("hidden_size") or 1))
+    return kv_per_token * (prompt_tokens + reply_tokens) + prompt_tokens * 3 * inter * 2
+
+
+def chunk_end(lengths: Sequence[int], start: int, cap: int, budget: Optional[int],
+              cost: Callable[[int], int]) -> int:
+    """
+    Where the batch that starts at ``start`` ends, for conversations sorted
+    shortest first (``lengths`` in tokens): as many as ``cap`` allows and as
+    fit ``budget`` bytes when every one is padded to the longest. Always at
+    least one. No budget (a CPU, a sharded model) means the count alone.
+
+    The count used to be the whole rule, sized once on a guess of 512
+    tokens a conversation. A real run sent 18 conversations of about 2,000
+    tokens to a 6 GB card that had room for 5; Windows lent the card system
+    memory instead of refusing, and the first batch was still running ten
+    minutes later.
+    """
+    end = start + 1
+    while end < len(lengths) and end - start < max(1, cap):
+        if budget is not None and (end - start + 1) * cost(lengths[end]) > budget:
+            break
+        end += 1
+    return end
+
+
+def spilled(peak: int, free_before: int, reserved_before: int) -> bool:
+    """
+    Whether a batch used more than the card had: its peak against what was
+    free beforehand plus what torch already held. On Linux that is an
+    out-of-memory error and never gets this far; on Windows the driver
+    lends the card system memory instead, nothing fails, and everything
+    runs many times slower.
+    """
+    return peak > free_before + reserved_before
 
 
 def plan_load(model: str, *, precision: str = "auto", device: str = "auto",
@@ -639,6 +679,9 @@ class LocalGenerator(Generator):
         if self.plan.refusal:
             raise ValueError(self.plan.refusal)
         facts = self.plan.facts
+        self._card: Optional[int] = None            # the one card we're on, when it's one
+        self._row_budget: Optional[int] = None      # bytes for a batch; None = count only
+        self._said_spill = False
         self.model_label = facts.label
         self.context_length = self.plan.context_length
         self.thinking = thinking
@@ -718,9 +761,16 @@ class LocalGenerator(Generator):
                                                 total, self.plan.kv_per_token, prompt_tokens,
                                                 min(int(max_new_tokens), _TYPICAL_REPLY),
                                                 facts.config)
+                    # what's left for conversations, in bytes: each batch is
+                    # fitted to this from its own lengths (see chunk_end)
+                    self._row_budget = int(free - max(_RESERVE_MIN,
+                                                      int(_RESERVE_SHARE * (total or free))))
+                if free is not None:
+                    self._card = card
                 self.plan.weights = allocated or self.plan.weights
             except Exception:
                 pass
+        self._asked_batch = int(batch_size or 0)
         self.batch_size = max(1, int(self.plan.batch))
         self.max_new_tokens = int(max_new_tokens)
 
@@ -856,14 +906,25 @@ class LocalGenerator(Generator):
         config = self._config(max_new_tokens, temperature, top_p)
         replies: List[Optional[str]] = [None] * len(ids)
 
+        lengths = [len(ids[i]) for i in order]
+        reply = min(int(max_new_tokens), _TYPICAL_REPLY)
+
+        def cost(tokens: int) -> int:
+            return row_bytes(self.plan.kv_per_token, self.plan.facts.config, tokens, reply)
+
         def run(size: int) -> None:
-            for start in range(0, len(order), size):
-                chunk = order[start:start + size]
+            start = 0
+            while start < len(order):
+                # sized again for every batch: by the count, and by what these
+                # conversations (padded to the longest of them) take in memory
+                end = chunk_end(lengths, start, size, self._row_budget, cost)
+                chunk = order[start:end]
                 batch = self.tokenizer.pad({"input_ids": [ids[i] for i in chunk]},
                                            padding_side="left", return_tensors="pt")
                 batch = {k: v.to(self.model.device) for k, v in batch.items()}
                 if sampled:
                     torch.manual_seed(int(seed) + start)
+                before = self._memory_before()
                 with torch.inference_mode():
                     out = self.model.generate(**batch, generation_config=config,
                                               **self._exactly_as_given)
@@ -871,12 +932,69 @@ class LocalGenerator(Generator):
                 texts = self.tokenizer.batch_decode(out[:, width:], skip_special_tokens=True)
                 for i, text in zip(chunk, texts):
                     replies[i] = text.strip()
+                size = self._after_batch(before, len(chunk), size)
+                start = end
             # this size got through, so it's the size from now on; before
             # this every call paid the out-of-memory and the halving again
             self.batch_size = size
 
         run_with_oom_fallback(run, self.batch_size, verbose=self.verbose, what="a batch")
         return replies
+
+    def _memory_before(self) -> Optional[Tuple[int, int]]:
+        """Free memory on the card and what torch holds, before a batch;
+        the peak counter starts over. None when we're not on one card."""
+        if self._card is None:
+            return None
+        try:
+            import torch
+
+            free, _total = torch.cuda.mem_get_info(self._card)
+            torch.cuda.reset_peak_memory_stats(self._card)
+            return int(free), int(torch.cuda.memory_reserved(self._card))
+        except Exception:
+            return None
+
+    def _after_batch(self, before: Optional[Tuple[int, int]], rows: int, size: int) -> int:
+        """
+        The batch size to go on with. A batch that used more than the card
+        had (see :func:`spilled`) raised no error, so nothing else would
+        ever make the next one smaller: the memory budget and the count are
+        both halved here. A batch size the person set is theirs, so it is
+        kept and they are told a smaller one would be faster.
+        """
+        if before is None:
+            return size
+        try:
+            import torch
+
+            peak = int(torch.cuda.max_memory_allocated(self._card))
+        except Exception:
+            return size
+        if not spilled(peak, *before):
+            return size
+        over = (peak - sum(before)) / GB
+        if self._asked_batch:
+            said = (f"a batch of {rows} used {over:.1f} GB more than the GPU had free, so "
+                    f"it ran in borrowed system memory, which is many times slower; a "
+                    f"smaller batch size would be faster")
+        else:
+            if self._row_budget is not None:
+                self._row_budget = max(1, self._row_budget // 2)
+            size = max(1, min(size, rows) // 2)
+            said = (f"a batch of {rows} used {over:.1f} GB more than the GPU had free (it "
+                    f"ran in borrowed system memory, which is many times slower), so "
+                    f"batches are smaller from here: at most {size}")
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+        if not self._said_spill:
+            self._said_spill = True
+            self.reason = "; ".join(x for x in (self.reason, said) if x)
+        if self.verbose:
+            print(f"[llm] {said}")
+        return size
 
     def close(self) -> None:
         try:
