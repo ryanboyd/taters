@@ -98,6 +98,32 @@ def test_a_freeze_running_to_the_end_is_closed_at_the_duration():
     assert parse_freeze_spans(text) == [], "no duration means no invented end"
 
 
+def test_a_freeze_that_never_says_it_ended_stops_where_the_next_one_starts():
+    """
+    What ffmpeg 8 really wrote for white | black | testsrc | gray | bars (the
+    day GitHub's runners moved to it): the gray freeze at 6 has no end, the
+    bars' freeze starts at 8. Matching starts to ends by position ran the gray
+    one on to 10 and counted the last two seconds twice: 10 frozen seconds
+    out of 10, where there were 8.
+    """
+    text = ("lavfi.freezedetect.freeze_start: 0\n"
+            "lavfi.freezedetect.freeze_duration: 2\n"
+            "lavfi.freezedetect.freeze_end: 2\n"
+            "lavfi.freezedetect.freeze_start: 2\n"
+            "lavfi.freezedetect.freeze_duration: 2\n"
+            "lavfi.freezedetect.freeze_end: 4\n"
+            "lavfi.freezedetect.freeze_start: 6\n"
+            "lavfi.freezedetect.freeze_start: 8\n")
+    spans = parse_freeze_spans(text, duration=10.0)
+    assert spans == [(0.0, 2.0, 2.0), (2.0, 4.0, 2.0), (6.0, 8.0, 2.0), (8.0, 10.0, 2.0)]
+    assert sum(d for _s, _e, d in spans) == 8.0
+    assert parse_freeze_spans(text) == spans[:3], "no duration: the last one is not invented"
+
+
+def test_an_end_with_no_start_before_it_is_ignored():
+    assert parse_freeze_spans("lavfi.freezedetect.freeze_end: 3\n", duration=10.0) == []
+
+
 def test_nothing_detected_is_an_empty_list_not_an_error():
     for fn in (parse_scene_scores, parse_black_spans, parse_freeze_spans):
         assert fn("") == []

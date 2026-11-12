@@ -96,19 +96,35 @@ def parse_freeze_spans(text: str, *, duration: Optional[float] = None) -> List[S
     A freeze that runs to the end of the file gets a start and never an end, so
     it is closed at ``duration`` when we know it and dropped when we do not --
     inventing an end would put a made-up number in a results table.
+
+    The lines are read in the order they were written. ffmpeg 8 can announce
+    the next freeze without ever ending the one before it (one still picture
+    cut straight to another), and matching the first start with the first
+    end, the second with the second, then ran that freeze on to the end of
+    the file: the seconds after it were counted twice, and a video frozen
+    for 8 of its 10 seconds was reported as frozen for all of it. A freeze
+    with no end of its own stops where the next one starts.
     """
-    starts = [float(x) for x in _FREEZE_START_RE.findall(text)]
-    ends = [float(x) for x in _FREEZE_END_RE.findall(text)]
+    events = sorted(
+        [(m.start(), "start", float(m.group(1))) for m in _FREEZE_START_RE.finditer(text)]
+        + [(m.start(), "end", float(m.group(1))) for m in _FREEZE_END_RE.finditer(text)])
 
     spans: List[Span] = []
-    for i, start in enumerate(starts):
-        if i < len(ends):
-            end = ends[i]
-        elif duration is not None and duration > start:
-            end = duration
-        else:
-            continue
-        spans.append((start, end, max(0.0, end - start)))
+    open_at: Optional[float] = None
+
+    def close(end: float) -> None:
+        if open_at is not None and end > open_at:
+            spans.append((open_at, end, end - open_at))
+
+    for _where, kind, when in events:
+        if kind == "start":
+            close(when)             # the one before it never said it ended
+            open_at = when
+        elif open_at is not None:
+            close(when)
+            open_at = None
+    if open_at is not None and duration is not None:
+        close(duration)
     return spans
 
 
